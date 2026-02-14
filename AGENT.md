@@ -1,18 +1,17 @@
-# Agent Instructions for Nixbox Development
+# Agent Instructions for Cairn Development
 
-This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn agents themselves!) working on the Nixbox/Cairn codebase.
+This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn agents themselves!) working on the Cairn codebase.
 
 ## Project Overview
 
-**Nixbox** is a modular devenv.sh plugin that provides agentic development environments through **Cairn** - an orchestration system for AI code agents.
+**Cairn** is an orchestration system for AI code agents that provides isolated workspace overlays, sandboxed execution, and explicit human control over integration.
 
 ### Key Components
 
-1. **Nix Modules** (`modules/`) - devenv.sh integration
-2. **agentfs-pydantic** (`agentfs-pydantic/`) - Type-safe Python library for AgentFS
-3. **Cairn Orchestrator** (`cairn/`) - Agent spawning, execution, and management
-4. **Neovim Plugin** (`cairn/nvim/`) - UI for reviewing and accepting agent changes
-5. **Documentation** - README, CONCEPT, SPEC, SKILL guides
+1. **Cairn Orchestrator** (`src/cairn/`) - Agent spawning, execution, and management
+2. **Neovim Plugin** (`src/cairn/nvim/`) - UI for reviewing and accepting agent changes
+3. **Nix Modules** (`modules/`) - devenv.sh integration (optional)
+4. **Documentation** - README, CONCEPT, SPEC, TESTING guides
 
 ### Technology Stack
 
@@ -51,47 +50,36 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 ## Codebase Structure
 
 ```
-nixbox/
-├── modules/                  # Nix modules
-│   ├── agentfs.nix          # AgentFS process management
-│   └── cairn.nix            # Cairn orchestrator integration
-│
-├── agentfs-pydantic/        # Standalone Python library
-│   ├── src/agentfs_pydantic/
-│   │   ├── models.py        # Pydantic models
-│   │   ├── view.py          # Query interface
-│   │   └── cli/             # Optional CLI tools
-│   ├── tests/
-│   └── pyproject.toml
-│
-├── cairn/                   # Orchestrator
+cairn/
+├── src/cairn/               # Main orchestrator library
 │   ├── orchestrator.py      # Main process
+│   ├── agent.py             # Agent state models
 │   ├── queue.py             # Task queue
-│   ├── gc.py                # Garbage collection
-│   ├── jj.py                # Jujutsu integration
-│   ├── llm_provider.py      # LLM interface (using llm library)
-│   ├── nvim/                # Neovim plugin
-│   │   ├── plugin/cairn.lua
-│   │   └── lua/cairn/
-│   │       ├── watcher.lua
-│   │       ├── tmux.lua
-│   │       ├── ghost.lua
-│   │       └── preview.lua
-│   └── tmux/
-│       └── .tmuxp.yaml      # Default layout
+│   ├── executor.py          # Monty sandbox executor
+│   ├── code_generator.py    # LLM-based code generation
+│   ├── external_functions.py # Functions exposed to agents
+│   ├── lifecycle.py         # Lifecycle storage
+│   ├── workspace.py         # Preview materialization
+│   ├── cli.py               # Command-line interface
+│   ├── commands.py          # Command models
+│   ├── settings.py          # Configuration
+│   ├── signals.py           # Signal file handling
+│   ├── watcher.py           # File system watching
+│   └── nvim/                # Neovim plugin
+│       ├── plugin/cairn.lua
+│       ├── lua/cairn/
+│       │   ├── init.lua
+│       │   ├── commands.lua
+│       │   ├── config.lua
+│       │   ├── watcher.lua
+│       │   ├── tmux.lua
+│       │   └── ghost.lua
+│       ├── doc/cairn.txt
+│       └── tests/
 │
-├── examples/                # Reference implementations
-│   └── cairn-workspace/
-│
-├── docs/                    # Documentation
-│   ├── skills/
-│   │   ├── SKILL-AGENTFS.md
-│   │   ├── SKILL-MONTY.md
-│   │   ├── SKILL-TMUX.md
-│   │   ├── SKILL-NEOVIM.md
-│   │   ├── SKILL-JJ.md
-│   │   └── SKILL-DEVENV.md
-│   └── examples/
+├── modules/                 # Nix modules (optional)
+│   ├── agentfs.nix
+│   └── cairn.nix
 │
 ├── tests/                   # Test suite
 │   ├── unit/
@@ -99,13 +87,12 @@ nixbox/
 │   └── e2e/
 │
 ├── .context/                # Historical context (archived)
-│   ├── cairn/              # Original chimera MVP
-│   └── ...
 │
 ├── README.md
 ├── CONCEPT.md
 ├── SPEC.md
 ├── AGENT.md                 # This file
+├── TESTING.md
 ├── devenv.nix
 └── pyproject.toml
 ```
@@ -143,36 +130,33 @@ nixbox/
 ```bash
 # 1. Clone repository
 git clone <repo-url>
-cd nixbox
+cd cairn
 
-# 2. Enter devenv shell
+# 2. Enter devenv shell (if using Nix)
 devenv shell
 
 # 3. Install Python dependencies
-cd agentfs-pydantic
 uv sync
 
 # 4. Run tests
-uv run pytest
+pytest
 ```
 
 ### Running Tests
 
 ```bash
-# Python tests
-cd agentfs-pydantic
-uv run pytest
+# All tests (see TESTING.md for details)
+test
 
-# Neovim plugin tests (if available)
-nvim --headless -c "PlenaryBustedDirectory cairn/nvim/tests/"
+# Specific test categories
+test-unit         # Unit tests only
+test-integration  # Integration tests
+test-performance  # Performance benchmarks
+test-cov          # Full coverage report
 
-# Integration tests
-cd tests/integration
-uv run pytest
-
-# E2E tests
-cd tests/e2e
-./run_tests.sh
+# Neovim plugin tests
+cd src/cairn/nvim/tests
+nvim --headless -c "PlenaryBustedDirectory ."
 ```
 
 ### Code Style
@@ -539,7 +523,6 @@ Before releasing:
 - [ ] CHANGELOG.md updated
 - [ ] Version bumped in pyproject.toml
 - [ ] Tagged in git/jj
-- [ ] Published to PyPI (agentfs-pydantic only)
 
 ## Getting Help
 
@@ -624,7 +607,7 @@ Fixed a bug in the orchestrator.
 ### Development
 
 ```bash
-# Enter devenv
+# Enter devenv (if using Nix)
 devenv shell
 
 # Run orchestrator
@@ -635,9 +618,6 @@ CAIRN_LOG_LEVEL=debug cairn up
 
 # Check AgentFS status
 agentfs-info
-
-# Query files
-uv run agentfs-pydantic query "*.py"
 ```
 
 ### Testing

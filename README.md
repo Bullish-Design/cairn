@@ -1,6 +1,6 @@
-# Nixbox
+# Cairn
 
-Nixbox is a modular devenv.sh plugin that provides the Cairn agent workspace runtime.
+Cairn is an orchestration system for AI code agents with isolated workspace overlays and explicit human control.
 
 ## Read this first (canonical docs)
 
@@ -18,8 +18,8 @@ If a topic appears in multiple places, `CONCEPT.md` and `SPEC.md` are authoritat
 { inputs, ... }:
 {
   imports = [
-    ./nixbox/modules/agentfs.nix
-    ./nixbox/modules/cairn.nix
+    ./modules/agentfs.nix
+    ./modules/cairn.nix
   ];
 }
 ```
@@ -62,11 +62,11 @@ cairn reject agent-<id>
 
 ## Neovim plugin quick setup
 
-Point your plugin manager to `nixbox/cairn/nvim`.
+Point your plugin manager to `src/cairn/nvim`.
 
 ```lua
 {
-  dir = '~/path/to/nixbox/cairn/nvim',
+  dir = '~/path/to/cairn/src/cairn/nvim',
   config = function()
     require('cairn').setup({
       preview_same_location = true,
