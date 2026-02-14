@@ -1,0 +1,130 @@
+*cairn.txt*  Cairn Neovim integration
+
+Cairn provides editor commands for queueing tasks, previewing agent work in TMUX,
+and signaling accept/reject decisions via files in |cairn-config-cairn_home|.
+
+==============================================================================
+CONTENTS                                                    *cairn-contents*
+
+1. Commands.........................|cairn-commands|
+2. Keybindings......................|cairn-keymaps|
+3. Configuration....................|cairn-config|
+4. TMUX preview workflow............|cairn-tmux-workflow|
+5. Troubleshooting..................|cairn-troubleshooting|
+
+==============================================================================
+COMMANDS                                                    *cairn-commands*
+
+:CairnQueue[!] {task}                                     *:CairnQueue*
+	Queue a task by appending to:
+	{cairn_home}/queue/tasks.json
+	With |:CairnQueue!| priority is HIGH; otherwise NORMAL.
+
+:CairnAccept                                               *:CairnAccept*
+	Signal acceptance for the selected/latest agent by writing:
+	{cairn_home}/signals/accept-{agent_id}
+
+:CairnReject                                               *:CairnReject*
+	Signal rejection for the selected/latest agent by writing:
+	{cairn_home}/signals/reject-{agent_id}
+
+:CairnPreview                                              *:CairnPreview*
+	Open (or reuse) the TMUX preview pane titled "cairn-preview" and launch
+	Neovim in the selected agent workspace.
+
+:CairnListTasks                                            *:CairnListTasks*
+	Show queued tasks from {cairn_home}/queue/tasks.json.
+
+:CairnListAgents                                           *:CairnListAgents*
+	Show active agents from {cairn_home}/state/active_agents.json.
+
+:CairnSelectAgent {agent_id}                              *:CairnSelectAgent*
+	Set selected agent in:
+	{cairn_home}/state/latest_agent
+
+==============================================================================
+KEYBINDINGS                                                  *cairn-keymaps*
+
+Default keymaps (set in |cairn-config-keymaps|):
+
+<leader>a                                      *cairn-keymap-accept*
+	Call |:CairnAccept|.
+
+<leader>r                                      *cairn-keymap-reject*
+	Call |:CairnReject|.
+
+<leader>p                                      *cairn-keymap-preview*
+	Call |:CairnPreview|.
+
+==============================================================================
+CONFIGURATION                                                  *cairn-config*
+
+Call setup in your config:
+>
+  require('cairn').setup({
+    cairn_home = vim.fn.expand('~/.cairn'),
+    preview_same_location = true,
+    auto_reload = false,
+    ghost_text = true,
+    keymaps = {
+      accept = '<leader>a',
+      reject = '<leader>r',
+      preview = '<leader>p',
+    },
+  })
+<
+
+Fields:
+
+cairn_home                                       *cairn-config-cairn_home*
+	Root directory for queue/state/signal/workspace files.
+
+preview_same_location                 *cairn-config-preview_same_location*
+	When true, |:CairnPreview| opens the same file and line in the preview
+	workspace if that path exists.
+
+auto_reload                                     *cairn-config-auto_reload*
+	Reserved for automatic refresh workflows. Default: false.
+
+ghost_text                                       *cairn-config-ghost_text*
+	Enable REVIEWING-state ghost text overlays driven by watcher events.
+
+keymaps                                             *cairn-config-keymaps*
+	Map of action -> lhs. Set individual entries to false to disable that
+	default mapping.
+
+==============================================================================
+TMUX PREVIEW WORKFLOW                                   *cairn-tmux-workflow*
+
+1. Ensure you're inside TMUX.
+2. Queue/select an agent (|:CairnQueue|, |:CairnListAgents|,
+   |:CairnSelectAgent|).
+3. Run |:CairnPreview|:
+   - If pane title "cairn-preview" exists, Cairn reuses it and sends a new
+     Neovim launch command.
+   - Otherwise Cairn creates a horizontal split, titles it "cairn-preview",
+     and opens Neovim in {cairn_home}/workspaces/{agent_id}.
+4. If |cairn-config-preview_same_location| is true and the current file exists
+   in the agent workspace, preview opens at the same line.
+
+==============================================================================
+TROUBLESHOOTING                                         *cairn-troubleshooting*
+
+"No agent to preview" / "No agent to accept" / "No agent to reject"
+	No selected/latest agent exists in:
+	{cairn_home}/state/latest_agent.
+	Use |:CairnSelectAgent| after checking |:CairnListAgents|.
+
+"Workspace not materialized yet"
+	The directory {cairn_home}/workspaces/{agent_id} is missing.
+	Wait for orchestrator materialization before previewing.
+
+"TMUX session not detected"
+	Cairn preview requires TMUX (non-empty $TMUX). Start or attach to TMUX,
+	then run |:CairnPreview| again.
+
+Preview pane opens wrong path
+	If the current file does not exist in the agent workspace, Cairn falls back
+	to opening the workspace root. This is expected.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
