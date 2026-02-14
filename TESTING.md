@@ -2,22 +2,22 @@
 
 ## Running Tests from Repository Root
 
-The nixbox repository is configured as a UV workspace with agentfs-pydantic as a member package. You can run all tests from the root directory.
+The Cairn repository provides comprehensive test coverage for the orchestrator, workspace, and Neovim plugin components.
 
 ### Quick Start
 
 ```bash
 # Run all tests
-uv run pytest
+pytest
 
 # Run unit tests only
-uv run pytest agentfs-pydantic/tests/test_models.py
+pytest tests/cairn/test_agent.py tests/cairn/test_queue.py
 
 # Run with coverage
-uv run pytest --cov=agentfs-pydantic/src/agentfs_pydantic --cov-report=term-missing
+pytest --cov=src/cairn --cov-report=term-missing
 
 # Run fast tests (skip slow & benchmarks)
-uv run pytest -m "not slow and not benchmark"
+pytest -m "not slow and not benchmark"
 ```
 
 ### Test Scripts (in devenv shell)
@@ -54,28 +54,28 @@ test-fast
 
 Tests are organized into several categories:
 
-1. **Unit Tests** (`test_models.py`)
-   - Pydantic model validation
-   - Edge cases and serialization
-   - 100% coverage target
+1. **Unit Tests** (`tests/cairn/test_*.py`)
+   - Agent state models and lifecycle
+   - Queue operations and priority handling
+   - Command parsing and validation
+   - 100% coverage target for core modules
 
-2. **Integration Tests** (`test_integration.py`)
-   - Real AgentFS SDK integration
-   - Overlay semantics validation
-   - KV store operations
-   - View query system
+2. **Integration Tests** (`tests/cairn/test_orchestrator.py`, etc.)
+   - Full orchestrator lifecycle
+   - Workspace materialization
+   - Signal file processing
+   - AgentFS overlay integration
 
-3. **Performance Tests** (`test_performance.py`)
-   - File operation benchmarks
-   - Query performance validation
-   - Large file handling
+3. **Performance Tests**
+   - Agent spawn time (<1s target)
+   - Preview materialization (<100ms target)
+   - File sync operations (<10ms target)
    - Marked with `@pytest.mark.benchmark`
 
-4. **Property-Based Tests** (`test_property_based.py`)
-   - Hypothesis-based testing
-   - Overlay isolation invariants
-   - Roundtrip properties
-   - Marked with `@pytest.mark.slow`
+4. **E2E Tests** (`tests/cairn/test_e2e_smoke.py`)
+   - Full spawn → reviewing → accept/reject workflow
+   - Real AgentFS database operations
+   - Command dispatch and state transitions
 
 ### Test Markers
 
@@ -83,13 +83,13 @@ Tests can be filtered by markers:
 
 ```bash
 # Run only benchmark tests
-uv run pytest -m benchmark
+pytest -m benchmark
 
 # Skip slow tests
-uv run pytest -m "not slow"
+pytest -m "not slow"
 
 # Run only integration tests
-uv run pytest agentfs-pydantic/tests/test_integration.py
+pytest tests/cairn/test_integration.py
 ```
 
 ### Coverage Reports
@@ -104,9 +104,8 @@ Coverage reports are generated in multiple formats:
 
 Test configuration is defined in:
 
-- `pyproject.toml` - Workspace-level pytest configuration
-- `agentfs-pydantic/pytest.ini` - Package-level configuration
-- `devenv.nix` - Test scripts for devenv shell
+- `pyproject.toml` - pytest configuration
+- `devenv.nix` - Test scripts for devenv shell (if using Nix)
 
 ### Troubleshooting
 
@@ -117,8 +116,8 @@ uv sync --all-extras
 
 **Module not found**: Ensure you're in the repository root
 ```bash
-cd /path/to/nixbox
-uv run pytest
+cd /path/to/cairn
+pytest
 ```
 
 **Permission errors**: Some tests create temporary files
@@ -133,11 +132,11 @@ For continuous integration, use:
 
 ```bash
 # Install dependencies
-uv sync --all-extras
+uv sync
 
 # Run full test suite with coverage
-uv run pytest \
-  --cov=agentfs-pydantic/src/agentfs_pydantic \
+pytest \
+  --cov=src/cairn \
   --cov-report=xml \
   --cov-report=term-missing \
   --junitxml=junit.xml
@@ -194,27 +193,27 @@ Run these commands from the repository root to validate the Stage 4 Neovim plugi
 
 ```bash
 # 1) Make sure plugin docs help tags can be generated
-nvim --headless -u NONE -c "helptags cairn/nvim/doc" -c "qa"
+nvim --headless -u NONE -c "helptags src/cairn/nvim/doc" -c "qa"
 
 # 2) Run full Stage 4 contract suite (requires plenary.nvim on runtimepath)
 PLENARY_PATH=/path/to/plenary.nvim \
-  nvim --headless -u cairn/nvim/tests/minimal_init.lua \
+  nvim --headless -u src/cairn/nvim/tests/minimal_init.lua \
   -c "set rtp+=$PLENARY_PATH" \
-  -c "PlenaryBustedDirectory cairn/nvim/tests { minimal_init = 'cairn/nvim/tests/minimal_init.lua' }" \
+  -c "PlenaryBustedDirectory src/cairn/nvim/tests { minimal_init = 'src/cairn/nvim/tests/minimal_init.lua' }" \
   -c "qa"
 
 # 3) Optional: run focused specs while iterating
 PLENARY_PATH=/path/to/plenary.nvim \
-  nvim --headless -u cairn/nvim/tests/minimal_init.lua \
+  nvim --headless -u src/cairn/nvim/tests/minimal_init.lua \
   -c "set rtp+=$PLENARY_PATH" \
-  -c "PlenaryBustedFile cairn/nvim/tests/commands_spec.lua { minimal_init = 'cairn/nvim/tests/minimal_init.lua' }" \
-  -c "PlenaryBustedFile cairn/nvim/tests/config_spec.lua { minimal_init = 'cairn/nvim/tests/minimal_init.lua' }" \
-  -c "PlenaryBustedFile cairn/nvim/tests/tmux_spec.lua { minimal_init = 'cairn/nvim/tests/minimal_init.lua' }" \
-  -c "PlenaryBustedFile cairn/nvim/tests/ghost_spec.lua { minimal_init = 'cairn/nvim/tests/minimal_init.lua' }" \
-  -c "PlenaryBustedFile cairn/nvim/tests/watcher_spec.lua { minimal_init = 'cairn/nvim/tests/minimal_init.lua' }" \
+  -c "PlenaryBustedFile src/cairn/nvim/tests/commands_spec.lua { minimal_init = 'src/cairn/nvim/tests/minimal_init.lua' }" \
+  -c "PlenaryBustedFile src/cairn/nvim/tests/config_spec.lua { minimal_init = 'src/cairn/nvim/tests/minimal_init.lua' }" \
+  -c "PlenaryBustedFile src/cairn/nvim/tests/tmux_spec.lua { minimal_init = 'src/cairn/nvim/tests/minimal_init.lua' }" \
+  -c "PlenaryBustedFile src/cairn/nvim/tests/ghost_spec.lua { minimal_init = 'src/cairn/nvim/tests/minimal_init.lua' }" \
+  -c "PlenaryBustedFile src/cairn/nvim/tests/watcher_spec.lua { minimal_init = 'src/cairn/nvim/tests/minimal_init.lua' }" \
   -c "qa"
 ```
 
 Expected outcome:
-- Help tags generate cleanly for `cairn/nvim/doc/cairn.txt`.
+- Help tags generate cleanly for `src/cairn/nvim/doc/cairn.txt`.
 - Stage 4 specs pass for command registration, config/keymaps, tmux preview behavior, ghost text rendering, and watcher parsing/review detection.

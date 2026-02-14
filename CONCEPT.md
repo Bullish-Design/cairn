@@ -1,6 +1,6 @@
 # Cairn Concept
 
-Cairn is the philosophy layer for Nixbox: **humans and agents work in parallel, and humans stay in control of integration**.
+Cairn is an orchestration system for AI code agents: **humans and agents work in parallel, and humans stay in control of integration**.
 
 ## Canonical scope of this document
 
