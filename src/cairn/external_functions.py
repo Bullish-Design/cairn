@@ -9,7 +9,8 @@ from typing import Any, Protocol
 
 from agentfs_sdk import AgentFS
 
-from cairn.kv_store import KVRepository
+from fsdantic import FileOperations, TypedKVRepository, View, ViewQuery
+from cairn.kv_models import SUBMISSION_KEY, SubmissionRecord
 from cairn.external_models import (
     AskLlmRequest,
     FileExistsRequest,
@@ -167,122 +168,93 @@ class CairnExternalFunctions:
         self.stable_fs = stable_fs
         self.llm_provider = llm_provider
 
+        # Use fsdantic FileOperations for automatic overlay fallthrough
+        self.file_ops = FileOperations(agent_fs, base_fs=stable_fs)
+
     async def read_file(self, path: str) -> str:
         """Read file from agent overlay (falls through to stable)."""
         request = ReadFileRequest(path=path)
 
-        try:
-            # Try to read from agent overlay first
-            content = await self.agent_fs.fs.read_file(request.path)
-        except FileNotFoundError:
-            # Fall through to stable
-            content = await self.stable_fs.fs.read_file(request.path)
-
-        response = ReadFileResponse(content=content.decode("utf-8"))
+        # Use FileOperations which automatically handles overlay fallthrough
+        content = await self.file_ops.read_file(request.path)
+        response = ReadFileResponse(content=content)
         return response.content
 
     async def write_file(self, path: str, content: str) -> bool:
         """Write file to agent overlay only."""
         request = WriteFileRequest(path=path, content=content)
 
-        # Write to agent overlay only
-        await self.agent_fs.fs.write_file(request.path, request.content.encode("utf-8"))
+        # Use FileOperations for automatic encoding handling
+        await self.file_ops.write_file(request.path, request.content)
         return True
 
     async def list_dir(self, path: str) -> list[str]:
         """List directory contents."""
         request = ListDirRequest(path=path)
 
-        # List from agent overlay (which includes stable via fallthrough)
-        entries = await self.agent_fs.fs.readdir(request.path)
-        return [entry.name for entry in entries]
+        # Use FileOperations for consistent API
+        entries = await self.file_ops.list_dir(request.path)
+        return [entry.path.split("/")[-1] for entry in entries]
 
     async def file_exists(self, path: str) -> bool:
         """Check if file exists."""
         request = FileExistsRequest(path=path)
 
-        try:
-            await self.agent_fs.fs.stat(request.path)
-            return True
-        except FileNotFoundError:
-            return False
+        # Use FileOperations which checks both overlay and base
+        return await self.file_ops.file_exists(request.path)
 
     async def search_files(self, pattern: str) -> list[str]:
         """Find files matching glob pattern.
 
-        This uses a temporary materialized workspace to run glob search.
+        Uses fsdantic's View for powerful glob pattern matching.
         """
         request = SearchFilesRequest(pattern=pattern)
 
-        # For now, we'll walk the directory tree in AgentFS
-        # In production, this should use materialized workspace
-        results = []
+        # Use View for glob search with proper ** support
+        view = View(
+            agent=self.agent_fs,
+            query=ViewQuery(
+                path_pattern=request.pattern,
+                recursive=True,
+                include_stats=False,
+                include_content=False,
+            ),
+        )
 
-        async def walk_dir(dir_path: str = "/") -> None:
-            try:
-                entries = await self.agent_fs.fs.readdir(dir_path)
-                for entry in entries:
-                    full_path = f"{dir_path}/{entry.name}".lstrip("/")
-
-                    if entry.type == "directory":
-                        await walk_dir(full_path)
-                    else:
-                        # Simple glob matching (just * for now)
-                        if self._match_pattern(full_path, request.pattern):
-                            results.append(full_path)
-            except FileNotFoundError:
-                pass
-
-        await walk_dir()
-        return results
-
-    def _match_pattern(self, path: str, pattern: str) -> bool:
-        """Simple glob pattern matching.
-
-        Args:
-            path: File path to match
-            pattern: Glob pattern (supports * and **)
-
-        Returns:
-            True if path matches pattern
-        """
-        import fnmatch
-
-        return fnmatch.fnmatch(path, pattern)
+        files = await view.load()
+        return [f.path for f in files]
 
     async def search_content(self, pattern: str, path: str = ".") -> list[dict[str, Any]]:
-        """Search file contents using ripgrep (if available) or basic search."""
+        """Search file contents using regex pattern.
+
+        Uses fsdantic's View for efficient content search.
+        """
         request = SearchContentRequest(pattern=pattern, path=path)
 
-        # For MVP, we'll do basic search within AgentFS
-        # In production, this should use ripgrep on materialized workspace
+        # Use View for regex content search
+        view = View(
+            agent=self.agent_fs,
+            query=ViewQuery(
+                path_pattern="**/*",  # Search all files
+                content_regex=request.pattern,
+                recursive=True,
+                include_stats=False,
+                include_content=True,
+            ),
+        )
+
+        # Use search_content method which returns SearchMatch objects
+        matches = await view.search_content()
+
+        # Convert to the expected format
         results = []
-
-        async def search_in_file(file_path: str) -> None:
-            try:
-                content = await self.read_file(file_path)
-                lines = content.split("\n")
-
-                import re
-
-                regex = re.compile(request.pattern)
-
-                for line_num, line in enumerate(lines, start=1):
-                    if regex.search(line):
-                        match = SearchContentMatch(
-                            file=file_path,
-                            line=line_num,
-                            text=line.strip(),
-                        )
-                        results.append(match.model_dump())
-            except Exception:
-                # Ignore errors (binary files, etc.)
-                pass
-
-        # Get all files
-        files = await self.search_files("*")
-        for file_path in files:
-            await search_in_file(file_path)
+        for match in matches:
+            search_match = SearchContentMatch(
+                file=match.path,
+                line=match.line_number,
+                text=match.line_text,
+            )
+            results.append(search_match.model_dump())
 
         return results
 
@@ -306,8 +278,9 @@ class CairnExternalFunctions:
         )
 
         # Store in agent's KV store using typed adapter format.
-        submission_repo = KVRepository(self.agent_fs)
-        await submission_repo.save_submission(self.agent_id, submission.model_dump())
+        submission_record = SubmissionRecord(agent_id=self.agent_id, submission=submission.model_dump())
+        submission_repo = TypedKVRepository[SubmissionRecord](self.agent_fs, prefix="")
+        await submission_repo.save(SUBMISSION_KEY, submission_record)
         return True
 
     async def log(self, message: str) -> bool:

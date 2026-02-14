@@ -8,7 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "Bullish Design" }]
 dependencies = [
     "agentfs-sdk>=0.6.0",
-    "agentfs-pydantic",
+    "fsdantic",
     "pydantic-monty>=0.0.4",
     "llm>=0.13.0",
     "watchfiles>=0.20.0",
@@ -34,7 +34,7 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["agentfs-pydantic/tests", "tests"]
+testpaths = ["fsdantic/tests", "tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
@@ -50,11 +50,11 @@ pythonpath = ["."]
 
 [tool.uv.workspace]
 members = [
-    "agentfs-pydantic",
+    "fsdantic",
 ]
 
 [tool.uv.sources]
-agentfs-pydantic = { workspace = true }
+fsdantic = { workspace = true }
 
 [tool.uv]
 prerelease = "allow"

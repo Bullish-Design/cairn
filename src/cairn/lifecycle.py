@@ -16,10 +16,10 @@ import time
 from pathlib import Path
 
 from agentfs_sdk import AgentFS
+from fsdantic import TypedKVRepository
 
 from cairn.agent import AgentState
-from cairn.kv_models import LifecycleRecord
-from cairn.kv_store import KVRepository
+from cairn.kv_models import AGENT_KEY_PREFIX, LifecycleRecord
 
 
 class LifecycleStore:
@@ -27,10 +27,12 @@ class LifecycleStore:
 
     This is the single source of truth for agent state. All lifecycle
     transitions, completions, and cleanup operations go through this store.
+
+    Uses fsdantic's TypedKVRepository for type-safe, automatic JSON handling.
     """
 
     def __init__(self, storage: AgentFS):
-        self.repo = KVRepository(storage)
+        self.repo = TypedKVRepository[LifecycleRecord](storage, prefix=AGENT_KEY_PREFIX)
 
     async def save(self, record: LifecycleRecord) -> None:
         """Save or update an agent lifecycle record.
@@ -38,19 +40,19 @@ class LifecycleStore:
         This is the canonical write operation for agent state.
         All state transitions must call this method.
         """
-        await self.repo.save_lifecycle(record)
+        await self.repo.save(record.agent_id, record)
 
     async def load(self, agent_id: str) -> LifecycleRecord | None:
         """Load an agent lifecycle record by ID."""
-        return await self.repo.load_lifecycle(agent_id)
+        return await self.repo.load(agent_id, LifecycleRecord)
 
     async def delete(self, agent_id: str) -> None:
         """Delete an agent lifecycle record."""
-        await self.repo.delete_lifecycle(agent_id)
+        await self.repo.delete(agent_id)
 
     async def list_all(self) -> list[LifecycleRecord]:
         """List all agent lifecycle records."""
-        return await self.repo.list_lifecycle()
+        return await self.repo.list_all(LifecycleRecord)
 
     async def list_active(self) -> list[LifecycleRecord]:
         """List only active (non-terminal) agent records."""
