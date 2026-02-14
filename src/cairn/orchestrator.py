@@ -10,8 +10,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from agentfs_pydantic import AgentFSOptions
 from agentfs_sdk import AgentFS
+from fsdantic import AgentFSOptions, MergeStrategy, OverlayOperations
 
 from cairn.agent import AgentContext, AgentState
 from cairn.commands import (
@@ -29,7 +29,8 @@ from cairn.executor import AgentExecutor
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.external_functions import create_external_functions
 from cairn.kv_models import LifecycleRecord
-from cairn.kv_store import KVRepository
+from fsdantic import TypedKVRepository
+from cairn.kv_models import SUBMISSION_KEY, SubmissionRecord
 from cairn.lifecycle import LifecycleStore
 from cairn.queue import TaskPriority, TaskQueue
 from cairn.signals import SignalHandler
@@ -283,7 +284,17 @@ class CairnOrchestrator:
         if self.stable is None:
             raise RuntimeError("Stable AgentFS not initialized")
 
-        await self._merge_overlay_to_stable(ctx.agent_fs, self.stable)
+        # Use fsdantic OverlayOperations for robust merging
+        overlay_ops = OverlayOperations(strategy=MergeStrategy.OVERWRITE)
+        result = await overlay_ops.merge(
+            source=ctx.agent_fs,
+            target=self.stable,
+            path="/",
+        )
+
+        # Could log merge statistics if needed
+        # print(f"Merged {result.files_merged} files")
+
         await self.trash_agent(agent_id)
         await self.persist_state()
 
@@ -376,8 +387,9 @@ class CairnOrchestrator:
                 raise RuntimeError(execution_result.error or "execution failed")
 
             await transition(AgentState.SUBMITTING)
-            submission_repo = KVRepository(ctx.agent_fs)
-            ctx.submission = await submission_repo.load_submission(ctx.agent_id)
+            submission_repo = TypedKVRepository[SubmissionRecord](ctx.agent_fs, prefix="")
+            submission_record = await submission_repo.load(SUBMISSION_KEY, SubmissionRecord)
+            ctx.submission = submission_record.submission if submission_record else None
 
             if self.materializer is not None:
                 await self.materializer.materialize(agent_id, ctx.agent_fs)
@@ -463,33 +475,3 @@ class CairnOrchestrator:
             raise KeyError(f"Unknown agent_id: {agent_id}")
         return ctx
 
-    async def _merge_overlay_to_stable(self, source: AgentFS, target: AgentFS, src_path: str = "/") -> None:
-        """Copy source overlay files into stable AgentFS recursively."""
-        for base in (src_path, src_path.lstrip("/") or "."):
-            try:
-                entries = await source.fs.readdir(base)
-                break
-            except FileNotFoundError:
-                entries = []
-        for entry in entries:
-            name = getattr(entry, "name", None)
-            if not name:
-                continue
-
-            source_child = f"{src_path.rstrip('/')}/{name}" if src_path != "/" else f"/{name}"
-            source_child_rel = source_child.lstrip("/")
-            if self._is_directory_entry(entry):
-                await self._merge_overlay_to_stable(source, target, source_child)
-                continue
-
-            file_bytes = await source.fs.read_file(source_child)
-            await target.fs.write_file(source_child_rel, file_bytes)
-
-    def _is_directory_entry(self, entry: Any) -> bool:
-        entry_type = getattr(entry, "type", None)
-        return bool(
-            entry_type == "directory"
-            or entry_type == "dir"
-            or getattr(entry, "is_directory", False)
-            or getattr(entry, "is_dir", False)
-        )

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, field_validator, model_validator
+from fsdantic import VersionedKVRecord
+from pydantic import field_validator, model_validator
 
 from cairn.agent import AgentState
 
@@ -18,14 +19,18 @@ def agent_key(agent_id: str) -> str:
     return AGENT_KEY_TEMPLATE.format(agent_id=agent_id)
 
 
-class LifecycleRecord(BaseModel):
-    """Canonical lifecycle record for an agent."""
+class LifecycleRecord(VersionedKVRecord):
+    """Canonical lifecycle record for an agent.
+
+    Inherits automatic timestamp tracking (created_at, updated_at) and versioning
+    from VersionedKVRecord. The state_changed_at field is kept for backward compatibility
+    and more explicit state transition tracking.
+    """
 
     agent_id: str
     task: str
     priority: int
     state: AgentState
-    created_at: float
     state_changed_at: float
     db_path: str
     submission: dict[str, Any] | None = None
@@ -50,8 +55,11 @@ class LifecycleRecord(BaseModel):
         return self
 
 
-class SubmissionRecord(BaseModel):
-    """Typed payload stored in per-agent KV for review submission."""
+class SubmissionRecord(VersionedKVRecord):
+    """Typed payload stored in per-agent KV for review submission.
+
+    Inherits automatic timestamp tracking from VersionedKVRecord.
+    """
 
     agent_id: str
     submission: dict[str, Any]
