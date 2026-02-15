@@ -1,7 +1,7 @@
 [project]
-name = "nixbox"
+name = "cairn"
 version = "0.1.0"
-description = "devenv.sh modular plugin template for running a local Turso AgentFS process"
+description = "Cairn orchestrator runtime for sandboxed AI code agents on fsdantic workspaces"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
