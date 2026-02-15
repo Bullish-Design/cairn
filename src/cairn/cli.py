@@ -17,7 +17,6 @@ from cairn.commands import (
     StatusCommand,
     parse_command_payload,
 )
-from cairn.executor import AgentExecutor
 from cairn.orchestrator import CairnOrchestrator
 from cairn.queue import TaskPriority
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
@@ -71,7 +70,7 @@ async def _run_up(args: argparse.Namespace) -> int:
         project_root=path_settings.project_root or ".",
         cairn_home=path_settings.cairn_home,
         config=orchestrator_settings,
-        executor=AgentExecutor(settings=executor_settings),
+        executor_settings=executor_settings,
     )
     await orchestrator.initialize()
     await orchestrator.run()
@@ -97,7 +96,7 @@ class CairnCommandClient:
             project_root=self.path_settings.project_root or ".",
             cairn_home=self.path_settings.cairn_home,
             config=self.orchestrator_settings,
-            executor=AgentExecutor(settings=self.executor_settings),
+            executor_settings=self.executor_settings,
         )
         await orchestrator.initialize()
         return await orchestrator.submit_command(command)
