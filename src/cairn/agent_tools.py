@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from agentfs_sdk import AgentFS
+from fsdantic import Workspace
 from pydantic import BaseModel, Field
 
 from cairn.external_functions import CairnExternalFunctions
@@ -89,8 +89,8 @@ class LogOutput(BaseModel):
 
 def create_agent_tools(
     agent_id: str,
-    agent_fs: AgentFS,
-    stable_fs: AgentFS,
+    agent_fs: Workspace,
+    stable_fs: Workspace,
     llm_provider: Any = None,
 ) -> list[Callable[..., Any]]:
     """Create Grail-compatible tool callables for an agent sandbox."""

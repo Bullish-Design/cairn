@@ -1,49 +1,41 @@
-"""Materialize AgentFS state to local preview workspaces."""
+"""Materialize workspace state to local preview workspaces."""
 
 from __future__ import annotations
 
 import shutil
 from pathlib import Path
 
-from agentfs_sdk import AgentFS
-from fsdantic import ConflictResolution, Materializer
+from fsdantic import Workspace
 
 
 class WorkspaceMaterializer:
-    """Materialize stable+overlay AgentFS contents to disk using fsdantic Materializer."""
+    """Materialize stable + overlay workspace contents to disk for previews."""
 
-    def __init__(self, cairn_home: Path, stable_fs: AgentFS | None = None):
+    def __init__(self, cairn_home: Path, stable_workspace: Workspace | None = None):
         self.workspace_dir = Path(cairn_home) / "workspaces"
-        self.stable_fs = stable_fs
-        self.materializer = Materializer(
-            conflict_resolution=ConflictResolution.OVERWRITE,
-            progress_callback=None,  # Can add logging callback if needed
-        )
+        self.stable_workspace = stable_workspace
 
-    async def materialize(self, agent_id: str, agent_fs: AgentFS) -> Path:
-        """Copy stable and overlay state to a local workspace directory.
-
-        Uses fsdantic's Materializer for robust file copying with automatic
-        conflict resolution and error handling.
-        """
+    async def materialize(self, agent_id: str, overlay_workspace: Workspace) -> Path:
         workspace = self.workspace_dir / agent_id
         workspace.mkdir(parents=True, exist_ok=True)
 
-        # Use fsdantic's Materializer to handle all the copying
-        result = await self.materializer.materialize(
-            agent_fs=agent_fs,
+        await overlay_workspace.materialize.to_disk(
             target_path=workspace,
-            base_fs=self.stable_fs,
-            clean=True,  # Remove existing files before materializing
+            base=self.stable_workspace,
+            clean=True,
+            allow_root=self.workspace_dir,
         )
-
-        # Could log result statistics if needed:
-        # print(f"Materialized {result.files_written} files ({result.bytes_written} bytes)")
 
         return workspace
 
+    async def diff(self, overlay_workspace: Workspace) -> list[str]:
+        if self.stable_workspace is None:
+            return []
+
+        changes = await overlay_workspace.materialize.diff(base=self.stable_workspace)
+        return [change.path for change in changes]
+
     async def cleanup(self, agent_id: str) -> None:
-        """Remove a materialized workspace directory."""
         workspace = self.workspace_dir / agent_id
         if workspace.exists():
             shutil.rmtree(workspace)

@@ -7,9 +7,7 @@ the host system.
 
 from typing import Any, Protocol
 
-from agentfs_sdk import AgentFS
-
-from fsdantic import FileOperations, TypedKVRepository, View, ViewQuery
+from fsdantic import FileOperations, View, ViewQuery, Workspace
 from cairn.kv_models import SUBMISSION_KEY, SubmissionRecord
 from cairn.external_models import (
     AskLlmRequest,
@@ -151,8 +149,8 @@ class CairnExternalFunctions:
     def __init__(
         self,
         agent_id: str,
-        agent_fs: AgentFS,
-        stable_fs: AgentFS,
+        agent_fs: Workspace,
+        stable_fs: Workspace,
         llm_provider: Any = None,
     ):
         """Initialize external functions.
@@ -169,7 +167,7 @@ class CairnExternalFunctions:
         self.llm_provider = llm_provider
 
         # Use fsdantic FileOperations for automatic overlay fallthrough
-        self.file_ops = FileOperations(agent_fs, base_fs=stable_fs)
+        self.file_ops = FileOperations(agent_fs.raw, base_fs=stable_fs.raw)
 
     async def read_file(self, path: str) -> str:
         """Read file from agent overlay (falls through to stable)."""
@@ -212,7 +210,7 @@ class CairnExternalFunctions:
 
         # Use View for glob search with proper ** support
         view = View(
-            agent=self.agent_fs,
+            agent=self.agent_fs.raw,
             query=ViewQuery(
                 path_pattern=request.pattern,
                 recursive=True,
@@ -233,7 +231,7 @@ class CairnExternalFunctions:
 
         # Use View for regex content search
         view = View(
-            agent=self.agent_fs,
+            agent=self.agent_fs.raw,
             query=ViewQuery(
                 path_pattern="**/*",  # Search all files
                 content_regex=request.pattern,
@@ -279,7 +277,7 @@ class CairnExternalFunctions:
 
         # Store in agent's KV store using typed adapter format.
         submission_record = SubmissionRecord(agent_id=self.agent_id, submission=submission.model_dump())
-        submission_repo = TypedKVRepository[SubmissionRecord](self.agent_fs, prefix="")
+        submission_repo = self.agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
         await submission_repo.save(SUBMISSION_KEY, submission_record)
         return True
 
@@ -292,8 +290,8 @@ class CairnExternalFunctions:
 
 def create_external_functions(
     agent_id: str,
-    agent_fs: AgentFS,
-    stable_fs: AgentFS,
+    agent_fs: Workspace,
+    stable_fs: Workspace,
     llm_provider: Any = None,
 ) -> dict[str, Any]:
     """Create external functions dictionary for Monty.
