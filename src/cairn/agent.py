@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from enum import Enum
 
-from agentfs_sdk import AgentFS
+from fsdantic import Workspace
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cairn.executor import ExecutionResult
@@ -35,7 +35,7 @@ class AgentContext(BaseModel):
     task: str
     priority: TaskPriority
     state: AgentState
-    agent_fs: AgentFS
+    agent_fs: Workspace
     generated_code: str | None = None
     execution_result: ExecutionResult | None = None
     submission: dict | None = None
