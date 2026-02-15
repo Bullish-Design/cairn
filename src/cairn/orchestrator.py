@@ -250,6 +250,9 @@ class CairnOrchestrator:
             shutil.move(agent_db, bin_db)
 
         if self.lifecycle is not None:
+            # Load existing record to preserve version for optimistic concurrency control
+            existing = await self.lifecycle.load(ctx.agent_id)
+
             record = LifecycleRecord(
                 agent_id=ctx.agent_id,
                 task=ctx.task,
@@ -261,6 +264,13 @@ class CairnOrchestrator:
                 submission=ctx.submission,
                 error=ctx.error,
             )
+
+            # Preserve version and timestamps from existing record to avoid version conflicts
+            if existing:
+                record.version = existing.version
+                record.created_at = existing.created_at
+                record.updated_at = existing.updated_at
+
             await self.lifecycle.save(record)
 
         workspace = self.cairn_home / "workspaces" / agent_id
@@ -355,6 +365,9 @@ class CairnOrchestrator:
         if self.lifecycle is None:
             return
 
+        # Load existing record to preserve version for optimistic concurrency control
+        existing = await self.lifecycle.load(ctx.agent_id)
+
         db_path = self.agentfs_dir / f"{ctx.agent_id}.db"
         if not db_path.exists():
             db_path = self.agentfs_dir / f"bin-{ctx.agent_id}.db"
@@ -370,6 +383,13 @@ class CairnOrchestrator:
             submission=ctx.submission,
             error=ctx.error,
         )
+
+        # Preserve version and timestamps from existing record to avoid version conflicts
+        if existing:
+            record.version = existing.version
+            record.created_at = existing.created_at
+            record.updated_at = existing.updated_at
+
         await self.lifecycle.save(record)
 
     def _get_agent(self, agent_id: str) -> AgentContext:

@@ -18,8 +18,8 @@ async def test_materialize_and_overlay_merge_with_fsdantic(tmp_path: Path) -> No
 
         preview = await overlay.materialize.preview(base)
         preview_paths = {change.path for change in preview}
-        assert "shared/base.txt" in preview_paths
-        assert "shared/new.txt" in preview_paths
+        assert "/shared/base.txt" in preview_paths
+        assert "/shared/new.txt" in preview_paths
 
         target = tmp_path / "materialized"
         result = await overlay.materialize.to_disk(target, base=base, clean=True)

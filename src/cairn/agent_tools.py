@@ -66,7 +66,9 @@ class CairnAgentTools:
     async def search_content(self, pattern: str, path: str = ".") -> list[dict[str, Any]]:
         request = SearchContentRequest(pattern=pattern, path=path)
         path_pattern = self._search_content_path_pattern(request.path)
-        view = View(
+
+        # Search both agent and stable filesystems to support overlay
+        agent_view = View(
             agent=self.agent_fs.raw,
             query=ViewQuery(
                 path_pattern=path_pattern,
@@ -76,10 +78,33 @@ class CairnAgentTools:
                 include_content=True,
             ),
         )
-        matches = await view.search_content()
+        stable_view = View(
+            agent=self.stable_fs.raw,
+            query=ViewQuery(
+                path_pattern=path_pattern,
+                content_regex=request.pattern,
+                recursive=True,
+                include_stats=False,
+                include_content=True,
+            ),
+        )
+
+        # Search both filesystems
+        agent_matches = await agent_view.search_content()
+        stable_matches = await stable_view.search_content()
+
+        # Merge results with agent taking precedence (deduplication by file path)
+        agent_files = {match.file for match in agent_matches}
+        all_matches = list(agent_matches)
+        all_matches.extend(match for match in stable_matches if match.file not in agent_files)
+
         return [
-            SearchContentMatch(file=match.path, line=match.line_number, text=match.line_text).model_dump()
-            for match in matches
+            SearchContentMatch(
+                file=match.file.lstrip("/"),  # Strip leading slash for relative path validation
+                line=match.line,
+                text=match.text,
+            ).model_dump()
+            for match in all_matches
         ]
 
     @staticmethod
