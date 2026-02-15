@@ -1,82 +1,57 @@
 # Cairn
 
-Cairn is an orchestration system for AI code agents with isolated workspace overlays and explicit human control.
+Cairn is an orchestration runtime for AI code agents with isolated fsdantic workspaces and explicit human accept/reject control.
 
 ## Read this first (canonical docs)
 
 1. **README.md** (this file): install + quickstart.
 2. **[CONCEPT.md](CONCEPT.md)**: philosophy and constraints.
-3. **[SPEC.md](SPEC.md)**: current architecture and runtime contracts.
+3. **[SPEC.md](SPEC.md)**: runtime architecture and contracts.
+4. **[TESTING.md](TESTING.md)**: repository test commands.
 
-If a topic appears in multiple places, `CONCEPT.md` and `SPEC.md` are authoritative.
+> **Source-of-truth note:** `SPEC.md` defines runtime contracts; when implementation changes in `src/cairn/*`, update `SPEC.md` in the same PR.
 
 ## Installation
 
-### 1) Import modules in `devenv.nix`
-
-```nix
-{ inputs, ... }:
-{
-  imports = [
-    ./modules/agentfs.nix
-    ./modules/cairn.nix
-  ];
-}
-```
-
-### 2) Enter shell and verify AgentFS
-
 ```bash
-devenv shell
-agentfs-info
-```
-
-### 3) Start Cairn orchestrator
-
-```bash
-cairn up
+uv sync --all-extras
 ```
 
 ## Quickstart
 
+Run these commands from the repository root.
+
+### Start the orchestrator
+
+```bash
+uv run cairn up
+```
+
 ### Queue work
 
 ```bash
-cairn spawn "Add docstrings to public functions"
+uv run cairn spawn "Add docstrings to public functions"
+# or normal-priority queueing
+uv run cairn queue "Refactor watcher tests"
 ```
 
-### Inspect
+### Inspect state
 
 ```bash
-cairn list-agents
-cairn status agent-<id>
+uv run cairn list-agents
+uv run cairn status agent-<id>
 ```
 
-### Resolve
+### Resolve review
 
 ```bash
-cairn accept agent-<id>
+uv run cairn accept agent-<id>
 # or
-cairn reject agent-<id>
-```
-
-## Neovim plugin quick setup
-
-Point your plugin manager to `src/cairn/nvim`.
-
-```lua
-{
-  dir = '~/path/to/cairn/src/cairn/nvim',
-  config = function()
-    require('cairn').setup({
-      preview_same_location = true,
-    })
-  end,
-}
+uv run cairn reject agent-<id>
 ```
 
 ## Contributing
 
-- Workflow instructions: [AGENT.md](AGENT.md)
-- Skill runbooks: [`.agent/skills/`](.agent/skills)
+- Workflow conventions: [AGENT.md](AGENT.md)
 - Architecture and contracts: [CONCEPT.md](CONCEPT.md), [SPEC.md](SPEC.md)
+- Tests and local validation: [TESTING.md](TESTING.md)

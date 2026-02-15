@@ -15,11 +15,27 @@ For philosophy and constraints, see [CONCEPT.md](CONCEPT.md). For install/quicks
 
 ## Runtime architecture
 
-Cairn has three layers:
+Cairn runtime contracts are implemented by three concrete layers:
 
-1. **Storage**: AgentFS overlays backed by SQLite (`stable.db`, `agent-*.db`, `bin.db`).
-2. **Execution**: Monty sandbox that runs generated agent code with explicit external functions.
-3. **Orchestration**: Python process with one worker loop that schedules queueing, execution, review state, and accept/reject.
+1. **Storage (`fsdantic.Workspace`)**
+   - The orchestrator opens `stable.db`, `bin.db`, and per-agent `agent-*.db` via `Fsdantic.open_with_options(AgentFSOptions(...))`.
+   - Runtime file access and preview materialization use fsdantic workspace APIs as the canonical contract:
+     - overlay merge (`stable.overlay.merge(agent_fs, strategy=...)`),
+     - file operations (`FileOperations(..., base_fs=...)`),
+     - preview export (`workspace.materialize.to_disk(...)`),
+     - typed KV repositories (`workspace.kv.repository(...)`).
+
+2. **Execution (`grail.MontyContext`)**
+   - Each agent run creates a fresh `MontyContext(input_model=EmptyInput, tools=..., limits=...)`.
+   - Cairn executes generated code through `MontyContext.execute_async(...)`; no alternate runtime path is supported.
+   - Execution limits (`max_duration_secs`, memory, recursion depth) are provided by orchestrator executor settings.
+
+3. **Tool registration (`create_agent_tools`)**
+   - Tool callables are registered per-agent by `create_agent_tools(agent_id, agent_fs, stable_fs, llm_provider)`.
+   - The returned toolset (`read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`, `search_content`, `ask_llm`, `submit_result`, `log`) is the canonical agent capability surface.
+   - `submit_result(...)` writes review payloads to the agent workspace KV submission record consumed by the orchestrator lifecycle flow.
+
+> **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator.py`, `src/cairn/agent_tools.py`).
 
 ## Data layout contract
 
@@ -36,7 +52,7 @@ $CAIRN_HOME/ (default ~/.cairn)
 └── state/
 ```
 
-## Storage contracts (AgentFS)
+## Storage contracts (fsdantic workspaces)
 
 ### Overlay semantics
 
@@ -153,4 +169,4 @@ To avoid drift:
 - `README.md`: setup + first commands only.
 - `CONCEPT.md`: conceptual model and invariants only.
 - `SPEC.md`: runtime details and contracts only.
-- `.agent/skills/*`: implementation workflows that link back to these canonical docs.
+- `.agents/skills/*`: implementation workflows that link back to these canonical docs.
