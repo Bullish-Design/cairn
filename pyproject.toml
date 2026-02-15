@@ -48,13 +48,9 @@ addopts = [
 ]
 pythonpath = ["."]
 
-[tool.uv.workspace]
-members = [
-    "fsdantic",
-]
-
 [tool.uv.sources]
-fsdantic = { workspace = true }
+fsdantic = { git = "https://github.com/Bullish-Design/fsdantic.git" }
+grail = { git = "https://github.com/Bullish-Design/grail.git" }
 
 [tool.uv]
 prerelease = "allow"
