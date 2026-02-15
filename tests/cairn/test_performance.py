@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pytest
+from fsdantic import AgentFSOptions, Fsdantic
+
+from cairn.agent import AgentContext, AgentState
+from cairn.lifecycle import LifecycleStore
+from cairn.orchestrator import CairnOrchestrator
+from cairn.queue import TaskPriority
+
+SPAWN_LATENCY_TARGET_SECONDS = 1.0
+PREVIEW_LATENCY_TARGET_SECONDS = 0.1
+ACCEPT_REJECT_LATENCY_TARGET_SECONDS = 0.05
+EXECUTION_DURATION_TARGET_SECONDS = 5.0
+
+
+class BenchmarkCodeGenerator:
+    async def generate(self, task: str) -> str:
+        return f"# task:{task}\npass"
+
+
+class BenchmarkMonty:
+    metrics_by_task: dict[str, dict[str, int]] = {
+        "refactor-small-file": {"peak_memory_bytes": 1_048_576},
+    }
+
+    def __init__(self, *, input_model, tools, limits):
+        _ = input_model
+        _ = limits
+        self.tools = {tool.__name__: tool for tool in tools}
+        self.last_metrics: dict[str, int] | None = None
+
+    async def execute_async(self, code: str, payload: dict) -> None:
+        _ = payload
+        task = code.split("task:", maxsplit=1)[1].strip()
+
+        if task == "refactor-small-file":
+            await self.tools["write_file"]("changes/small.py", "value = 1")
+        elif task == "generate-docs":
+            await self.tools["write_file"]("docs/README.md", "# generated")
+            await self.tools["write_file"]("docs/USAGE.md", "usage")
+            await self.tools["write_file"]("docs/API.md", "api")
+        else:
+            await self.tools["write_file"]("changes/default.txt", task)
+
+        await self.tools["submit_result"](f"completed {task}", [])
+        self.last_metrics = self.metrics_by_task.get(task)
+
+
+async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object, object, object]:
+    orch = CairnOrchestrator(
+        project_root=tmp_path / "project",
+        cairn_home=tmp_path / "cairn-home",
+        code_generator=BenchmarkCodeGenerator(),
+    )
+    orch.project_root.mkdir(parents=True, exist_ok=True)
+    orch.cairn_home.mkdir(parents=True, exist_ok=True)
+    (orch.cairn_home / "workspaces").mkdir(parents=True, exist_ok=True)
+    orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
+
+    stable = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "stable.db")))
+    bin_ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "bin.db")))
+    agent_ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "agent.db")))
+
+    orch.stable = stable
+    orch.bin = bin_ws
+    orch.lifecycle = LifecycleStore(bin_ws)
+
+    return orch, stable, bin_ws, agent_ws
+
+
+@pytest.mark.asyncio
+@pytest.mark.benchmark
+async def test_agent_lifecycle_latency_benchmarks(
+    monkeypatch: pytest.MonkeyPatch,
+    record_property: pytest.RecordProperty,
+    tmp_path: Path,
+) -> None:
+    """Benchmark phase-5 latency targets from CAIRN_REFACTOR-STEP_5.md."""
+    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    monkeypatch.setattr("cairn.orchestrator.MontyContext", BenchmarkMonty)
+
+    spawned_agent_id: str | None = None
+
+    try:
+        spawn_start = time.perf_counter()
+        spawned_agent_id = await orch.spawn_agent("spawn-only")
+        spawn_latency = time.perf_counter() - spawn_start
+        record_property("spawn_latency_seconds", spawn_latency)
+        record_property("spawn_latency_threshold_seconds", SPAWN_LATENCY_TARGET_SECONDS)
+        assert spawn_latency < SPAWN_LATENCY_TARGET_SECONDS
+
+        ctx = AgentContext(
+            agent_id="agent-preview",
+            task="generate-docs",
+            priority=TaskPriority.NORMAL,
+            state=AgentState.QUEUED,
+            agent_fs=agent_ws,
+        )
+        orch.active_agents[ctx.agent_id] = ctx
+
+        execution_start = time.perf_counter()
+        await orch._run_agent(ctx.agent_id)
+        execution_duration = time.perf_counter() - execution_start
+        record_property("execution_duration_seconds", execution_duration)
+        record_property("execution_duration_threshold_seconds", EXECUTION_DURATION_TARGET_SECONDS)
+        assert execution_duration < EXECUTION_DURATION_TARGET_SECONDS
+
+        preview_target = orch.cairn_home / "workspaces" / "preview-benchmark"
+        preview_start = time.perf_counter()
+        await ctx.agent_fs.materialize.to_disk(
+            target_path=preview_target,
+            base=stable,
+            clean=True,
+            allow_root=orch.cairn_home / "workspaces",
+        )
+        preview_latency = time.perf_counter() - preview_start
+        record_property("preview_latency_seconds", preview_latency)
+        record_property("preview_latency_threshold_seconds", PREVIEW_LATENCY_TARGET_SECONDS)
+        assert preview_latency < PREVIEW_LATENCY_TARGET_SECONDS
+
+        accept_start = time.perf_counter()
+        await orch.accept_agent(ctx.agent_id)
+        accept_latency = time.perf_counter() - accept_start
+        record_property("accept_latency_seconds", accept_latency)
+        record_property("accept_latency_threshold_seconds", ACCEPT_REJECT_LATENCY_TARGET_SECONDS)
+        assert accept_latency < ACCEPT_REJECT_LATENCY_TARGET_SECONDS
+
+        reject_id = await orch.spawn_agent("reject-only")
+        reject_start = time.perf_counter()
+        await orch.reject_agent(reject_id)
+        reject_latency = time.perf_counter() - reject_start
+        record_property("reject_latency_seconds", reject_latency)
+        record_property("reject_latency_threshold_seconds", ACCEPT_REJECT_LATENCY_TARGET_SECONDS)
+        assert reject_latency < ACCEPT_REJECT_LATENCY_TARGET_SECONDS
+
+        assert spawned_agent_id.startswith("agent-")
+    finally:
+        extra = orch.active_agents.pop(spawned_agent_id, None) if spawned_agent_id else None
+        if extra is not None:
+            await extra.agent_fs.close()
+        await bin_ws.close()
+        await stable.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    ("task", "max_duration_seconds"),
+    [
+        ("refactor-small-file", 2.0),
+        ("generate-docs", 2.0),
+    ],
+)
+async def test_execution_duration_benchmarks_for_representative_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    record_property: pytest.RecordProperty,
+    task: str,
+    max_duration_seconds: float,
+    tmp_path: Path,
+) -> None:
+    """Benchmark representative execution durations and capture optional Grail memory telemetry."""
+    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    monkeypatch.setattr("cairn.orchestrator.MontyContext", BenchmarkMonty)
+
+    ctx = AgentContext(
+        agent_id=f"agent-{task}",
+        task=task,
+        priority=TaskPriority.NORMAL,
+        state=AgentState.QUEUED,
+        agent_fs=agent_ws,
+    )
+    orch.active_agents[ctx.agent_id] = ctx
+
+    try:
+        started = time.perf_counter()
+        await orch._run_agent(ctx.agent_id)
+        elapsed = time.perf_counter() - started
+
+        record_property("representative_task", task)
+        record_property("execution_duration_seconds", elapsed)
+        record_property("execution_duration_threshold_seconds", max_duration_seconds)
+        assert elapsed < max_duration_seconds
+
+        memory_metric = BenchmarkMonty.metrics_by_task.get(task, {}).get("peak_memory_bytes")
+        if memory_metric is not None:
+            record_property("peak_memory_bytes", memory_metric)
+            assert memory_metric > 0
+        else:
+            record_property("peak_memory_bytes", "unavailable")
+    finally:
+        await orch.trash_agent(ctx.agent_id)
+        await bin_ws.close()
+        await stable.close()
