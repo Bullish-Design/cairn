@@ -65,10 +65,11 @@ class CairnAgentTools:
 
     async def search_content(self, pattern: str, path: str = ".") -> list[dict[str, Any]]:
         request = SearchContentRequest(pattern=pattern, path=path)
+        path_pattern = self._search_content_path_pattern(request.path)
         view = View(
             agent=self.agent_fs.raw,
             query=ViewQuery(
-                path_pattern="**/*",
+                path_pattern=path_pattern,
                 content_regex=request.pattern,
                 recursive=True,
                 include_stats=False,
@@ -80,6 +81,17 @@ class CairnAgentTools:
             SearchContentMatch(file=match.path, line=match.line_number, text=match.line_text).model_dump()
             for match in matches
         ]
+
+    @staticmethod
+    def _search_content_path_pattern(path: str) -> str:
+        normalized = path.rstrip("/")
+        if normalized in {"", ".", "/"}:
+            return "**/*"
+
+        if any(token in normalized for token in "*?[]"):
+            return normalized
+
+        return f"{normalized}/**/*"
 
     async def ask_llm(self, prompt: str, context: str = "") -> str:
         request = AskLlmRequest(prompt=prompt, context=context)
