@@ -18,6 +18,30 @@ pytest --cov=src/cairn --cov-report=term-missing
 
 # Run fast tests (skip slow & benchmarks)
 pytest -m "not slow and not benchmark"
+
+# Run benchmark suite only
+pytest -m benchmark tests/cairn/test_performance.py
+```
+
+### Benchmark Workflow (Phase 5)
+
+Phase 5 performance benchmarks live in `tests/cairn/test_performance.py` and encode
+the refactor targets from `.refactor/CAIRN_REFACTOR-STEP_5.md`:
+
+- agent spawn latency: `<1s`
+- preview materialization latency: `<100ms`
+- accept/reject latency: `<50ms`
+- representative execution duration benchmarks
+- optional per-agent memory telemetry metadata (when Grail metrics are available)
+
+Run from repository root:
+
+```bash
+# Run only performance benchmarks
+pytest -m benchmark tests/cairn/test_performance.py
+
+# Include benchmarks with the whole suite
+pytest -m "benchmark or not benchmark"
 ```
 
 ### Test Scripts (in devenv shell)
