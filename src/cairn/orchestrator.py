@@ -27,7 +27,7 @@ from cairn.commands import (
 from cairn.code_generator import CodeGenerator
 from cairn.executor import AgentExecutor
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
-from cairn.external_functions import create_external_functions
+from cairn.agent_tools import create_agent_tools
 from cairn.kv_models import LifecycleRecord
 from fsdantic import TypedKVRepository
 from cairn.kv_models import SUBMISSION_KEY, SubmissionRecord
@@ -47,8 +47,7 @@ class CairnOrchestrator:
         config: OrchestratorSettings | None = None,
         code_generator: CodeGenerator | None = None,
         executor: AgentExecutor | None = None,
-        external_functions_factory: Callable[[str, AgentFS, AgentFS, Any], dict[str, Any]]
-        | None = None,
+        tools_factory: Callable[[str, AgentFS, AgentFS, Any], list[Callable[..., Any]]] | None = None,
     ):
         path_settings = PathsSettings()
         self.project_root = Path(path_settings.project_root or project_root).resolve()
@@ -67,7 +66,7 @@ class CairnOrchestrator:
 
         self.llm = code_generator or CodeGenerator()
         self.executor = executor or AgentExecutor(settings=ExecutorSettings())
-        self.external_functions_factory = external_functions_factory or create_external_functions
+        self.tools_factory = tools_factory or create_agent_tools
 
         self.watcher: FileWatcher | None = None
         self.signals: SignalHandler | None = None
@@ -380,8 +379,8 @@ class CairnOrchestrator:
                 raise RuntimeError("Stable AgentFS not initialized")
 
             await transition(AgentState.EXECUTING)
-            functions = self.external_functions_factory(agent_id, ctx.agent_fs, self.stable, self.llm)
-            execution_result = await self.executor.execute(generated, functions, agent_id)
+            tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable, self.llm)
+            execution_result = await self.executor.execute(generated, tools, agent_id)
             ctx.execution_result = execution_result
             if execution_result.failed:
                 raise RuntimeError(execution_result.error or "execution failed")

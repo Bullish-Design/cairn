@@ -16,7 +16,7 @@ class CodeGenerator:
     PROMPT_TEMPLATE = """Write a short Python script to accomplish this task:
 {task}
 
-Available functions (the ONLY things you can call):
+Available tools (call these directly in code):
 - read_file(path: str) -> str
 - write_file(path: str, content: str) -> bool
 - list_dir(path: str) -> list[str]
@@ -31,7 +31,7 @@ Constraints:
 - You CANNOT: import anything, define classes, use open(), use print()
 - Write simple procedural Python: variables, functions, loops, conditionals only
 - Always call submit_result() at the end with summary and list of changed files
-- Use log() to debug
+- Use only these tool functions, no other host interactions
 
 Respond with ONLY the Python code. No markdown, no explanation."""
 

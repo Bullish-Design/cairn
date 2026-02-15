@@ -1,31 +1,25 @@
-"""Agent code executor using Monty sandbox.
+"""Agent code executor using Grail's MontyContext."""
 
-This module wraps Monty sandbox execution with proper error handling,
-resource limits, and result tracking.
-"""
+from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-import pydantic_monty
-from pydantic_monty import ResourceLimits
+from pydantic import BaseModel
+
+from grail import GrailExecutionError, GrailLimitError, MontyContext
 
 from cairn.settings import ExecutorSettings
 
 
+class EmptyInput(BaseModel):
+    """No-input model for Cairn generated agent scripts."""
+
+
 @dataclass
 class ExecutionResult:
-    """Result of agent code execution.
-
-    Attributes:
-        success: Whether execution completed successfully
-        return_value: Return value from code (if successful)
-        error: Error message (if failed)
-        error_type: Type of error (syntax, runtime, timeout, memory)
-        duration_ms: Execution duration in milliseconds
-        agent_id: Agent identifier
-    """
+    """Result of agent code execution."""
 
     success: bool
     return_value: Any = None
@@ -41,7 +35,7 @@ class ExecutionResult:
 
 
 class AgentExecutor:
-    """Executes agent code in Monty sandbox with resource limits."""
+    """Executes agent code in a Grail sandbox with resource limits."""
 
     def __init__(
         self,
@@ -50,13 +44,6 @@ class AgentExecutor:
         max_recursion_depth: int | None = None,
         settings: ExecutorSettings | None = None,
     ):
-        """Initialize executor with resource limits.
-
-        Args:
-            max_execution_time: Maximum execution time in seconds (default: 60)
-            max_memory_bytes: Maximum memory in bytes (default: 100MB)
-            max_recursion_depth: Maximum recursion depth (default: 1000)
-        """
         resolved = settings or ExecutorSettings()
         effective = ExecutorSettings(
             max_execution_time=(
@@ -74,12 +61,7 @@ class AgentExecutor:
         self.max_memory_bytes = effective.max_memory_bytes
         self.max_recursion_depth = effective.max_recursion_depth
 
-    def _create_limits(self) -> ResourceLimits:
-        """Create resource limits for Monty.
-
-        Returns:
-            ResourceLimits configuration
-        """
+    def _create_limits(self) -> dict[str, Any]:
         return {
             "max_duration_secs": float(self.max_execution_time),
             "max_memory": self.max_memory_bytes,
@@ -89,41 +71,20 @@ class AgentExecutor:
     async def execute(
         self,
         code: str,
-        external_functions: dict[str, Any],
+        tools: list[Callable[..., Any]],
         agent_id: str,
     ) -> ExecutionResult:
-        """Execute agent code with external functions.
-
-        Args:
-            code: Python code to execute
-            external_functions: Dictionary of external functions
-            agent_id: Agent identifier
-
-        Returns:
-            ExecutionResult with success/failure info
-        """
+        """Execute agent code with allowlisted tools."""
         start_time = time.time()
 
         try:
-            # Create Monty instance
-            m = pydantic_monty.Monty(
-                code,
-                inputs=[],
-                external_functions=list(external_functions.keys()),
-                script_name=f"{agent_id}.py",
+            ctx = MontyContext(
+                input_model=EmptyInput,
+                tools=tools,
+                limits=self._create_limits(),
             )
-
-            # Run with resource limits
-            limits = self._create_limits()
-            result = await pydantic_monty.run_monty_async(
-                m,
-                inputs=None,
-                external_functions=external_functions,
-                limits=limits,
-            )
-
+            result = await ctx.execute_async(code, {})
             duration_ms = (time.time() - start_time) * 1000
-
             return ExecutionResult(
                 success=True,
                 return_value=result,
@@ -131,30 +92,16 @@ class AgentExecutor:
                 agent_id=agent_id,
             )
 
-        except pydantic_monty.MontySyntaxError as e:
+        except GrailLimitError as exc:
             duration_ms = (time.time() - start_time) * 1000
-            return ExecutionResult(
-                success=False,
-                error=str(e),
-                error_type="syntax",
-                duration_ms=duration_ms,
-                agent_id=agent_id,
-            )
-
-        except pydantic_monty.MontyRuntimeError as e:
-            duration_ms = (time.time() - start_time) * 1000
-            error_msg = str(e)
-
-            # Detect specific error types
-            if "timeout" in error_msg.lower() or "duration" in error_msg.lower():
-                error_type = "timeout"
-            elif "memory" in error_msg.lower():
-                error_type = "memory"
-            elif "recursion" in error_msg.lower():
+            error_msg = str(exc)
+            lowered = error_msg.lower()
+            if "recursion" in lowered:
                 error_type = "recursion"
+            elif "memory" in lowered:
+                error_type = "memory"
             else:
-                error_type = "runtime"
-
+                error_type = "timeout"
             return ExecutionResult(
                 success=False,
                 error=error_msg,
@@ -163,29 +110,33 @@ class AgentExecutor:
                 agent_id=agent_id,
             )
 
-        except Exception as e:
+        except GrailExecutionError as exc:
+            duration_ms = (time.time() - start_time) * 1000
+            error_msg = str(exc)
+            lowered = error_msg.lower()
+            error_type = "syntax" if "syntax" in lowered else "runtime"
+            return ExecutionResult(
+                success=False,
+                error=error_msg,
+                error_type=error_type,
+                duration_ms=duration_ms,
+                agent_id=agent_id,
+            )
+
+        except Exception as exc:  # noqa: BLE001
             duration_ms = (time.time() - start_time) * 1000
             return ExecutionResult(
                 success=False,
-                error=f"Unexpected error: {str(e)}",
+                error=f"Unexpected error: {str(exc)}",
                 error_type="unknown",
                 duration_ms=duration_ms,
                 agent_id=agent_id,
             )
 
     def validate_code(self, code: str) -> tuple[bool, Optional[str]]:
-        """Validate code syntax without executing.
-
-        Args:
-            code: Python code to validate
-
-        Returns:
-            Tuple of (is_valid, error_message)
-        """
+        """Validate code syntax without executing."""
         try:
             compile(code, "<string>", "exec")
             return True, None
-        except SyntaxError as e:
-            return False, str(e)
-        except Exception as e:
-            return False, f"Validation error: {str(e)}"
+        except SyntaxError as exc:
+            return False, f"Syntax error: {str(exc)}"
