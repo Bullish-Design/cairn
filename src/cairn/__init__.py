@@ -4,6 +4,7 @@ from cairn.agent import AgentContext, AgentState
 from cairn.code_generator import CodeGenerator
 from cairn.executor import AgentExecutor, ExecutionResult
 from cairn.external_functions import ExternalFunctions, create_external_functions
+from cairn.agent_tools import create_agent_tools
 from cairn.orchestrator import CairnOrchestrator
 from cairn.queue import QueuedTask, TaskPriority, TaskQueue
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
@@ -31,6 +32,7 @@ __all__ = [
     "TaskQueue",
     "WorkspaceMaterializer",
     "create_external_functions",
+    "create_agent_tools",
 ]
 
 __version__ = "0.1.0"

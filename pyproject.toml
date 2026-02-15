@@ -9,7 +9,7 @@ authors = [{ name = "Bullish Design" }]
 dependencies = [
     "agentfs-sdk>=0.6.0",
     "fsdantic",
-    "pydantic-monty>=0.0.4",
+    "grail",
     "llm>=0.13.0",
     "watchfiles>=0.20.0",
     "pydantic-settings>=2.0.0",
