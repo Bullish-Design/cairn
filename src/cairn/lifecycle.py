@@ -1,14 +1,56 @@
-"""Single canonical lifecycle storage for agent metadata."""
+"""Typed lifecycle and submission persistence for Cairn agents."""
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
-from fsdantic import Workspace
+from fsdantic import VersionedKVRecord, Workspace
+from pydantic import field_validator, model_validator
 
 from cairn.agent import AgentState
-from cairn.kv_models import AGENT_KEY_PREFIX, LifecycleRecord
+
+AGENT_KEY_PREFIX = "agent:"
+SUBMISSION_KEY = "submission"
+
+
+class LifecycleRecord(VersionedKVRecord):
+    """Canonical lifecycle metadata stored in the lifecycle workspace."""
+
+    agent_id: str
+    task: str
+    priority: int
+    state: AgentState
+    state_changed_at: float
+    db_path: str
+    submission: dict[str, Any] | None = None
+    error: str | None = None
+
+    @field_validator("agent_id")
+    @classmethod
+    def validate_agent_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("agent_id must be non-empty")
+        return value
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def validate_state(cls, value: AgentState | str) -> AgentState:
+        return AgentState(value)
+
+    @model_validator(mode="after")
+    def validate_timestamps(self) -> "LifecycleRecord":
+        if self.state_changed_at < self.created_at:
+            raise ValueError("state_changed_at must be greater than or equal to created_at")
+        return self
+
+
+class SubmissionRecord(VersionedKVRecord):
+    """Submission payload written by the agent runtime tools."""
+
+    agent_id: str
+    submission: dict[str, Any]
 
 
 class LifecycleStore:
@@ -31,10 +73,7 @@ class LifecycleStore:
 
     async def list_active(self) -> list[LifecycleRecord]:
         all_records = await self.list_all()
-        terminal_states = {
-            AgentState.ACCEPTED,
-            AgentState.REJECTED,
-        }
+        terminal_states = {AgentState.ACCEPTED, AgentState.REJECTED}
         return [record for record in all_records if record.state not in terminal_states]
 
     async def cleanup_old(
@@ -45,11 +84,7 @@ class LifecycleStore:
         cutoff = time.time() - max_age_seconds
         cleaned = 0
 
-        terminal_states = {
-            AgentState.ACCEPTED,
-            AgentState.REJECTED,
-            AgentState.ERRORED,
-        }
+        terminal_states = {AgentState.ACCEPTED, AgentState.REJECTED, AgentState.ERRORED}
 
         for record in await self.list_all():
             if record.state not in terminal_states:

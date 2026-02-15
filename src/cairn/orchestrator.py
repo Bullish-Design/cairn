@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fsdantic import AgentFSOptions, Fsdantic, MergeStrategy, Workspace
+from grail import MontyContext
+from pydantic import BaseModel
 
 from cairn.agent import AgentContext, AgentState
 from cairn.agent_tools import create_agent_tools
@@ -24,14 +26,15 @@ from cairn.commands import (
     RejectCommand,
     StatusCommand,
 )
-from cairn.executor import AgentExecutor
-from cairn.kv_models import LifecycleRecord, SUBMISSION_KEY, SubmissionRecord
-from cairn.lifecycle import LifecycleStore
+from cairn.lifecycle import LifecycleRecord, LifecycleStore, SUBMISSION_KEY, SubmissionRecord
 from cairn.queue import TaskPriority, TaskQueue
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.signals import SignalHandler
 from cairn.watcher import FileWatcher
-from cairn.workspace import WorkspaceMaterializer
+
+
+class EmptyInput(BaseModel):
+    """No-input model for generated agent code."""
 
 
 class CairnOrchestrator:
@@ -42,8 +45,8 @@ class CairnOrchestrator:
         project_root: Path | str = ".",
         cairn_home: Path | str | None = None,
         config: OrchestratorSettings | None = None,
+        executor_settings: ExecutorSettings | None = None,
         code_generator: CodeGenerator | None = None,
-        executor: AgentExecutor | None = None,
         tools_factory: Callable[[str, Workspace, Workspace, Any], list[Callable[..., Any]]] | None = None,
     ):
         path_settings = PathsSettings()
@@ -52,6 +55,7 @@ class CairnOrchestrator:
         resolved_cairn_home = path_settings.cairn_home or cairn_home or Path.home() / ".cairn"
         self.cairn_home = Path(resolved_cairn_home).expanduser()
         self.config = config or OrchestratorSettings()
+        self.executor_settings = executor_settings or ExecutorSettings()
 
         self.stable: Workspace | None = None
         self.bin: Workspace | None = None
@@ -62,12 +66,10 @@ class CairnOrchestrator:
         self._running_tasks: set[asyncio.Task[None]] = set()
 
         self.llm = code_generator or CodeGenerator()
-        self.executor = executor or AgentExecutor(settings=ExecutorSettings())
         self.tools_factory = tools_factory or create_agent_tools
 
         self.watcher: FileWatcher | None = None
         self.signals: SignalHandler | None = None
-        self.materializer: WorkspaceMaterializer | None = None
         self.lifecycle: LifecycleStore | None = None
         self.state_file = self.cairn_home / "state" / "orchestrator.json"
 
@@ -80,12 +82,7 @@ class CairnOrchestrator:
         self.bin = await Fsdantic.open_with_options(AgentFSOptions(path=str(self.agentfs_dir / "bin.db")))
 
         self.watcher = FileWatcher(self.project_root, self.stable)
-        self.signals = SignalHandler(
-            self.cairn_home,
-            self,
-            enable_polling=self.config.enable_signal_polling,
-        )
-        self.materializer = WorkspaceMaterializer(self.cairn_home, stable_workspace=self.stable)
+        self.signals = SignalHandler(self.cairn_home, self, enable_polling=self.config.enable_signal_polling)
         self.lifecycle = LifecycleStore(self.bin)
 
         await self.recover_from_lifecycle_store()
@@ -266,8 +263,9 @@ class CairnOrchestrator:
             )
             await self.lifecycle.save(record)
 
-        if self.materializer is not None:
-            await self.materializer.cleanup(agent_id)
+        workspace = self.cairn_home / "workspaces" / agent_id
+        if workspace.exists():
+            shutil.rmtree(workspace)
 
         self.active_agents.pop(agent_id, None)
         await self.persist_state()
@@ -297,28 +295,28 @@ class CairnOrchestrator:
             await transition(AgentState.GENERATING)
             generated = await self.llm.generate(ctx.task)
             ctx.generated_code = generated
-
-            is_valid, error = self.executor.validate_code(generated)
-            if not is_valid:
-                raise RuntimeError(error or "generated code failed validation")
+            self._validate_code(generated)
 
             if self.stable is None:
                 raise RuntimeError("Stable workspace not initialized")
 
             await transition(AgentState.EXECUTING)
             tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable, self.llm)
-            execution_result = await self.executor.execute(generated, tools, agent_id)
-            ctx.execution_result = execution_result
-            if execution_result.failed:
-                raise RuntimeError(execution_result.error or "execution failed")
+            monty = MontyContext(input_model=EmptyInput, tools=tools, limits=self._grail_limits())
+            await monty.execute_async(generated, {})
 
             await transition(AgentState.SUBMITTING)
             submission_repo = ctx.agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
             submission_record = await submission_repo.load(SUBMISSION_KEY)
             ctx.submission = submission_record.submission if submission_record else None
 
-            if self.materializer is not None:
-                await self.materializer.materialize(agent_id, ctx.agent_fs)
+            preview_dir = self.cairn_home / "workspaces" / agent_id
+            await ctx.agent_fs.materialize.to_disk(
+                target_path=preview_dir,
+                base=self.stable,
+                clean=True,
+                allow_root=self.cairn_home / "workspaces",
+            )
 
             await transition(AgentState.REVIEWING)
         except Exception as exc:
@@ -379,3 +377,13 @@ class CairnOrchestrator:
         if ctx is None:
             raise KeyError(f"Unknown agent_id: {agent_id}")
         return ctx
+
+    def _validate_code(self, code: str) -> None:
+        compile(code, "<agent-generated>", "exec")
+
+    def _grail_limits(self) -> dict[str, Any]:
+        return {
+            "max_duration_secs": float(self.executor_settings.max_execution_time),
+            "max_memory": self.executor_settings.max_memory_bytes,
+            "max_recursion_depth": self.executor_settings.max_recursion_depth,
+        }
