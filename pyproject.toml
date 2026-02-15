@@ -3,7 +3,7 @@ name = "cairn"
 version = "0.1.0"
 description = "Cairn orchestrator runtime for sandboxed AI code agents on fsdantic workspaces"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Bullish Design" }]
 dependencies = [
@@ -54,3 +54,7 @@ grail = { git = "https://github.com/Bullish-Design/grail.git" }
 
 [tool.uv]
 prerelease = "allow"
+
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
