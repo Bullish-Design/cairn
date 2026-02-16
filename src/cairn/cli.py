@@ -18,6 +18,7 @@ from cairn.commands import (
     parse_command_payload,
 )
 from cairn.orchestrator import CairnOrchestrator
+from cairn.providers import FileCodeProvider, InlineCodeProvider
 from cairn.queue import TaskPriority
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 
@@ -46,14 +47,10 @@ def _resolve_settings(args: argparse.Namespace) -> tuple[PathsSettings, Orchestr
         ),
         ExecutorSettings(
             max_execution_time=(
-                args.max_execution_time
-                if args.max_execution_time is not None
-                else executor_settings.max_execution_time
+                args.max_execution_time if args.max_execution_time is not None else executor_settings.max_execution_time
             ),
             max_memory_bytes=(
-                args.max_memory_bytes
-                if args.max_memory_bytes is not None
-                else executor_settings.max_memory_bytes
+                args.max_memory_bytes if args.max_memory_bytes is not None else executor_settings.max_memory_bytes
             ),
             max_recursion_depth=(
                 args.max_recursion_depth
@@ -64,13 +61,23 @@ def _resolve_settings(args: argparse.Namespace) -> tuple[PathsSettings, Orchestr
     )
 
 
+def _resolve_provider(args: argparse.Namespace, project_root: Path | None) -> FileCodeProvider | InlineCodeProvider:
+    if args.provider == "inline":
+        return InlineCodeProvider()
+
+    base_path = Path(args.provider_base_path) if args.provider_base_path else project_root or Path(".")
+    return FileCodeProvider(base_path=base_path)
+
+
 async def _run_up(args: argparse.Namespace) -> int:
     path_settings, orchestrator_settings, executor_settings = _resolve_settings(args)
+    provider = _resolve_provider(args, path_settings.project_root)
     orchestrator = CairnOrchestrator(
         project_root=path_settings.project_root or ".",
         cairn_home=path_settings.cairn_home,
         config=orchestrator_settings,
         executor_settings=executor_settings,
+        code_provider=provider,
     )
     await orchestrator.initialize()
     await orchestrator.run()
@@ -86,10 +93,12 @@ class CairnCommandClient:
         path_settings: PathsSettings,
         orchestrator_settings: OrchestratorSettings,
         executor_settings: ExecutorSettings,
+        provider: FileCodeProvider | InlineCodeProvider,
     ) -> None:
         self.path_settings = path_settings
         self.orchestrator_settings = orchestrator_settings
         self.executor_settings = executor_settings
+        self.provider = provider
 
     async def submit(self, command: CairnCommand) -> CommandResult:
         orchestrator = CairnOrchestrator(
@@ -97,6 +106,7 @@ class CairnCommandClient:
             cairn_home=self.path_settings.cairn_home,
             config=self.orchestrator_settings,
             executor_settings=self.executor_settings,
+            code_provider=self.provider,
         )
         await orchestrator.initialize()
         return await orchestrator.submit_command(command)
@@ -104,10 +114,12 @@ class CairnCommandClient:
 
 async def _submit_command(args: argparse.Namespace, command: CairnCommand) -> CommandResult:
     path_settings, orchestrator_settings, executor_settings = _resolve_settings(args)
+    provider = _resolve_provider(args, path_settings.project_root)
     client = CairnCommandClient(
         path_settings=path_settings,
         orchestrator_settings=orchestrator_settings,
         executor_settings=executor_settings,
+        provider=provider,
     )
 
     match command:
@@ -179,6 +191,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-execution-time", type=float, default=None)
     parser.add_argument("--max-memory-bytes", type=int, default=None)
     parser.add_argument("--max-recursion-depth", type=int, default=None)
+    parser.add_argument("--provider", choices=("file", "inline"), default="file")
+    parser.add_argument("--provider-base-path", default=None)
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 

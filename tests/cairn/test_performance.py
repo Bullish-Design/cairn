@@ -41,9 +41,9 @@ class BenchmarkScript:
     def check(self) -> CheckResult:
         return CheckResult(True)
 
-    async def run(self, *, inputs: dict, externals: list[object]) -> None:
+    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
         task = inputs["task_description"]
-        tools = {tool.__name__: tool for tool in externals}
+        tools = externals
 
         if task == "refactor-small-file":
             await tools["write_file"]("changes/small.py", "value = 1")

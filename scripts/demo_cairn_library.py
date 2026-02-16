@@ -37,7 +37,6 @@ retry_mod = load_module("cairn_retry", "src/cairn/retry.py")
 TaskPriority = queue_mod.TaskPriority
 TaskQueue = queue_mod.TaskQueue
 RetryStrategy = retry_mod.RetryStrategy
-CodeGenerationRetry = retry_mod.CodeGenerationRetry
 
 
 async def check_task_queue() -> None:
@@ -74,39 +73,13 @@ async def check_retry_strategy() -> None:
     assert attempts == 3, "RetryStrategy should have required exactly 3 attempts"
 
 
-class FakeCodeGenerator:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def generate(self, task: str) -> str:
-        self.calls += 1
-        if self.calls == 1:
-            return "def bad(:\n    pass"
-        return "def good():\n    return 42"
-
-
-async def check_code_generation_retry() -> None:
-    generator = FakeCodeGenerator()
-    retry = CodeGenerationRetry(max_attempts=2, code_generator=generator)
-
-    def validator(code: str) -> tuple[bool, str | None]:
-        if "bad" in code:
-            return False, "syntax error"
-        return True, None
-
-    code = await retry.generate_with_retry("generate function", validator=validator)
-    assert "good" in code, "CodeGenerationRetry did not recover from failed validation"
-
-
 async def main() -> None:
     await check_task_queue()
     await check_retry_strategy()
-    await check_code_generation_retry()
 
     print("✅ Cairn core demo passed")
     print("   - TaskQueue priority scheduling works")
     print("   - RetryStrategy retries transient failures")
-    print("   - CodeGenerationRetry retries after validation errors")
 
 
 if __name__ == "__main__":

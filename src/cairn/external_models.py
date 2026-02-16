@@ -107,15 +107,6 @@ class SearchContentResponse(BaseModel):
     matches: list[SearchContentMatch]
 
 
-class AskLlmRequest(BaseModel):
-    prompt: str
-    context: str = ""
-
-
-class AskLlmResponse(BaseModel):
-    response: str
-
-
 class SubmitResultRequest(BaseModel):
     summary: str
     changed_files: list[RelativePath]
@@ -149,7 +140,6 @@ EXTERNAL_FUNCTION_SCHEMAS: ExternalFunctionSchemaMap = {
     "file_exists": {"request": FileExistsRequest, "response": FileExistsResponse},
     "search_files": {"request": SearchFilesRequest, "response": SearchFilesResponse},
     "search_content": {"request": SearchContentRequest, "response": SearchContentResponse},
-    "ask_llm": {"request": AskLlmRequest, "response": AskLlmResponse},
     "submit_result": {"request": SubmitResultRequest, "response": SubmitResultResponse},
     "log": {"request": LogRequest, "response": LogResponse},
 }

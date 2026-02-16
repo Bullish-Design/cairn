@@ -1,11 +1,11 @@
 """Retry logic for agent operations.
 
 This module provides retry strategies with exponential backoff
-for handling transient failures in LLM generation and execution.
+for handling transient failures in async operations.
 """
 
 import asyncio
-from typing import Any, Awaitable, Callable, Optional, TypeVar
+from typing import Awaitable, Callable, TypeVar
 
 T = TypeVar("T")
 
@@ -129,63 +129,3 @@ class RetryStrategy:
         if last_exception:
             raise last_exception
         raise RuntimeError("Retry failed without exception")
-
-
-class CodeGenerationRetry(RetryStrategy):
-    """Specialized retry strategy for code generation.
-
-    Retries with feedback when LLM generates invalid code.
-    """
-
-    def __init__(
-        self,
-        max_attempts: int = 3,
-        code_generator: Any = None,
-    ):
-        """Initialize code generation retry.
-
-        Args:
-            max_attempts: Maximum number of attempts
-            code_generator: CodeGenerator instance
-        """
-        super().__init__(max_attempts=max_attempts, initial_delay=0.5)
-        self.code_generator = code_generator
-        self.last_error: Optional[str] = None
-
-    async def generate_with_retry(
-        self,
-        task: str,
-        validator: Optional[Callable[[str], tuple[bool, Optional[str]]]] = None,
-    ) -> str:
-        """Generate code with retry on validation failures.
-
-        Args:
-            task: Task description
-            validator: Optional code validator function
-
-        Returns:
-            Valid Python code
-
-        Raises:
-            RuntimeError: If code generation fails after all attempts
-        """
-        for attempt in range(self.max_attempts):
-            # Generate code
-            code = await self.code_generator.generate(task)
-
-            # Validate if validator provided
-            if validator:
-                is_valid, error = validator(code)
-                if is_valid:
-                    return code
-
-                # Store error for next attempt
-                self.last_error = error
-
-                # On subsequent attempts, add error context
-                if attempt < self.max_attempts - 1:
-                    task = f"{task}\n\nPrevious attempt failed: {error}\nPlease fix the issue."
-            else:
-                return code
-
-        raise RuntimeError(f"Code generation failed after {self.max_attempts} attempts")

@@ -24,6 +24,7 @@ from cairn.commands import (
     parse_command_payload,
 )
 from cairn.orchestrator import CairnOrchestrator
+from cairn.providers import FileCodeProvider, InlineCodeProvider
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.queue import TaskPriority
 
@@ -58,17 +59,33 @@ def get_paths_settings(
     )
 
 
+def resolve_provider(
+    provider: str,
+    project_root: Optional[Path],
+    provider_base_path: Optional[Path],
+) -> FileCodeProvider | InlineCodeProvider:
+    if provider == "inline":
+        return InlineCodeProvider()
+
+    base_path = provider_base_path or project_root or Path(".")
+    return FileCodeProvider(base_path=base_path)
+
+
 async def get_orchestrator(
     project_root: Optional[Path] = None,
     cairn_home: Optional[Path] = None,
+    provider: str = "file",
+    provider_base_path: Optional[Path] = None,
 ) -> CairnOrchestrator:
     """Create and initialize an orchestrator instance."""
     path_settings = get_paths_settings(project_root, cairn_home)
+    provider_instance = resolve_provider(provider, path_settings.project_root, provider_base_path)
     orchestrator = CairnOrchestrator(
         project_root=path_settings.project_root or ".",
         cairn_home=path_settings.cairn_home,
         config=OrchestratorSettings(),
         executor_settings=ExecutorSettings(),
+        code_provider=provider_instance,
     )
     await orchestrator.initialize()
     return orchestrator
@@ -584,11 +601,18 @@ def agent_spawn(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    provider: Annotated[str, typer.Option(help="Code provider (file or inline)")] = "file",
+    provider_base_path: Annotated[Optional[Path], typer.Option(help="Base path for file provider")] = None,
 ):
     """Spawn a high-priority agent task."""
 
     async def _spawn():
-        orchestrator = await get_orchestrator(project_root, cairn_home)
+        orchestrator = await get_orchestrator(
+            project_root,
+            cairn_home,
+            provider=provider,
+            provider_base_path=provider_base_path,
+        )
 
         try:
             command = parse_command_payload("spawn", {"task": task, "priority": int(TaskPriority.HIGH)})
@@ -609,11 +633,18 @@ def agent_queue(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    provider: Annotated[str, typer.Option(help="Code provider (file or inline)")] = "file",
+    provider_base_path: Annotated[Optional[Path], typer.Option(help="Base path for file provider")] = None,
 ):
     """Queue a normal-priority agent task."""
 
     async def _queue():
-        orchestrator = await get_orchestrator(project_root, cairn_home)
+        orchestrator = await get_orchestrator(
+            project_root,
+            cairn_home,
+            provider=provider,
+            provider_base_path=provider_base_path,
+        )
 
         try:
             command = parse_command_payload("queue", {"task": task, "priority": int(TaskPriority.NORMAL)})

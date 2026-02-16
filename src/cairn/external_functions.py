@@ -1,17 +1,14 @@
-"""Grail tool definitions exposed to sandboxed Cairn agents."""
+"""External function factory for Cairn agent execution."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+import re
 from typing import Any
 
-import re
-
 from fsdantic import FileNotFoundError, ViewQuery, Workspace
-from pydantic import BaseModel, Field
 
 from cairn.external_models import (
-    AskLlmRequest,
     FileExistsRequest,
     ListDirRequest,
     LogRequest,
@@ -26,15 +23,16 @@ from cairn.external_models import (
 )
 from cairn.lifecycle import SUBMISSION_KEY, SubmissionRecord
 
+ExternalFunction = Callable[..., Awaitable[Any]]
 
-class CairnAgentTools:
-    """Implementation of agent-facing tool behavior."""
 
-    def __init__(self, agent_id: str, agent_fs: Workspace, stable_fs: Workspace, llm_provider: Any = None):
+class CairnExternalFunctions:
+    """Implementation of external functions exposed to agent scripts."""
+
+    def __init__(self, agent_id: str, agent_fs: Workspace, stable_fs: Workspace) -> None:
         self.agent_id = agent_id
         self.agent_fs = agent_fs
         self.stable_fs = stable_fs
-        self.llm_provider = llm_provider
 
     async def read_file(self, path: str) -> str:
         request = ReadFileRequest(path=path)
@@ -116,13 +114,6 @@ class CairnAgentTools:
 
         return f"{normalized}/**/*"
 
-    async def ask_llm(self, prompt: str, context: str = "") -> str:
-        request = AskLlmRequest(prompt=prompt, context=context)
-        if self.llm_provider is None:
-            raise RuntimeError("No LLM provider configured")
-        full_prompt = f"{request.context}\n\n{request.prompt}" if request.context else request.prompt
-        return await self.llm_provider.generate(full_prompt)
-
     async def submit_result(self, summary: str, changed_files: list[str]) -> bool:
         request = SubmitResultRequest(summary=summary, changed_files=changed_files)
         submission = SubmissionPayload(summary=request.summary, changed_files=request.changed_files)
@@ -137,84 +128,41 @@ class CairnAgentTools:
         return True
 
 
-class ReadFileInput(BaseModel):
-    path: str = Field(description="Relative file path to read")
-
-
-class WriteFileInput(BaseModel):
-    path: str
-    content: str
-
-
-class ListDirInput(BaseModel):
-    path: str = "."
-
-
-class FileExistsInput(BaseModel):
-    path: str
-
-
-class SearchFilesInput(BaseModel):
-    pattern: str
-
-
-class SearchContentInput(BaseModel):
-    pattern: str
-    path: str = "."
-
-
-class AskLlmInput(BaseModel):
-    prompt: str
-    context: str = ""
-
-
-class SubmitResultInput(BaseModel):
-    summary: str
-    changed_files: list[str]
-
-
-class LogInput(BaseModel):
-    message: str
-
-
-def create_agent_tools(
-    agent_id: str,
-    agent_fs: Workspace,
-    stable_fs: Workspace,
-    llm_provider: Any = None,
-) -> list[Callable[..., Any]]:
-    """Create Grail-compatible tool callables for an agent sandbox."""
-    ext = CairnAgentTools(agent_id=agent_id, agent_fs=agent_fs, stable_fs=stable_fs, llm_provider=llm_provider)
+def create_external_functions(agent_id: str, agent_fs: Workspace, stable_fs: Workspace) -> dict[str, ExternalFunction]:
+    """Create the external function map for Grail execution."""
+    ext = CairnExternalFunctions(agent_id=agent_id, agent_fs=agent_fs, stable_fs=stable_fs)
 
     async def read_file(path: str) -> str:
-        return await ext.read_file(ReadFileInput(path=path).path)
+        return await ext.read_file(path)
 
     async def write_file(path: str, content: str) -> bool:
-        payload = WriteFileInput(path=path, content=content)
-        return await ext.write_file(payload.path, payload.content)
+        return await ext.write_file(path, content)
 
     async def list_dir(path: str = ".") -> list[str]:
-        return await ext.list_dir(ListDirInput(path=path).path)
+        return await ext.list_dir(path)
 
     async def file_exists(path: str) -> bool:
-        return await ext.file_exists(FileExistsInput(path=path).path)
+        return await ext.file_exists(path)
 
     async def search_files(pattern: str) -> list[str]:
-        return await ext.search_files(SearchFilesInput(pattern=pattern).pattern)
+        return await ext.search_files(pattern)
 
     async def search_content(pattern: str, path: str = ".") -> list[dict[str, Any]]:
-        payload = SearchContentInput(pattern=pattern, path=path)
-        return await ext.search_content(payload.pattern, payload.path)
-
-    async def ask_llm(prompt: str, context: str = "") -> str:
-        payload = AskLlmInput(prompt=prompt, context=context)
-        return await ext.ask_llm(payload.prompt, payload.context)
+        return await ext.search_content(pattern, path)
 
     async def submit_result(summary: str, changed_files: list[str]) -> bool:
-        payload = SubmitResultInput(summary=summary, changed_files=changed_files)
-        return await ext.submit_result(payload.summary, payload.changed_files)
+        return await ext.submit_result(summary, changed_files)
 
     async def log(message: str) -> bool:
-        return await ext.log(LogInput(message=message).message)
+        return await ext.log(message)
 
-    return [read_file, write_file, list_dir, file_exists, search_files, search_content, ask_llm, submit_result, log]
+    return {
+        "read_file": read_file,
+        "write_file": write_file,
+        "list_dir": list_dir,
+        "file_exists": file_exists,
+        "search_files": search_files,
+        "search_content": search_content,
+        "submit_result": submit_result,
+        "log": log,
+    }

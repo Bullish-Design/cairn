@@ -40,8 +40,8 @@ class SuccessfulScript:
     def check(self) -> CheckResult:
         return CheckResult(True)
 
-    async def run(self, *, inputs: dict, externals: list[object]) -> None:
-        tools = {tool.__name__: tool for tool in externals}
+    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
+        tools = externals
         assert inputs["task_description"] == "create file"
         await tools["write_file"]("generated.txt", "from grail")
         await tools["submit_result"]("ok", ["generated.txt"])
@@ -51,7 +51,7 @@ class FailingScript:
     def check(self) -> CheckResult:
         return CheckResult(True)
 
-    async def run(self, *, inputs: dict, externals: list[object]) -> None:
+    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
         _ = inputs
         _ = externals
         raise grail.ExecutionError("execution failed")
@@ -61,7 +61,7 @@ class InvalidScript:
     def check(self) -> CheckResult:
         return CheckResult(False, ["invalid code"])
 
-    async def run(self, *, inputs: dict, externals: list[object]) -> None:
+    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
         raise AssertionError("run should not be called")
 
 

@@ -14,7 +14,7 @@ from fsdantic import Fsdantic, MergeStrategy, Workspace
 import grail
 
 from cairn.agent import AgentContext, AgentState
-from cairn.agent_tools import create_agent_tools
+from cairn.external_functions import create_external_functions
 from cairn.providers import CodeProvider, CodeProviderError, FileCodeProvider
 from cairn.commands import (
     AcceptCommand,
@@ -42,7 +42,7 @@ class CairnOrchestrator:
         config: OrchestratorSettings | None = None,
         executor_settings: ExecutorSettings | None = None,
         code_provider: CodeProvider | None = None,
-        tools_factory: Callable[[str, Workspace, Workspace, Any], list[Callable[..., Any]]] | None = None,
+        tools_factory: Callable[[str, Workspace, Workspace], dict[str, Callable[..., Any]]] | None = None,
     ):
         path_settings = PathsSettings()
         self.project_root = Path(path_settings.project_root or project_root).resolve()
@@ -61,7 +61,7 @@ class CairnOrchestrator:
         self._running_tasks: set[asyncio.Task[None]] = set()
 
         self.code_provider = code_provider or FileCodeProvider(base_path=self.project_root)
-        self.tools_factory = tools_factory or create_agent_tools
+        self.tools_factory = tools_factory or create_external_functions
 
         self.watcher: FileWatcher | None = None
         self.signals: SignalHandler | None = None
@@ -332,7 +332,7 @@ class CairnOrchestrator:
                 return
 
             await transition(AgentState.EXECUTING)
-            tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable, None)
+            tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable)
 
             grail_dir = self.project_root / ".grail" / "agents" / ctx.agent_id
             grail_dir.mkdir(parents=True, exist_ok=True)

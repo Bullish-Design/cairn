@@ -1,7 +1,7 @@
 """Cairn: Execution and orchestration layer for Nixbox."""
 
 from cairn.agent import AgentContext, AgentState
-from cairn.agent_tools import CairnAgentTools, create_agent_tools
+from cairn.external_functions import CairnExternalFunctions, create_external_functions
 from cairn.orchestrator import CairnOrchestrator
 from cairn.providers import CodeProvider, CodeProviderError, FileCodeProvider, InlineCodeProvider
 from cairn.queue import QueuedTask, TaskPriority, TaskQueue
@@ -13,7 +13,7 @@ from cairn.watcher import FileWatcher
 __all__ = [
     "AgentContext",
     "AgentState",
-    "CairnAgentTools",
+    "CairnExternalFunctions",
     "CairnOrchestrator",
     "CodeProvider",
     "CodeProviderError",
@@ -28,7 +28,7 @@ __all__ = [
     "SignalHandler",
     "TaskPriority",
     "TaskQueue",
-    "create_agent_tools",
+    "create_external_functions",
 ]
 
 __version__ = "0.1.0"
