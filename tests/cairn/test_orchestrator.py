@@ -73,7 +73,7 @@ def test_load_grail_script_uses_legacy_loader(monkeypatch: pytest.MonkeyPatch, t
         calls.append(path)
         return SuccessfulScript()
 
-    monkeypatch.setattr("cairn.orchestrator.grail.load", _legacy_loader)
+    monkeypatch.setattr(grail, "load", _legacy_loader, raising=False)
 
     pym_path = tmp_path / "legacy-task.pym"
     pym_path.write_text("x = 1", encoding="utf-8")
@@ -92,8 +92,8 @@ def test_load_grail_script_uses_modern_loader_when_legacy_missing(
         def from_file(cls, path: str) -> object:
             return {"path": path, "loader": cls.__name__}
 
-    monkeypatch.delattr("cairn.orchestrator.grail.load", raising=False)
-    monkeypatch.setattr("cairn.orchestrator.grail.Script", ScriptLoader, raising=False)
+    monkeypatch.delattr(grail, "load", raising=False)
+    monkeypatch.setattr(grail, "Script", ScriptLoader, raising=False)
 
     pym_path = tmp_path / "modern-task.pym"
     pym_path.write_text("x = 1", encoding="utf-8")
@@ -104,9 +104,9 @@ def test_load_grail_script_uses_modern_loader_when_legacy_missing(
 
 
 def test_load_grail_script_raises_when_no_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.delattr("cairn.orchestrator.grail.load", raising=False)
-    monkeypatch.delattr("cairn.orchestrator.grail.Script", raising=False)
-    monkeypatch.delattr("cairn.orchestrator.grail.Program", raising=False)
+    monkeypatch.delattr(grail, "load", raising=False)
+    monkeypatch.delattr(grail, "Script", raising=False)
+    monkeypatch.delattr(grail, "Program", raising=False)
 
     pym_path = tmp_path / "missing-loader-task.pym"
     pym_path.write_text("x = 1", encoding="utf-8")
@@ -171,7 +171,7 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
     provider = StubCodeProvider()
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path, provider)
 
-    monkeypatch.setattr("cairn.orchestrator.grail.load", lambda _: SuccessfulScript())
+    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: SuccessfulScript())
 
     ctx = AgentContext(
         agent_id="agent-success",
@@ -212,7 +212,7 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
 async def test_run_agent_transitions_to_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
 
-    monkeypatch.setattr("cairn.orchestrator.grail.load", lambda _: FailingScript())
+    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: FailingScript())
 
     ctx = AgentContext(
         agent_id="agent-fail",
@@ -241,9 +241,9 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path, provider)
 
     def _raise(_: str) -> object:
-        raise AssertionError("grail.load should not be called")
+        raise AssertionError("_load_grail_script should not be called")
 
-    monkeypatch.setattr("cairn.orchestrator.grail.load", _raise)
+    monkeypatch.setattr("cairn.orchestrator._load_grail_script", _raise)
 
     ctx = AgentContext(
         agent_id="agent-provider-invalid",
@@ -270,7 +270,7 @@ async def test_run_agent_validation_failure_transitions_to_errored(
 ) -> None:
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
 
-    monkeypatch.setattr("cairn.orchestrator.grail.load", lambda _: InvalidScript())
+    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: InvalidScript())
 
     ctx = AgentContext(
         agent_id="agent-invalid",
