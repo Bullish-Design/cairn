@@ -37,12 +37,13 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests/cairn"]
+testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "benchmark: mark test as a performance benchmark",
+    "integration: mark test as integration tests",
     "slow: mark test as slow (deselect with '-m \"not slow\"')",
 ]
 addopts = [
@@ -50,6 +51,23 @@ addopts = [
     "--verbose",
 ]
 pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["cairn"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
 
 [tool.uv.sources]
 fsdantic = { git = "https://github.com/Bullish-Design/fsdantic.git" }

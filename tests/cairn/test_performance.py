@@ -207,3 +207,28 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
         await orch.trash_agent(ctx.agent_id)
         await bin_ws.close()
         await stable.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.benchmark
+async def test_queue_throughput_benchmark(record_property: pytest.RecordProperty) -> None:
+    from cairn.queue import TaskPriority, TaskQueue
+
+    queue = TaskQueue()
+    iterations = 200
+
+    start = time.perf_counter()
+    for i in range(iterations):
+        await queue.enqueue(f"task-{i}", TaskPriority.NORMAL)
+    enqueue_duration = time.perf_counter() - start
+
+    start = time.perf_counter()
+    for _ in range(iterations):
+        await queue.dequeue()
+    dequeue_duration = time.perf_counter() - start
+
+    record_property("queue_enqueue_seconds", enqueue_duration)
+    record_property("queue_dequeue_seconds", dequeue_duration)
+
+    assert enqueue_duration < 0.5
+    assert dequeue_duration < 0.5
