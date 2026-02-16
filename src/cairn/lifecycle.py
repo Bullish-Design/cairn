@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from pathlib import Path
+from typing import Any, Callable
+
 from fsdantic import VersionedKVRecord, Workspace
 from pydantic import field_validator, model_validator
 
 from cairn.agent import AgentState
-from cairn.constants import LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
+from cairn.constants import (
+    LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
+    LIFECYCLE_MAX_RETRY_ATTEMPTS,
+    LIFECYCLE_RETRY_BACKOFF_FACTOR,
+    LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
+)
+from cairn.error_formatting import format_lifecycle_error
 from cairn.exceptions import LifecycleError, RecoverableError, VersionConflictError
 from cairn.retry_utils import with_retry
 from cairn.types import SubmissionData
+
+logger = logging.getLogger(__name__)
 
 AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
@@ -36,6 +48,7 @@ class LifecycleRecord(VersionedKVRecord):
     db_path: str
     submission: SubmissionData | None = None
     error: str | None = None
+    version: int = 0
 
     @field_validator("agent_id")
     @classmethod
@@ -84,10 +97,70 @@ class LifecycleStore:
         retry_exceptions=LIFECYCLE_RETRY_EXCEPTIONS,
     )
     async def _save_with_retry(self, record: LifecycleRecord) -> None:
+        existing = await self.repo.load(record.agent_id)
+
+        if existing:
+            if existing.version != record.version:
+                raise VersionConflictError(
+                    format_lifecycle_error(
+                        "Version conflict - record was modified concurrently",
+                        agent_id=record.agent_id,
+                        version=record.version,
+                        expected_version=existing.version,
+                    ),
+                    error_code="VERSION_CONFLICT",
+                    context={
+                        "agent_id": record.agent_id,
+                        "expected_version": existing.version,
+                        "provided_version": record.version,
+                    },
+                )
+            record.version = existing.version + 1
+            record.created_at = existing.created_at
+        else:
+            record.version = 1
+
         await self.repo.save(record.agent_id, record)
 
     async def load(self, agent_id: str) -> LifecycleRecord | None:
         return await self.repo.load(agent_id)
+
+    async def update_atomic(
+        self,
+        agent_id: str,
+        update_fn: Callable[[LifecycleRecord], Any],
+        max_retries: int = LIFECYCLE_MAX_RETRY_ATTEMPTS,
+    ) -> LifecycleRecord:
+        for attempt in range(1, max_retries + 1):
+            record = await self.load(agent_id)
+            if record is None:
+                raise LifecycleError(
+                    f"Cannot update non-existent record: {agent_id}",
+                    error_code="LIFECYCLE_NOT_FOUND",
+                    context={"agent_id": agent_id},
+                )
+
+            update_fn(record)
+
+            try:
+                await self.save(record)
+                return record
+            except VersionConflictError:
+                if attempt >= max_retries:
+                    logger.error(
+                        "Failed to update lifecycle after retries",
+                        extra={"agent_id": agent_id, "attempts": max_retries},
+                    )
+                    raise
+
+                delay = LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS * (LIFECYCLE_RETRY_BACKOFF_FACTOR ** (attempt - 1))
+                logger.debug(
+                    "Version conflict on lifecycle update; retrying",
+                    extra={"agent_id": agent_id, "attempt": attempt, "delay": delay},
+                )
+                await asyncio.sleep(delay)
+
+        raise VersionConflictError("Unexpected retry exhaustion")
 
     async def delete(self, agent_id: str) -> None:
         await self.repo.delete(agent_id)

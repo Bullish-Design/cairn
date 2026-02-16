@@ -57,7 +57,7 @@ class BenchmarkScript:
         await tools["submit_result"](f"completed {task}", [])
 
 
-async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object, object, object]:
+async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
@@ -70,13 +70,15 @@ async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object
 
     stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
     bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
-    agent_ws = await Fsdantic.open(path=str(tmp_path / "agent.db"))
+    agent_db_path = tmp_path / "agent.db"
+    agent_ws = await Fsdantic.open(path=str(agent_db_path))
 
     orch.stable = stable
     orch.bin = bin_ws
     orch.lifecycle = LifecycleStore(bin_ws)
+    await orch.workspace_cache.put(str(agent_db_path), agent_ws)
 
-    return orch, stable, bin_ws, agent_ws
+    return orch, stable, bin_ws, agent_ws, agent_db_path
 
 
 @pytest.mark.asyncio
@@ -87,7 +89,7 @@ async def test_agent_lifecycle_latency_benchmarks(
     tmp_path: Path,
 ) -> None:
     """Benchmark phase-5 latency targets from CAIRN_REFACTOR-STEP_5.md."""
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
     monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: BenchmarkScript())
 
     spawned_agent_id: str | None = None
@@ -105,6 +107,7 @@ async def test_agent_lifecycle_latency_benchmarks(
             task="generate-docs",
             priority=TaskPriority.NORMAL,
             state=AgentState.QUEUED,
+            agent_db_path=agent_db_path,
             agent_fs=agent_ws,
         )
         orch.active_agents[ctx.agent_id] = ctx
@@ -118,6 +121,7 @@ async def test_agent_lifecycle_latency_benchmarks(
 
         preview_target = orch.cairn_home / "workspaces" / "preview-benchmark"
         preview_start = time.perf_counter()
+        assert ctx.agent_fs is not None
         await ctx.agent_fs.materialize.to_disk(
             target_path=preview_target,
             base=stable,
@@ -147,7 +151,7 @@ async def test_agent_lifecycle_latency_benchmarks(
         assert spawned_agent_id.startswith("agent-")
     finally:
         extra = orch.active_agents.pop(spawned_agent_id, None) if spawned_agent_id else None
-        if extra is not None:
+        if extra is not None and extra.agent_fs is not None:
             await extra.agent_fs.close()
         await bin_ws.close()
         await stable.close()
@@ -170,7 +174,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
     tmp_path: Path,
 ) -> None:
     """Benchmark representative execution durations and capture optional Grail memory telemetry."""
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
     monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: BenchmarkScript())
 
     ctx = AgentContext(
@@ -178,6 +182,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
         task=task,
         priority=TaskPriority.NORMAL,
         state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx

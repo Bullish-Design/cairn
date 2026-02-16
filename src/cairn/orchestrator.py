@@ -29,13 +29,24 @@ from cairn.commands import (
     StatusCommand,
 )
 from cairn.constants import DEFAULT_EXECUTION_TIMEOUT_SECONDS, LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
-from cairn.exceptions import CairnError, ProviderError, RecoverableError, WorkspaceMergeError
+from cairn.exceptions import (
+    CairnError,
+    LifecycleError,
+    ProviderError,
+    RecoverableError,
+    ResourceLimitError,
+    TimeoutError as CairnTimeoutError,
+    VersionConflictError,
+    WorkspaceMergeError,
+)
 from cairn.lifecycle import LifecycleRecord, LifecycleStore, SUBMISSION_KEY, SubmissionRecord
 from cairn.queue import TaskPriority, TaskQueue
+from cairn.resource_limits import ResourceLimiter, run_with_timeout
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.signals import SignalHandler
 from cairn.types import AgentSummary, GrailCheckResult, GrailScript, ToolsFactory
 from cairn.watcher import FileWatcher
+from cairn.workspace_cache import WorkspaceCache
 from cairn.workspace_manager import WorkspaceManager
 
 
@@ -98,7 +109,7 @@ class CairnOrchestrator:
         self.stable: Workspace | None = None
         self.bin: Workspace | None = None
         self.active_agents: dict[str, AgentContext] = {}
-        self.queue = TaskQueue()
+        self.queue = TaskQueue(max_size=self.config.max_queue_size)
         self._worker_task: asyncio.Task[None] | None = None
         self._semaphore = asyncio.Semaphore(self.config.max_concurrent_agents)
         self._running_tasks: set[asyncio.Task[None]] = set()
@@ -111,6 +122,7 @@ class CairnOrchestrator:
         self.lifecycle: LifecycleStore | None = None
         self.state_file = self.cairn_home / "state" / "orchestrator.json"
         self.workspace_manager = WorkspaceManager()
+        self.workspace_cache = WorkspaceCache(max_size=self.config.workspace_cache_size)
 
     async def initialize(self) -> None:
         self.agentfs_dir.mkdir(parents=True, exist_ok=True)
@@ -169,13 +181,14 @@ class CairnOrchestrator:
                 await self.lifecycle.save(record)
                 continue
 
-            self.workspace_manager.track_workspace(agent_fs)
+            await self.workspace_cache.put(str(db_path), agent_fs)
 
             ctx = AgentContext(
                 agent_id=agent_id,
                 task=record.task,
                 priority=TaskPriority(record.priority),
                 state=record.state,
+                agent_db_path=db_path,
                 agent_fs=agent_fs,
                 created_at=record.created_at,
                 state_changed_at=record.state_changed_at,
@@ -210,6 +223,7 @@ class CairnOrchestrator:
                     extra={"active_count": len(self._running_tasks)},
                 )
 
+        await self.workspace_cache.clear()
         await self.workspace_manager.close_all()
 
     async def submit_command(self, command: CairnCommand) -> CommandResult:
@@ -282,6 +296,30 @@ class CairnOrchestrator:
 
         return CommandResult(command_type=command.type, payload={"agents": agents_dict})
 
+    async def _get_agent_workspace(self, ctx: AgentContext) -> Workspace:
+        cache_key = str(ctx.agent_db_path)
+        cached = await self.workspace_cache.get(cache_key)
+        if cached is not None:
+            ctx.agent_fs = cached
+            return cached
+
+        if ctx.agent_fs is not None:
+            await self._close_agent_workspace(ctx)
+
+        agent_fs = await Fsdantic.open(path=str(ctx.agent_db_path))
+        ctx.agent_fs = agent_fs
+        await self.workspace_cache.put(cache_key, agent_fs)
+        return agent_fs
+
+    async def _close_agent_workspace(self, ctx: AgentContext) -> None:
+        if ctx.agent_fs is None:
+            return
+        try:
+            await ctx.agent_fs.close()
+        except Exception as exc:  # pragma: no cover - best effort cleanup
+            logger.warning("Failed to close agent workspace", exc_info=exc)
+        ctx.agent_fs = None
+
     async def spawn_agent(self, task: str, priority: TaskPriority = TaskPriority.NORMAL) -> str:
         if self.lifecycle is None:
             raise RuntimeError("Orchestrator not initialized")
@@ -289,13 +327,28 @@ class CairnOrchestrator:
         agent_id = f"agent-{uuid.uuid4().hex[:8]}"
         agent_db = self.agentfs_dir / f"{agent_id}.db"
         agent_fs = await Fsdantic.open(path=str(agent_db))
-        self.workspace_manager.track_workspace(agent_fs)
+        await self.workspace_cache.put(str(agent_db), agent_fs)
 
-        ctx = AgentContext(agent_id=agent_id, task=task, priority=priority, state=AgentState.QUEUED, agent_fs=agent_fs)
+        ctx = AgentContext(
+            agent_id=agent_id,
+            task=task,
+            priority=priority,
+            state=AgentState.QUEUED,
+            agent_db_path=agent_db,
+            agent_fs=agent_fs,
+        )
         self.active_agents[agent_id] = ctx
 
-        await self._save_lifecycle_record(ctx)
-        await self.queue.enqueue(agent_id, priority)
+        try:
+            await self._save_lifecycle_record(ctx)
+            await self.queue.enqueue(agent_id, priority)
+        except ResourceLimitError:
+            self.active_agents.pop(agent_id, None)
+            if self.lifecycle is not None:
+                await self.lifecycle.delete(agent_id)
+            await self.workspace_cache.remove(str(agent_db))
+            raise
+
         await self.persist_state()
         return agent_id
 
@@ -307,7 +360,8 @@ class CairnOrchestrator:
         if self.stable is None:
             raise RuntimeError("Stable workspace not initialized")
 
-        merge_result = await self.stable.overlay.merge(ctx.agent_fs, strategy=MergeStrategy.OVERWRITE)
+        agent_fs = await self._get_agent_workspace(ctx)
+        merge_result = await self.stable.overlay.merge(agent_fs, strategy=MergeStrategy.OVERWRITE)
         merge_errors = getattr(merge_result, "errors", None)
         if merge_errors:
             if isinstance(merge_errors, (list, tuple, set)):
@@ -349,39 +403,44 @@ class CairnOrchestrator:
         if ctx is None:
             return
 
-        agent_db = self.agentfs_dir / f"{agent_id}.db"
+        agent_db = ctx.agent_db_path
         bin_db = self.agentfs_dir / f"bin-{agent_id}.db"
 
         try:
-            async with self.workspace_manager.manage_workspace(ctx.agent_fs, path=agent_db):
-                pass
+            removed = await self.workspace_cache.remove(str(agent_db))
+            if removed:
+                ctx.agent_fs = None
+            else:
+                await self._close_agent_workspace(ctx)
 
             if agent_db.exists() and not bin_db.exists():
                 shutil.move(agent_db, bin_db)
+                ctx.agent_db_path = bin_db
 
             if self.lifecycle is not None:
-                # Load existing record to preserve version for optimistic concurrency control
-                existing = await self.lifecycle.load(ctx.agent_id)
-
-                record = LifecycleRecord(
-                    agent_id=ctx.agent_id,
-                    task=ctx.task,
-                    priority=int(ctx.priority),
-                    state=ctx.state,
-                    created_at=ctx.created_at,
-                    state_changed_at=ctx.state_changed_at,
-                    db_path=str(bin_db),
-                    submission=ctx.submission,
-                    error=ctx.error,
-                )
-
-                # Preserve version and timestamps from existing record to avoid version conflicts
-                if existing:
-                    record.version = existing.version
-                    record.created_at = existing.created_at
-                    record.updated_at = existing.updated_at
-
-                await self.lifecycle.save(record)
+                try:
+                    await self.lifecycle.update_atomic(
+                        ctx.agent_id,
+                        lambda record: self._apply_lifecycle_update(record, ctx, bin_db),
+                    )
+                except VersionConflictError:
+                    logger.warning(
+                        "Failed to update lifecycle after version conflicts",
+                        extra={"agent_id": ctx.agent_id},
+                    )
+                except LifecycleError:
+                    record = LifecycleRecord(
+                        agent_id=ctx.agent_id,
+                        task=ctx.task,
+                        priority=int(ctx.priority),
+                        state=ctx.state,
+                        created_at=ctx.created_at,
+                        state_changed_at=ctx.state_changed_at,
+                        db_path=str(bin_db),
+                        submission=ctx.submission,
+                        error=ctx.error,
+                    )
+                    await self.lifecycle.save(record)
 
             workspace = self.cairn_home / "workspaces" / agent_id
             if workspace.exists():
@@ -416,7 +475,8 @@ class CairnOrchestrator:
             if self.stable is None:
                 raise RuntimeError("Stable workspace not initialized")
 
-            context = {"agent_id": ctx.agent_id, "workspace": ctx.agent_fs, "stable": self.stable}
+            agent_fs = await self._get_agent_workspace(ctx)
+            context = {"agent_id": ctx.agent_id, "workspace": agent_fs, "stable": self.stable}
 
             try:
                 generated = await self.code_provider.get_code(ctx.task, context)
@@ -433,7 +493,7 @@ class CairnOrchestrator:
                 return
 
             await transition(AgentState.EXECUTING)
-            tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable)
+            tools = self.tools_factory(agent_id, agent_fs, self.stable)
 
             grail_dir = self.project_root / ".grail" / "agents" / ctx.agent_id
             grail_dir.mkdir(parents=True, exist_ok=True)
@@ -456,15 +516,24 @@ class CairnOrchestrator:
                 await transition(AgentState.ERRORED)
                 return
 
-            await script.run(inputs={"task_description": ctx.task}, externals=tools)
+            limiter = ResourceLimiter(
+                timeout_seconds=self.executor_settings.max_execution_time,
+                max_memory_bytes=self.executor_settings.max_memory_bytes,
+            )
+
+            async with limiter.limit():
+                await run_with_timeout(
+                    script.run(inputs={"task_description": ctx.task}, externals=tools),
+                    timeout_seconds=self.executor_settings.max_execution_time,
+                )
 
             await transition(AgentState.SUBMITTING)
-            submission_repo = ctx.agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
+            submission_repo = agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
             submission_record = await submission_repo.load(SUBMISSION_KEY)
             ctx.submission = submission_record.submission if submission_record else None
 
             preview_dir = self.cairn_home / "workspaces" / agent_id
-            await ctx.agent_fs.materialize.to_disk(
+            await agent_fs.materialize.to_disk(
                 target_path=preview_dir,
                 base=self.stable,
                 clean=True,
@@ -477,6 +546,12 @@ class CairnOrchestrator:
                 ctx.error = str(exc)
                 ctx.transition(AgentState.ERRORED)
                 await self._save_lifecycle_record(ctx)
+        except (ResourceLimitError, CairnTimeoutError) as exc:
+            if ctx is not None:
+                ctx.error = str(exc)
+                ctx.transition(AgentState.ERRORED)
+                await self._save_lifecycle_record(ctx)
+            return
         except CairnError as exc:
             if ctx is not None:
                 ctx.error = str(exc)
@@ -519,16 +594,43 @@ class CairnOrchestrator:
             return 0
         return await self.lifecycle.cleanup_old(max_age_seconds, self.agentfs_dir)
 
+    def _apply_lifecycle_update(
+        self,
+        record: LifecycleRecord,
+        ctx: AgentContext,
+        db_path: Path,
+    ) -> None:
+        record.task = ctx.task
+        record.priority = int(ctx.priority)
+        record.state = ctx.state
+        record.state_changed_at = ctx.state_changed_at
+        record.db_path = str(db_path)
+        record.submission = ctx.submission
+        record.error = ctx.error
+
     async def _save_lifecycle_record(self, ctx: AgentContext) -> None:
         if self.lifecycle is None:
             return
 
-        # Load existing record to preserve version for optimistic concurrency control
-        existing = await self.lifecycle.load(ctx.agent_id)
-
-        db_path = self.agentfs_dir / f"{ctx.agent_id}.db"
+        db_path = ctx.agent_db_path
         if not db_path.exists():
-            db_path = self.agentfs_dir / f"bin-{ctx.agent_id}.db"
+            bin_path = self.agentfs_dir / f"bin-{ctx.agent_id}.db"
+            if bin_path.exists():
+                db_path = bin_path
+
+        existing = await self.lifecycle.load(ctx.agent_id)
+        if existing:
+            try:
+                await self.lifecycle.update_atomic(
+                    ctx.agent_id,
+                    lambda record: self._apply_lifecycle_update(record, ctx, db_path),
+                )
+            except VersionConflictError:
+                logger.warning(
+                    "Persistent version conflict saving lifecycle",
+                    extra={"agent_id": ctx.agent_id, "state": ctx.state.value},
+                )
+            return
 
         record = LifecycleRecord(
             agent_id=ctx.agent_id,
@@ -541,13 +643,6 @@ class CairnOrchestrator:
             submission=ctx.submission,
             error=ctx.error,
         )
-
-        # Preserve version and timestamps from existing record to avoid version conflicts
-        if existing:
-            record.version = existing.version
-            record.created_at = existing.created_at
-            record.updated_at = existing.updated_at
-
         await self.lifecycle.save(record)
 
     def _get_agent(self, agent_id: str) -> AgentContext:

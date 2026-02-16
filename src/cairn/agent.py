@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from enum import Enum
+from pathlib import Path
 
 from fsdantic import Workspace
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -34,7 +35,8 @@ class AgentContext(BaseModel):
     task: str
     priority: TaskPriority
     state: AgentState
-    agent_fs: Workspace
+    agent_db_path: Path
+    agent_fs: Workspace | None = None
     generated_code: str | None = None
     execution_result: ExecutionResult | None = None
     submission: SubmissionData | None = None

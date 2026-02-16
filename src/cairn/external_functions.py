@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-import re
+import logging
 from typing import cast
 
 from fsdantic import FileNotFoundError, ViewQuery, Workspace
+from pydantic import ValidationError
 
+from cairn.exceptions import SecurityError
 from cairn.external_models import (
     FileExistsRequest,
     ListDirRequest,
@@ -22,7 +24,11 @@ from cairn.external_models import (
     WriteFileRequest,
 )
 from cairn.lifecycle import SUBMISSION_KEY, SubmissionRecord
+from cairn.regex_utils import RegexTimeoutError, compile_safe_regex, search_with_timeout
 from cairn.types import ExternalTools, FileEntryProtocol, SearchContentMatchData
+
+
+logger = logging.getLogger(__name__)
 
 
 class CairnExternalFunctions:
@@ -62,9 +68,20 @@ class CairnExternalFunctions:
         return [file_path.lstrip("/") for file_path in files]
 
     async def search_content(self, pattern: str, path: str = ".") -> list[SearchContentMatchData]:
-        request = SearchContentRequest(pattern=pattern, path=path)
+        try:
+            request = SearchContentRequest(pattern=pattern, path=path)
+        except ValidationError as exc:
+            raise ValueError(f"Invalid path: {path}") from exc
         path_pattern = self._search_content_path_pattern(request.path)
-        regex = re.compile(request.pattern)
+
+        try:
+            regex = compile_safe_regex(request.pattern)
+        except SecurityError:
+            logger.warning(
+                "Blocked dangerous regex pattern",
+                extra={"pattern": request.pattern[:100]},
+            )
+            raise
 
         query = ViewQuery(
             path_pattern=path_pattern,
@@ -77,7 +94,7 @@ class CairnExternalFunctions:
         stable_entries = await self.stable_fs.files.query(query)
         agent_paths = {entry.path for entry in agent_entries}
 
-        def build_matches(entries: Iterable[FileEntryProtocol]) -> list[SearchContentMatchData]:
+        async def build_matches(entries: Iterable[FileEntryProtocol]) -> list[SearchContentMatchData]:
             matches: list[SearchContentMatchData] = []
             for entry in entries:
                 content = entry.content
@@ -86,17 +103,28 @@ class CairnExternalFunctions:
                 if isinstance(content, bytes):
                     content = content.decode("utf-8", errors="ignore")
                 for line_number, line in enumerate(str(content).splitlines(), start=1):
-                    if regex.search(line):
-                        match = SearchContentMatch(
-                            file=entry.path.lstrip("/"),
-                            line=line_number,
-                            text=line,
-                        ).model_dump()
-                        matches.append(cast(SearchContentMatchData, match))
+                    try:
+                        if await search_with_timeout(regex, line):
+                            match = SearchContentMatch(
+                                file=entry.path.lstrip("/"),
+                                line=line_number,
+                                text=line,
+                            ).model_dump()
+                            matches.append(cast(SearchContentMatchData, match))
+                    except RegexTimeoutError:
+                        logger.warning(
+                            "Regex search timed out on line",
+                            extra={
+                                "file": entry.path.lstrip("/"),
+                                "line_number": line_number,
+                                "pattern": request.pattern[:100],
+                            },
+                        )
+                        continue
             return matches
 
-        all_matches = build_matches(agent_entries)
-        overlay_matches = build_matches([entry for entry in stable_entries if entry.path not in agent_paths])
+        all_matches = await build_matches(agent_entries)
+        overlay_matches = await build_matches([entry for entry in stable_entries if entry.path not in agent_paths])
         all_matches.extend(overlay_matches)
 
         return all_matches

@@ -8,8 +8,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from watchfiles import Change, awatch
+
 from cairn.commands import CairnCommand, CommandType, parse_command_payload
-from cairn.constants import SIGNAL_POLL_INTERVAL_SECONDS
 
 if TYPE_CHECKING:
     from cairn.orchestrator import CairnOrchestrator
@@ -39,37 +40,52 @@ class SignalHandler:
         self.enable_polling = enable_polling
 
     async def watch(self) -> None:
-        """Poll for signal files every 500ms."""
+        """Watch signal files using filesystem events."""
         if not self.enable_polling:
             return
 
         self.signals_dir.mkdir(parents=True, exist_ok=True)
+        await self.process_signals_once()
 
-        while True:
-            await asyncio.sleep(SIGNAL_POLL_INTERVAL_SECONDS)
-            await self.process_signals_once()
+        try:
+            async for changes in awatch(
+                self.signals_dir,
+                watch_filter=lambda change, path: str(path).endswith(".json"),
+            ):
+                for change_type, path in changes:
+                    if change_type in (Change.added, Change.modified):
+                        await self._process_signal_path(Path(path))
+        except asyncio.CancelledError:
+            logger.info("Signal watching cancelled")
+            raise
+        except Exception as exc:
+            logger.exception("Error in signal watcher", extra={"error": str(exc)})
+            raise
 
     async def process_signals_once(self) -> None:
         """Detect signal files, parse normalized commands, submit, and cleanup."""
         for signal_file in self._detect_signal_files():
+            await self._process_signal_path(signal_file)
+
+    async def _process_signal_path(self, signal_file: Path) -> None:
+        try:
+            command = self._parse_signal_file(signal_file)
+            if command is None:
+                return
+            await self._dispatch(command)
+        except Exception as exc:
+            logger.exception(
+                "Error processing signal",
+                extra={"file": str(signal_file), "error": str(exc)},
+            )
+        finally:
             try:
-                command = self._parse_signal_file(signal_file)
-                if command is None:
-                    continue
-                await self._dispatch(command)
+                signal_file.unlink(missing_ok=True)
             except Exception as exc:
-                logger.exception(
-                    "Error processing signal",
+                logger.warning(
+                    "Failed to remove signal file",
                     extra={"file": str(signal_file), "error": str(exc)},
                 )
-            finally:
-                try:
-                    signal_file.unlink(missing_ok=True)
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to remove signal file",
-                        extra={"file": str(signal_file), "error": str(exc)},
-                    )
 
     def _detect_signal_files(self) -> list[Path]:
         return sorted(self.signals_dir.glob("*.json"))

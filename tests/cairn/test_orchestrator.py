@@ -128,7 +128,7 @@ def test_load_grail_script_raises_when_no_loader(monkeypatch: pytest.MonkeyPatch
 
 async def _setup_orchestrator(
     tmp_path: Path, code_provider: StubCodeProvider | None = None
-) -> tuple[CairnOrchestrator, object, object, object]:
+) -> tuple[CairnOrchestrator, object, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
@@ -141,20 +141,22 @@ async def _setup_orchestrator(
 
     stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
     bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
-    agent_ws = await Fsdantic.open(path=str(tmp_path / "agent.db"))
+    agent_db_path = tmp_path / "agent.db"
+    agent_ws = await Fsdantic.open(path=str(agent_db_path))
 
     orch.stable = stable
     orch.bin = bin_ws
     orch.lifecycle = LifecycleStore(bin_ws)
+    await orch.workspace_cache.put(str(agent_db_path), agent_ws)
 
-    return orch, stable, bin_ws, agent_ws
+    return orch, stable, bin_ws, agent_ws, agent_db_path
 
 
 async def _setup_orchestrator_with_agent_db(
     tmp_path: Path,
     agent_id: str,
     code_provider: StubCodeProvider | None = None,
-) -> tuple[CairnOrchestrator, object, object, object]:
+) -> tuple[CairnOrchestrator, object, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
@@ -173,14 +175,15 @@ async def _setup_orchestrator_with_agent_db(
     orch.stable = stable
     orch.bin = bin_ws
     orch.lifecycle = LifecycleStore(bin_ws)
+    await orch.workspace_cache.put(str(agent_db), agent_ws)
 
-    return orch, stable, bin_ws, agent_ws
+    return orch, stable, bin_ws, agent_ws, agent_db
 
 
 @pytest.mark.asyncio
 async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     provider = StubCodeProvider()
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path, provider)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path, provider)
 
     monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: SuccessfulScript())
 
@@ -189,6 +192,7 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
         task="create file",
         priority=TaskPriority.NORMAL,
         state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -221,7 +225,7 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.asyncio
 async def test_run_agent_transitions_to_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
 
     monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: FailingScript())
 
@@ -230,6 +234,7 @@ async def test_run_agent_transitions_to_errored(monkeypatch: pytest.MonkeyPatch,
         task="explode",
         priority=TaskPriority.NORMAL,
         state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -249,7 +254,7 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     provider = StubCodeProvider(is_valid=False, error="provider validation failed")
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path, provider)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path, provider)
 
     def _raise(_: str) -> object:
         raise AssertionError("_load_grail_script should not be called")
@@ -261,6 +266,7 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(
         task="bad provider",
         priority=TaskPriority.NORMAL,
         state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -279,7 +285,7 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(
 async def test_run_agent_validation_failure_transitions_to_errored(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
 
     monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: InvalidScript())
 
@@ -288,6 +294,7 @@ async def test_run_agent_validation_failure_transitions_to_errored(
         task="bad code",
         priority=TaskPriority.NORMAL,
         state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -309,13 +316,14 @@ async def test_run_agent_validation_failure_transitions_to_errored(
 @pytest.mark.asyncio
 async def test_accept_agent_requires_reviewing_state(tmp_path: Path) -> None:
     agent_id = "agent-accept-invalid"
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
         task="not ready",
         priority=TaskPriority.NORMAL,
         state=AgentState.EXECUTING,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -332,13 +340,14 @@ async def test_accept_agent_requires_reviewing_state(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_accept_agent_merges_overlay_and_cleans(tmp_path: Path) -> None:
     agent_id = "agent-accept"
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
         task="accept",
         priority=TaskPriority.NORMAL,
         state=AgentState.REVIEWING,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -359,13 +368,14 @@ async def test_accept_agent_merges_overlay_and_cleans(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_reject_agent_requires_reviewing_state(tmp_path: Path) -> None:
     agent_id = "agent-reject-invalid"
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
         task="not ready",
         priority=TaskPriority.NORMAL,
         state=AgentState.SUBMITTING,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -382,13 +392,14 @@ async def test_reject_agent_requires_reviewing_state(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_reject_agent_discards_overlay(tmp_path: Path) -> None:
     agent_id = "agent-reject"
-    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
         task="reject",
         priority=TaskPriority.NORMAL,
         state=AgentState.REVIEWING,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
     orch.active_agents[ctx.agent_id] = ctx
@@ -431,12 +442,14 @@ async def test_save_lifecycle_record_retries_recoverable_errors(tmp_path: Path) 
     lifecycle = _FlakyOrchestratorLifecycle([RecoverableError("t1"), RecoverableError("t2")])
     orch.lifecycle = lifecycle
 
-    agent_ws = await Fsdantic.open(path=str(tmp_path / "agent-retry-save.db"))
+    agent_db_path = tmp_path / "agent-retry-save.db"
+    agent_ws = await Fsdantic.open(path=str(agent_db_path))
     ctx = AgentContext(
         agent_id="agent-retry-save",
         task="save with retry",
         priority=TaskPriority.NORMAL,
         state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
 
@@ -452,17 +465,17 @@ async def test_save_lifecycle_record_retry_exhaustion_bubbles_error(tmp_path: Pa
     orch = CairnOrchestrator(project_root=tmp_path / "project", cairn_home=tmp_path / "cairn-home")
     orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
 
-    lifecycle = _FlakyOrchestratorLifecycle(
-        [RecoverableError("t1"), RecoverableError("t2"), RecoverableError("t3")]
-    )
+    lifecycle = _FlakyOrchestratorLifecycle([RecoverableError("t1"), RecoverableError("t2"), RecoverableError("t3")])
     orch.lifecycle = lifecycle
 
-    agent_ws = await Fsdantic.open(path=str(tmp_path / "agent-retry-exhausted.db"))
+    agent_db_path = tmp_path / "agent-retry-exhausted.db"
+    agent_ws = await Fsdantic.open(path=str(agent_db_path))
     ctx = AgentContext(
         agent_id="agent-retry-exhausted",
         task="save retry exhausted",
         priority=TaskPriority.NORMAL,
         state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
         agent_fs=agent_ws,
     )
 
@@ -473,4 +486,3 @@ async def test_save_lifecycle_record_retry_exhaustion_bubbles_error(tmp_path: Pa
         assert lifecycle.save_calls == 3
     finally:
         await _safe_close(agent_ws)
-
