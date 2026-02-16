@@ -88,7 +88,7 @@ async def test_agent_lifecycle_latency_benchmarks(
 ) -> None:
     """Benchmark phase-5 latency targets from CAIRN_REFACTOR-STEP_5.md."""
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
-    monkeypatch.setattr("cairn.orchestrator.grail.load", lambda _: BenchmarkScript())
+    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: BenchmarkScript())
 
     spawned_agent_id: str | None = None
 
@@ -171,7 +171,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
 ) -> None:
     """Benchmark representative execution durations and capture optional Grail memory telemetry."""
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
-    monkeypatch.setattr("cairn.orchestrator.grail.load", lambda _: BenchmarkScript())
+    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: BenchmarkScript())
 
     ctx = AgentContext(
         agent_id=f"agent-{task}",
