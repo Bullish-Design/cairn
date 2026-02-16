@@ -57,8 +57,6 @@ class WorkspaceManager:
         workspace: Workspace | None = None
         try:
             workspace = await _open_workspace(path, readonly=readonly)
-            self._active_workspaces.add(workspace)
-            yield workspace
         except WorkspaceError:
             raise
         except Exception as exc:  # pragma: no cover - defensive
@@ -67,9 +65,12 @@ class WorkspaceManager:
                 error_code="WORKSPACE_OPEN_FAILED",
                 context={"path": str(path), "readonly": readonly},
             ) from exc
+
+        self._active_workspaces.add(workspace)
+        try:
+            yield workspace
         finally:
-            if workspace is not None:
-                await self.close_workspace(workspace, path=path)
+            await self.close_workspace(workspace, path=path)
 
     @asynccontextmanager
     async def manage_workspace(

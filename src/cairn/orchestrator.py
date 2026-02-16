@@ -28,7 +28,13 @@ from cairn.commands import (
     RejectCommand,
     StatusCommand,
 )
-from cairn.constants import DEFAULT_EXECUTION_TIMEOUT_SECONDS, LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
+from cairn.constants import (
+    DEFAULT_EXECUTION_TIMEOUT_SECONDS,
+    LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
+    LIFECYCLE_MAX_RETRY_ATTEMPTS,
+    LIFECYCLE_RETRY_BACKOFF_FACTOR,
+    LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
+)
 from cairn.exceptions import (
     CairnError,
     LifecycleError,
@@ -42,6 +48,7 @@ from cairn.exceptions import (
 from cairn.lifecycle import LifecycleRecord, LifecycleStore, SUBMISSION_KEY, SubmissionRecord
 from cairn.queue import TaskPriority, TaskQueue
 from cairn.resource_limits import ResourceLimiter, run_with_timeout
+from cairn.retry_utils import with_retry
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.signals import SignalHandler
 from cairn.types import AgentSummary, GrailCheckResult, GrailScript, ToolsFactory
@@ -51,6 +58,11 @@ from cairn.workspace_manager import WorkspaceManager
 
 
 logger = logging.getLogger(__name__)
+
+GRAIL_EXECUTION_ERRORS: tuple[type[Exception], ...] = (grail.GrailExecutionError,)
+_input_error = getattr(grail, "InputError", None)
+if isinstance(_input_error, type) and issubclass(_input_error, Exception):
+    GRAIL_EXECUTION_ERRORS = (grail.GrailExecutionError, _input_error)
 
 
 def _load_grail_script(pym_path: Path) -> GrailScript:
@@ -541,7 +553,7 @@ class CairnOrchestrator:
             )
 
             await transition(AgentState.REVIEWING)
-        except (grail.GrailExecutionError, grail.InputError) as exc:
+        except GRAIL_EXECUTION_ERRORS as exc:
             if ctx is not None:
                 ctx.error = str(exc)
                 ctx.transition(AgentState.ERRORED)
@@ -643,7 +655,18 @@ class CairnOrchestrator:
             submission=ctx.submission,
             error=ctx.error,
         )
-        await self.lifecycle.save(record)
+
+        @with_retry(
+            max_attempts=LIFECYCLE_MAX_RETRY_ATTEMPTS,
+            initial_delay=LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
+            max_delay=LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
+            backoff_factor=LIFECYCLE_RETRY_BACKOFF_FACTOR,
+            retry_exceptions=(RecoverableError,),
+        )
+        async def _persist_record() -> None:
+            await self.lifecycle.save(record)
+
+        await _persist_record()
 
     def _get_agent(self, agent_id: str) -> AgentContext:
         ctx = self.active_agents.get(agent_id)

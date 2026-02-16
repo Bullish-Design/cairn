@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fsdantic import VersionedKVRecord, Workspace
+from fsdantic.exceptions import KVConflictError
 from pydantic import field_validator, model_validator
 
 from cairn.agent import AgentState
@@ -97,7 +98,9 @@ class LifecycleStore:
         retry_exceptions=LIFECYCLE_RETRY_EXCEPTIONS,
     )
     async def _save_with_retry(self, record: LifecycleRecord) -> None:
-        existing = await self.repo.load(record.agent_id)
+        existing = None
+        if hasattr(self.repo, "load"):
+            existing = await self.repo.load(record.agent_id)
 
         if existing:
             if existing.version != record.version:
@@ -115,12 +118,30 @@ class LifecycleStore:
                         "provided_version": record.version,
                     },
                 )
-            record.version = existing.version + 1
             record.created_at = existing.created_at
-        else:
+        elif record.version == 0:
             record.version = 1
 
-        await self.repo.save(record.agent_id, record)
+        try:
+            await self.repo.save(record.agent_id, record)
+        except KVConflictError as exc:
+            expected_version = getattr(exc, "expected_version", None)
+            actual_version = getattr(exc, "actual_version", None)
+            raise VersionConflictError(
+                format_lifecycle_error(
+                    "Version conflict - record was modified concurrently",
+                    agent_id=record.agent_id,
+                    version=record.version,
+                    expected_version=expected_version,
+                    actual_version=actual_version,
+                ),
+                error_code="VERSION_CONFLICT",
+                context={
+                    "agent_id": record.agent_id,
+                    "expected_version": expected_version,
+                    "actual_version": actual_version,
+                },
+            ) from exc
 
     async def load(self, agent_id: str) -> LifecycleRecord | None:
         return await self.repo.load(agent_id)
