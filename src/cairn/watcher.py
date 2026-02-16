@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 
 from fsdantic import Workspace
 from watchfiles import Change, awatch
+
+logger = logging.getLogger(__name__)
 
 
 class FileWatcher:
@@ -41,6 +44,10 @@ class FileWatcher:
         try:
             rel_parts = path.relative_to(self.project_root).parts
         except ValueError:
+            logger.warning(
+                "Path outside project root, ignoring",
+                extra={"path": str(path), "project_root": str(self.project_root)},
+            )
             return True
 
         return any(part in self.ignore_patterns for part in rel_parts)

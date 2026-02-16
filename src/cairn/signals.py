@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,8 @@ from cairn.constants import SIGNAL_POLL_INTERVAL_SECONDS
 
 if TYPE_CHECKING:
     from cairn.orchestrator import CairnOrchestrator
+
+logger = logging.getLogger(__name__)
 
 
 class SignalHandler:
@@ -54,8 +57,19 @@ class SignalHandler:
                 if command is None:
                     continue
                 await self._dispatch(command)
+            except Exception as exc:
+                logger.exception(
+                    "Error processing signal",
+                    extra={"file": str(signal_file), "error": str(exc)},
+                )
             finally:
-                signal_file.unlink(missing_ok=True)
+                try:
+                    signal_file.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to remove signal file",
+                        extra={"file": str(signal_file), "error": str(exc)},
+                    )
 
     def _detect_signal_files(self) -> list[Path]:
         return sorted(self.signals_dir.glob("*.json"))
@@ -99,5 +113,12 @@ class SignalHandler:
         try:
             loaded = json.loads(signal_file.read_text(encoding="utf-8"))
             return loaded if isinstance(loaded, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
+            logger.warning("Signal file missing", extra={"file": str(signal_file)})
+            return {}
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "Invalid signal JSON",
+                extra={"file": str(signal_file), "error": str(exc)},
+            )
             return {}

@@ -13,6 +13,16 @@ from cairn.orchestrator import CairnOrchestrator, _load_grail_script
 from cairn.queue import TaskPriority
 
 
+async def _safe_close(workspace: object) -> None:
+    close_method = getattr(workspace, "close", None)
+    if close_method is None:
+        return
+    try:
+        await close_method()
+    except Exception:
+        pass
+
+
 class StubCodeProvider:
     def __init__(self, code: str = "x = 1", is_valid: bool = True, error: str | None = None) -> None:
         self.code = code
@@ -203,9 +213,9 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
         assert provider.context["workspace"] is agent_ws
         assert provider.context["stable"] is stable
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -228,9 +238,9 @@ async def test_run_agent_transitions_to_errored(monkeypatch: pytest.MonkeyPatch,
         assert ctx.state is AgentState.ERRORED
         assert "execution failed" in (ctx.error or "")
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -259,9 +269,9 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(
         assert ctx.state is AgentState.ERRORED
         assert "provider validation failed" in (ctx.error or "")
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -290,9 +300,9 @@ async def test_run_agent_validation_failure_transitions_to_errored(
         check_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "check.json"
         assert json.loads(check_file.read_text(encoding="utf-8")) == {"errors": ["invalid code"], "valid": False}
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -313,9 +323,9 @@ async def test_accept_agent_requires_reviewing_state(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="reviewing"):
             await orch.accept_agent(agent_id)
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -340,9 +350,9 @@ async def test_accept_agent_merges_overlay_and_cleans(tmp_path: Path) -> None:
         assert agent_id not in orch.active_agents
         assert (orch.agentfs_dir / f"bin-{agent_id}.db").exists()
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -363,9 +373,9 @@ async def test_reject_agent_requires_reviewing_state(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="reviewing"):
             await orch.reject_agent(agent_id)
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -390,6 +400,6 @@ async def test_reject_agent_discards_overlay(tmp_path: Path) -> None:
         assert agent_id not in orch.active_agents
         assert (orch.agentfs_dir / f"bin-{agent_id}.db").exists()
     finally:
-        await agent_ws.close()
-        await bin_ws.close()
-        await stable.close()
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
