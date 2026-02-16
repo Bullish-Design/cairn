@@ -404,7 +404,7 @@ class CairnOrchestrator:
             )
 
             await transition(AgentState.REVIEWING)
-        except (grail.ExecutionError, grail.InputError) as exc:
+        except (grail.GrailExecutionError, grail.InputError) as exc:
             if ctx is not None:
                 ctx.error = str(exc)
                 ctx.transition(AgentState.ERRORED)
