@@ -3,17 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fsdantic import AgentFSOptions, Fsdantic
+from fsdantic import Fsdantic
 from watchfiles import Change
 
 from cairn.watcher import FileWatcher
 
 
 @pytest.mark.asyncio
-async def test_watcher_syncs_file_changes_into_workspace(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    workspace = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "stable.db")))
+async def test_watcher_syncs_file_changes_into_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    workspace = await Fsdantic.open(path=str(tmp_path / "stable.db"))
     project_root = tmp_path / "project"
     project_root.mkdir(parents=True, exist_ok=True)
 

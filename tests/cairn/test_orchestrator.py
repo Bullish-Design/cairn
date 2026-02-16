@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fsdantic import AgentFSOptions, Fsdantic
+from fsdantic import Fsdantic
 
 from cairn.agent import AgentContext, AgentState
 from cairn.lifecycle import LifecycleStore
@@ -51,9 +51,9 @@ async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object
     (orch.cairn_home / "workspaces").mkdir(parents=True, exist_ok=True)
     orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
 
-    stable = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "stable.db")))
-    bin_ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "bin.db")))
-    agent_ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "agent.db")))
+    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
+    agent_ws = await Fsdantic.open(path=str(tmp_path / "agent.db"))
 
     orch.stable = stable
     orch.bin = bin_ws

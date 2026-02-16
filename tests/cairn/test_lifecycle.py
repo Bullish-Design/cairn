@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
-from fsdantic import AgentFSOptions, Fsdantic
+from fsdantic import Fsdantic
 
 from cairn.agent import AgentState
 from cairn.lifecycle import LifecycleRecord, LifecycleStore
@@ -12,7 +12,7 @@ from cairn.lifecycle import LifecycleRecord, LifecycleStore
 
 @pytest.mark.asyncio
 async def test_lifecycle_store_typed_kv_roundtrip_and_active_filter(tmp_path: Path) -> None:
-    workspace = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "lifecycle.db")))
+    workspace = await Fsdantic.open(path=str(tmp_path / "lifecycle.db"))
 
     try:
         store = LifecycleStore(workspace)

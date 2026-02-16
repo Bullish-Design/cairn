@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 
-from fsdantic import Fsdantic, AgentFSOptions, MergeStrategy
+from fsdantic import Fsdantic, MergeStrategy
 from cairn.commands import (
     AcceptCommand,
     ListAgentsCommand,
@@ -97,7 +97,7 @@ def workspace_create(
             console.print(f"[red]Workspace '{name}' already exists at {workspace_path}[/red]")
             raise typer.Exit(1)
 
-        workspace = await Fsdantic.open_with_options(AgentFSOptions(path=str(workspace_path)))
+        workspace = await Fsdantic.open(path=str(workspace_path))
         await workspace.close()
 
         console.print(f"[green]✓[/green] Created workspace: [bold]{name}[/bold]")
@@ -159,7 +159,7 @@ def workspace_info(
             console.print(f"[red]Workspace '{name}' not found[/red]")
             raise typer.Exit(1)
 
-        workspace = await Fsdantic.open_with_options(AgentFSOptions(path=str(workspace_path)))
+        workspace = await Fsdantic.open(path=str(workspace_path))
 
         # Get file count and total size
         try:
@@ -252,7 +252,7 @@ def files_list(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(workspace_path)))
+        ws = await Fsdantic.open(path=str(workspace_path))
 
         try:
             if recursive:
@@ -307,7 +307,7 @@ def files_read(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(workspace_path)))
+        ws = await Fsdantic.open(path=str(workspace_path))
 
         try:
             mode = "binary" if binary else "text"
@@ -348,7 +348,7 @@ def files_write(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(workspace_path)))
+        ws = await Fsdantic.open(path=str(workspace_path))
 
         try:
             mode = "binary" if binary else "text"
@@ -383,7 +383,7 @@ def files_search(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(workspace_path)))
+        ws = await Fsdantic.open(path=str(workspace_path))
 
         try:
             files = await ws.files.search(pattern)
@@ -421,13 +421,10 @@ def files_tree(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(workspace_path)))
+        ws = await Fsdantic.open(path=str(workspace_path))
 
         try:
-            from fsdantic import FileOperations
-
-            ops = FileOperations(ws.raw)
-            tree_data = await ops.tree(path, max_depth=max_depth)
+            tree_data = await ws.files.tree(path, max_depth=max_depth)
 
             def build_tree(node, tree_obj):
                 if node.get("type") == "directory":
@@ -513,10 +510,12 @@ def agent_status(
             command = parse_command_payload("status", {"agent_id": agent_id})
             result = await orchestrator.submit_command(command)
 
-            console.print(Panel(
-                json.dumps(result.payload, indent=2),
-                title=f"Agent Status: {agent_id}",
-            ))
+            console.print(
+                Panel(
+                    json.dumps(result.payload, indent=2),
+                    title=f"Agent Status: {agent_id}",
+                )
+            )
 
         except ValueError:
             console.print(f"[red]Unknown agent: {agent_id}[/red]")
@@ -654,8 +653,8 @@ def preview_changes(
             console.print(f"[red]Agent workspace not found: {agent_id}[/red]")
             raise typer.Exit(1)
 
-        agent_ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(agent_db_path)))
-        stable_ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(stable_db_path)))
+        agent_ws = await Fsdantic.open(path=str(agent_db_path))
+        stable_ws = await Fsdantic.open(path=str(stable_db_path))
 
         try:
             changes = await agent_ws.materialize.diff(stable_ws)
@@ -704,7 +703,7 @@ def preview_file(
             console.print(f"[red]Agent workspace not found: {agent_id}[/red]")
             raise typer.Exit(1)
 
-        agent_ws = await Fsdantic.open_with_options(AgentFSOptions(path=str(agent_db_path)))
+        agent_ws = await Fsdantic.open(path=str(agent_db_path))
 
         try:
             content = await agent_ws.files.read(file_path, mode="text")

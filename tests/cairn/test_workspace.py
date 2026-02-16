@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fsdantic import AgentFSOptions, Fsdantic, MergeStrategy
+from fsdantic import Fsdantic, MergeStrategy
 
 
 @pytest.mark.asyncio
 async def test_materialize_and_overlay_merge_with_fsdantic(tmp_path: Path) -> None:
-    base = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "base.db")))
-    overlay = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "overlay.db")))
+    base = await Fsdantic.open(path=str(tmp_path / "base.db"))
+    overlay = await Fsdantic.open(path=str(tmp_path / "overlay.db"))
 
     try:
         await base.files.write("shared/base.txt", "base")

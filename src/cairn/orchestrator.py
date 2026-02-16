@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from fsdantic import AgentFSOptions, Fsdantic, MergeStrategy, Workspace
+from fsdantic import Fsdantic, MergeStrategy, Workspace
 from grail import MontyContext
 from pydantic import BaseModel
 
@@ -78,8 +78,8 @@ class CairnOrchestrator:
         for directory in ("workspaces", "signals", "state"):
             (self.cairn_home / directory).mkdir(parents=True, exist_ok=True)
 
-        self.stable = await Fsdantic.open_with_options(AgentFSOptions(path=str(self.agentfs_dir / "stable.db")))
-        self.bin = await Fsdantic.open_with_options(AgentFSOptions(path=str(self.agentfs_dir / "bin.db")))
+        self.stable = await Fsdantic.open(path=str(self.agentfs_dir / "stable.db"))
+        self.bin = await Fsdantic.open(path=str(self.agentfs_dir / "bin.db"))
 
         self.watcher = FileWatcher(self.project_root, self.stable)
         self.signals = SignalHandler(self.cairn_home, self, enable_polling=self.config.enable_signal_polling)
@@ -107,7 +107,7 @@ class CairnOrchestrator:
                 continue
 
             try:
-                agent_fs = await Fsdantic.open_with_options(AgentFSOptions(path=str(db_path)))
+                agent_fs = await Fsdantic.open(path=str(db_path))
             except Exception as exc:
                 record.state = AgentState.ERRORED
                 record.error = f"Failed to open agent DB: {exc}"
@@ -181,7 +181,12 @@ class CairnOrchestrator:
         return CommandResult(
             command_type=command.type,
             agent_id=record.agent_id,
-            payload={"state": record.state.value, "task": record.task, "error": record.error, "submission": record.submission},
+            payload={
+                "state": record.state.value,
+                "task": record.task,
+                "error": record.error,
+                "submission": record.submission,
+            },
         )
 
     async def _handle_list_agents(self, command: ListAgentsCommand) -> CommandResult:
@@ -207,7 +212,7 @@ class CairnOrchestrator:
 
         agent_id = f"agent-{uuid.uuid4().hex[:8]}"
         agent_db = self.agentfs_dir / f"{agent_id}.db"
-        agent_fs = await Fsdantic.open_with_options(AgentFSOptions(path=str(agent_db)))
+        agent_fs = await Fsdantic.open(path=str(agent_db))
 
         ctx = AgentContext(agent_id=agent_id, task=task, priority=priority, state=AgentState.QUEUED, agent_fs=agent_fs)
         self.active_agents[agent_id] = ctx
@@ -350,7 +355,8 @@ class CairnOrchestrator:
                 "running": sum(
                     1
                     for ctx in self.active_agents.values()
-                    if ctx.state in {AgentState.SPAWNING, AgentState.GENERATING, AgentState.EXECUTING, AgentState.SUBMITTING}
+                    if ctx.state
+                    in {AgentState.SPAWNING, AgentState.GENERATING, AgentState.EXECUTING, AgentState.SUBMITTING}
                 ),
             },
         }

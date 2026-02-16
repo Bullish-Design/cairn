@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fsdantic import AgentFSOptions, Fsdantic
+from fsdantic import Fsdantic
 
 from cairn.agent_tools import CairnAgentTools
 from cairn.lifecycle import SUBMISSION_KEY, SubmissionRecord
@@ -11,8 +11,8 @@ from cairn.lifecycle import SUBMISSION_KEY, SubmissionRecord
 
 @pytest.mark.asyncio
 async def test_tool_contract_read_write_search_and_submit(tmp_path: Path) -> None:
-    stable = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "stable.db")))
-    agent = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "agent.db")))
+    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
 
     try:
         await stable.files.write("docs/base.txt", "hello from stable")
@@ -44,8 +44,8 @@ async def test_tool_contract_read_write_search_and_submit(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_search_content_defaults_to_global_scope(tmp_path: Path) -> None:
-    stable = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "stable.db")))
-    agent = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "agent.db")))
+    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
 
     try:
         await stable.files.write("notes/todo.txt", "find me")
@@ -62,8 +62,8 @@ async def test_search_content_defaults_to_global_scope(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_search_content_respects_scoped_patterns(tmp_path: Path) -> None:
-    stable = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "stable.db")))
-    agent = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "agent.db")))
+    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
 
     try:
         await stable.files.write("src/target.py", "needle")
@@ -84,8 +84,8 @@ async def test_search_content_respects_scoped_patterns(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_search_content_invalid_path_handling_is_consistent(tmp_path: Path) -> None:
-    stable = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "stable.db")))
-    agent = await Fsdantic.open_with_options(AgentFSOptions(path=str(tmp_path / "agent.db")))
+    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
 
     try:
         tools = CairnAgentTools(agent_id="agent-1", agent_fs=agent, stable_fs=stable)
