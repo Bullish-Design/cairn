@@ -1,6 +1,6 @@
-# Cairn Typer CLI
+# Cairn CLI
 
-A comprehensive command-line interface for interacting with Cairn workspaces, files, and agents using the Typer framework.
+A comprehensive command-line interface for interacting with Cairn workspaces, files, agents, and code providers.
 
 ## Installation
 
@@ -174,27 +174,41 @@ Example:
 cairn-cli agent status agent-abc123
 ```
 
-### Spawn a High-Priority Agent Task
+### Spawn a High-Priority Task
 
 ```bash
-cairn-cli agent spawn "<task-description>"
+cairn-cli agent spawn "<reference>" [--provider PROVIDER]
 ```
 
-Example:
+Examples:
 ```bash
-cairn-cli agent spawn "Add docstrings to all public functions"
+# With file provider (default)
+cairn-cli agent spawn "scripts/add_docstrings.pym"
+
+# With LLM provider (requires cairn-llm plugin)
+cairn-cli agent spawn "Add docstrings to all public functions" --provider llm
 ```
 
-### Queue a Normal-Priority Agent Task
+### Queue a Normal-Priority Task
 
 ```bash
-cairn-cli agent queue "<task-description>"
+cairn-cli agent queue "<reference>" [--provider PROVIDER]
 ```
 
-Example:
+Examples:
 ```bash
-cairn-cli agent queue "Refactor test suite"
+# With file provider (default)
+cairn-cli agent queue "scripts/refactor_tests.pym"
+
+# With LLM provider (requires cairn-llm plugin)
+cairn-cli agent queue "Refactor test suite" --provider llm
 ```
+
+**Note:** The `reference` argument is interpreted by the code provider:
+- `FileCodeProvider` (default): path to a `.pym` file
+- `LLMCodeProvider` (--provider llm): natural language task description
+- `GitCodeProvider`: git URL with path
+- `RegistryCodeProvider`: registry URL
 
 ### Accept Agent Changes
 
@@ -320,8 +334,9 @@ cairn-cli files tree stable --max-depth 3
 The CLI is built on:
 - **Typer**: Modern CLI framework with excellent UX
 - **Rich**: Beautiful terminal formatting
-- **Fsdantic**: Type-safe workspace and file operations
-- **Cairn Orchestrator**: Agent lifecycle management
+- **FSdantic**: Type-safe workspace and file operations
+- **Cairn Orchestrator**: Task orchestration and lifecycle management
+- **Code Providers**: Pluggable code sourcing (file, LLM, git, registry)
 
 ## Comparison with Original CLI
 

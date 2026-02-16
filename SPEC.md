@@ -15,27 +15,40 @@ For philosophy and constraints, see [CONCEPT.md](CONCEPT.md). For install/quicks
 
 ## Runtime architecture
 
-Cairn runtime contracts are implemented by three concrete layers:
+Cairn runtime contracts are implemented by four concrete layers:
 
-1. **Storage (`fsdantic.Workspace`)**
-   - The orchestrator opens `stable.db`, `bin.db`, and per-agent `agent-*.db` via `Fsdantic.open_with_options(AgentFSOptions(...))`.
-   - Runtime file access and preview materialization use fsdantic workspace APIs as the canonical contract:
-     - overlay merge (`stable.overlay.merge(agent_fs, strategy=...)`),
-     - file operations (`FileOperations(..., base_fs=...)`),
-     - preview export (`workspace.materialize.to_disk(...)`),
-     - typed KV repositories (`workspace.kv.repository(...)`).
+1. **Code Sourcing (`CodeProvider` protocol)**
+   - Code providers implement `get_code(reference, context) -> str` to supply executable Python code.
+   - Built-in providers:
+     - `FileCodeProvider` - loads code from `.pym` files on disk
+     - `InlineCodeProvider` - treats reference as code itself
+   - Plugin providers (separate packages):
+     - `LLMCodeProvider` (cairn-llm) - generates code from natural language
+     - `GitCodeProvider` (cairn-git) - loads code from git repositories
+     - `RegistryCodeProvider` (cairn-registry) - fetches code from registries
+   - The orchestrator accepts any `CodeProvider` implementation via constructor parameter.
 
-2. **Execution (`grail.MontyContext`)**
-   - Each agent run creates a fresh `MontyContext(input_model=EmptyInput, tools=..., limits=...)`.
-   - Cairn executes generated code through `MontyContext.execute_async(...)`; no alternate runtime path is supported.
-   - Execution limits (`max_duration_secs`, memory, recursion depth) are provided by orchestrator executor settings.
+2. **Storage (`fsdantic.Workspace`)**
+   - The orchestrator opens `stable.db`, `bin.db`, and per-agent `agent-*.db` via `Fsdantic.open(path=...)`.
+   - Runtime file access and preview materialization use fsdantic workspace manager APIs:
+     - file operations (`workspace.files.read/write/query/search`),
+     - KV operations (`workspace.kv.get/set/delete/list`),
+     - overlay operations (`workspace.overlay.merge/list_changes/reset`),
+     - materialization (`workspace.materialize.to_disk/diff`).
 
-3. **Tool registration (`create_agent_tools`)**
-   - Tool callables are registered per-agent by `create_agent_tools(agent_id, agent_fs, stable_fs, llm_provider)`.
-   - The returned toolset (`read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`, `search_content`, `ask_llm`, `submit_result`, `log`) is the canonical agent capability surface.
+3. **Execution (`grail.load()` and `.pym` files)**
+   - Code providers generate or fetch code that is written to `.grail/agents/{agent_id}/task.pym`.
+   - Each agent execution uses `grail.load(pym_path)` to create a script object.
+   - Pre-flight validation via `script.check()` catches errors before execution.
+   - Execution via `script.run(inputs={...}, externals={...})` with external functions.
+   - Execution limits (timeout, memory) are enforced by Grail/Monty runtime.
+
+4. **External functions (`create_external_functions`)**
+   - External function callables are created per-agent by `create_external_functions(agent_context)`.
+   - The returned dict (`read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`, `search_content`, `submit_result`, `log`) is the canonical capability surface.
    - `submit_result(...)` writes review payloads to the agent workspace KV submission record consumed by the orchestrator lifecycle flow.
 
-> **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator.py`, `src/cairn/agent_tools.py`).
+> **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator.py`, `src/cairn/providers.py`, `src/cairn/external_functions.py`).
 
 ## Data layout contract
 
@@ -44,6 +57,13 @@ $PROJECT_ROOT/.agentfs/
 ├── stable.db
 ├── agent-{id}.db
 └── bin.db
+
+$PROJECT_ROOT/.grail/
+└── agents/
+    └── {agent_id}/
+        ├── task.pym           # Generated/loaded agent code
+        ├── check.json         # Validation results
+        └── run.log            # Execution log
 
 $CAIRN_HOME/ (default ~/.cairn)
 ├── workspaces/
@@ -71,32 +91,70 @@ $CAIRN_HOME/ (default ~/.cairn)
 - `mkdir(path) -> None`
 - KV store: `get/set/delete/list`
 
-## Execution contracts (Monty)
+## Execution contracts (Grail + Monty)
+
+### .pym File Structure
+
+All executable code is written to `.pym` files with the following structure:
+
+```python
+from grail import external, Input
+
+# Inputs
+task_description: str = Input("task_description")
+
+# External function stubs
+@external
+async def read_file(path: str) -> str: ...
+
+@external
+async def write_file(path: str, content: str) -> bool: ...
+
+@external
+async def submit_result(summary: str, changed_files: list[str]) -> bool: ...
+
+# Task code
+content = await read_file("/src/main.py")
+# ... process ...
+await submit_result(summary="Done", changed_files=["/src/main.py"])
+
+# Return value
+{"status": "complete"}
+```
 
 ### Sandbox policy
 
 Allowed:
 - procedural Python constructs,
 - async functions,
-- calls to declared external functions.
+- calls to declared `@external` functions.
 
 Disallowed:
-- imports,
+- imports (except `from grail import ...`),
 - host filesystem/network access except through external functions,
 - subprocess execution,
 - implicit environment access.
 
-### Required external functions exposed to agents
+### Required external functions exposed to code
 
-- `read_file(path)`
-- `write_file(path, content)`
-- `list_dir(path)`
-- `file_exists(path)`
-- `search_files(pattern)`
-- `search_content(pattern, path='.')`
-- `ask_llm(prompt, context='')`
-- `submit_result(summary, changed_files)`
-- `log(message)`
+- `read_file(path) -> str`
+- `write_file(path, content) -> bool`
+- `list_dir(path) -> list[str]`
+- `file_exists(path) -> bool`
+- `search_files(pattern) -> list[str]`
+- `search_content(pattern, path='.') -> list[dict]`
+- `submit_result(summary, changed_files) -> bool`
+- `log(message) -> None`
+
+### Pre-flight validation
+
+Before execution, `grail.load(pym_path).check()` validates:
+- syntax errors,
+- undefined @external functions,
+- type consistency,
+- structural correctness.
+
+Validation errors prevent execution and transition agent to ERRORED state.
 
 ## Orchestrator contracts
 
@@ -139,11 +197,14 @@ agent:{agent_id} -> {
 - accept normalized `CairnCommand` ingress and dispatch to command handlers (`queue/accept/reject/status/list_agents`),
 - treat CLI and signal files as transport adapters that both parse into the same command model before dispatch,
 - optionally monitor signal files (`spawn/queue/accept/reject`) when signal polling is enabled,
-- enqueue per-agent overlays into a priority queue,
-- run a long-lived worker loop that acquires an `asyncio.Semaphore(max_concurrent_agents)` slot before starting each agent,
+- enqueue tasks into a priority queue,
+- run a long-lived worker loop that acquires an `asyncio.Semaphore(max_concurrent_agents)` slot before starting each task,
 - release the semaphore slot in one completion `finally` path,
-- generate/execute agent code,
-- materialize preview workspace,
+- use `CodeProvider` to source executable code (from files, LLMs, git, etc.),
+- validate code via `grail.load().check()` before execution,
+- write code to `.grail/agents/{agent_id}/task.pym`,
+- execute code via `grail.load().run()` with external functions,
+- materialize preview workspace via `workspace.materialize.to_disk()`,
 - persist lifecycle metadata to canonical KV store on every state transition,
 - persist queue stats snapshot under `$CAIRN_HOME/state/` (stats only, not agent metadata).
 
@@ -151,13 +212,19 @@ agent:{agent_id} -> {
 
 CLI subcommands are a transport adapter: each invocation parses into a normalized `CairnCommand` and calls orchestrator `submit_command`.
 
-- `cairn up`
-- `cairn spawn <task>`
-- `cairn queue <task>`
-- `cairn list-agents`
-- `cairn status <agent-id>`
-- `cairn accept <agent-id>`
-- `cairn reject <agent-id>`
+- `cairn up [--provider PROVIDER]` - Start orchestrator with specified code provider
+- `cairn spawn <reference> [--provider PROVIDER]` - High-priority task execution
+- `cairn queue <reference> [--provider PROVIDER]` - Normal-priority task execution
+- `cairn list-agents` - List all active agents
+- `cairn status <agent-id>` - Show agent status and details
+- `cairn accept <agent-id>` - Accept and merge agent changes
+- `cairn reject <agent-id>` - Reject and discard agent changes
+
+**Reference interpretation:**
+- With `FileCodeProvider` (default): `reference` is a path to a `.pym` file
+- With `LLMCodeProvider` (--provider llm): `reference` is natural language task description
+- With `GitCodeProvider`: `reference` is a git URL with path (e.g., `git://github.com/org/repo:script.pym`)
+- With `RegistryCodeProvider`: `reference` is a registry URL (e.g., `registry://org/script-name:version`)
 
 ### Signal adapter contract
 
