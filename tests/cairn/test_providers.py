@@ -126,3 +126,31 @@ async def test_file_provider_fails_fast_for_non_retryable_read_errors(tmp_path: 
         await provider.get_code("task", {})
 
     assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_file_provider_retry_exhaustion_raises_last_connection_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code_path = tmp_path / "task.pym"
+    code_path.write_text("x = 1", encoding="utf-8")
+
+    calls = {"count": 0}
+
+    def always_fails(self: Path, *args: object, **kwargs: object) -> str:
+        _ = args
+        _ = kwargs
+        if self == code_path:
+            calls["count"] += 1
+            raise ConnectionError(f"temporary-{calls['count']}")
+        raise AssertionError("Unexpected path")
+
+    monkeypatch.setattr(Path, "read_text", always_fails)
+
+    provider = FileCodeProvider(base_path=tmp_path)
+
+    with pytest.raises(ConnectionError, match="temporary-3"):
+        await provider.get_code("task", {})
+
+    assert calls["count"] == 3
+

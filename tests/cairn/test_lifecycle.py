@@ -137,3 +137,28 @@ async def test_lifecycle_store_fails_fast_for_non_retryable_errors() -> None:
         await store.save(record)
 
     assert store.repo.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_store_recoverable_retry_exhaustion_raises_last_error() -> None:
+    now = time.time()
+    record = LifecycleRecord(
+        agent_id="agent-retry-exhausted",
+        task="retry exhausted",
+        priority=1,
+        state=AgentState.QUEUED,
+        created_at=now,
+        state_changed_at=now,
+        db_path="/tmp/agent-retry-exhausted.db",
+    )
+
+    store = object.__new__(LifecycleStore)
+    store.repo = _FlakyLifecycleRepo(
+        [ConnectionError("temporary 1"), ConnectionError("temporary 2"), ConnectionError("temporary 3")]
+    )
+
+    with pytest.raises(ConnectionError, match="temporary 3"):
+        await store.save(record)
+
+    assert store.repo.calls == 3
+
