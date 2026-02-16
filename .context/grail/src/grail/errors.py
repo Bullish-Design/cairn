@@ -1,73 +1,127 @@
-"""Error types and formatting helpers for Grail."""
+"""Error hierarchy for grail."""
 
-from __future__ import annotations
-
-from dataclasses import dataclass
 from typing import Any
 
-from pydantic import ValidationError
+
+class GrailError(Exception):
+    """Base exception for all grail errors."""
 
 
-class GrailExecutionError(RuntimeError):
-    """Raised when Monty fails during code execution."""
+class ParseError(GrailError):
+    """Raised when .pym file has Python syntax errors."""
+
+    def __init__(
+        self,
+        message: str,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+    ) -> None:
+        self.message = message
+        self.lineno = lineno
+        self.col_offset = col_offset
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        if self.lineno is not None:
+            return f"Syntax error at line {self.lineno}: {self.message}"
+        return f"Syntax error: {self.message}"
 
 
-class GrailValidationError(ValueError):
-    """Raised when Grail input validation fails."""
+class CheckError(GrailError):
+    """Raised when @external or Input() declarations are malformed."""
+
+    def __init__(self, message: str, lineno: int | None = None) -> None:
+        self.message = message
+        self.lineno = lineno
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        if self.lineno is not None:
+            return f"Declaration error at line {self.lineno}: {self.message}"
+        return f"Declaration error: {self.message}"
 
 
-class GrailLimitError(GrailExecutionError):
-    """Raised when execution appears to violate configured limits."""
+class InputError(GrailError):
+    """Raised when runtime inputs don't match declared Input() specs."""
+
+    def __init__(self, message: str, input_name: str | None = None) -> None:
+        self.message = message
+        self.input_name = input_name
+        super().__init__(message)
 
 
-class GrailOutputValidationError(GrailValidationError):
-    """Raised when output validation against the configured output model fails."""
+class ExternalError(GrailError):
+    """Raised when external functions aren't provided or don't match declarations."""
+
+    def __init__(self, message: str, function_name: str | None = None) -> None:
+        self.message = message
+        self.function_name = function_name
+        super().__init__(message)
 
 
-@dataclass(slots=True)
-class ErrorLocation:
-    """Optional source location details for user-facing errors."""
+class ExecutionError(GrailError):
+    """Raised when Monty runtime error occurs."""
 
-    line: int | None = None
-    column: int | None = None
+    def __init__(
+        self,
+        message: str,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+        source_context: str | None = None,
+        suggestion: str | None = None,
+    ) -> None:
+        self.message = message
+        self.lineno = lineno
+        self.col_offset = col_offset
+        self.source_context = source_context
+        self.suggestion = suggestion
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        parts: list[str] = []
+        if self.lineno is not None:
+            parts.append(f"Line {self.lineno}")
+        parts.append(self.message)
+
+        if self.source_context and self.lineno is not None:
+            context_lines = self._build_context_display(
+                source=self.source_context,
+                error_line=self.lineno,
+                context=2,
+            )
+            parts.append("")
+            parts.append(context_lines)
+
+        if self.suggestion:
+            parts.append(f"Suggestion: {self.suggestion}")
+
+        return "\n".join(parts)
+
+    def _build_context_display(self, source: str, error_line: int, context: int = 2) -> str:
+        lines = source.splitlines()
+        start = max(0, error_line - context - 1)
+        end = min(len(lines), error_line + context)
+
+        output = []
+        for i in range(start, end):
+            line_num = i + 1
+            prefix = "> " if line_num == error_line else "  "
+            output.append(f"{prefix}{line_num:>4} | {lines[i]}")
+        return "\n".join(output)
 
 
-def format_validation_error(prefix: str, exc: ValidationError) -> str:
-    """Render a concise pydantic validation error with dotted field paths."""
-    details: list[str] = []
-    for item in exc.errors():
-        path = ".".join(str(part) for part in item.get("loc", ())) or "<root>"
-        details.append(f"{path}: {item.get('msg', 'invalid value')}")
-    if not details:
-        return prefix
-    return f"{prefix}: {'; '.join(details)}"
+class LimitError(ExecutionError):
+    """Raised when resource limits are exceeded."""
+
+    def __init__(self, message: str, limit_type: str | None = None) -> None:
+        self.limit_type = limit_type
+        super().__init__(message)
 
 
-def format_runtime_error(
-    *,
-    category: str,
-    exc: Exception,
-    location: ErrorLocation | None = None,
-) -> str:
-    """Create a normalized runtime error message with optional line info."""
-    where = ""
-    if location and location.line is not None:
-        where = (
-            f" (line {location.line}"
-            + (f", col {location.column}" if location.column else "")
-            + ")"
-        )
-    return f"{category}{where}: {exc}"
+class OutputError(GrailError):
+    """Raised when output validation against output_model fails."""
 
-
-def user_traceback_lines(tb: str) -> list[str]:
-    """Drop internal Grail frames from a traceback string."""
-    lines = tb.splitlines()
-    return [line for line in lines if "src/grail/" not in line and "grail/context.py" not in line]
-
-
-def extract_location(data: Any) -> ErrorLocation:
-    """Best-effort extraction of line/column info from Monty-like exceptions."""
-    line = getattr(data, "lineno", None) or getattr(data, "line", None)
-    column = getattr(data, "offset", None) or getattr(data, "column", None)
-    return ErrorLocation(line=line, column=column)
+    def __init__(self, message: str, validation_errors: Any = None) -> None:
+        self.message = message
+        self.validation_errors = validation_errors
+        super().__init__(message)

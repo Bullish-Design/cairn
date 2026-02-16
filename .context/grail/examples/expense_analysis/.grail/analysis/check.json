@@ -1,0 +1,21 @@
+{
+  "file": "analysis.pym",
+  "valid": true,
+  "errors": [],
+  "warnings": [
+    {
+      "line": 47,
+      "column": 0,
+      "code": "W001",
+      "message": "Bare dict/list as return value \u2014 consider assigning to a variable for clarity"
+    }
+  ],
+  "info": {
+    "externals_count": 3,
+    "inputs_count": 2,
+    "lines_of_code": 51,
+    "monty_features_used": [
+      "for_loop"
+    ]
+  }
+}

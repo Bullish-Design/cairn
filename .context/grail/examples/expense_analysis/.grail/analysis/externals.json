@@ -1,0 +1,43 @@
+{
+  "externals": [
+    {
+      "name": "get_team_members",
+      "async": true,
+      "parameters": [
+        {
+          "name": "department",
+          "type": "str",
+          "default": null
+        }
+      ],
+      "return_type": "dict[str, Any]",
+      "docstring": "Get list of team members for a department."
+    },
+    {
+      "name": "get_expenses",
+      "async": true,
+      "parameters": [
+        {
+          "name": "user_id",
+          "type": "int",
+          "default": null
+        }
+      ],
+      "return_type": "dict[str, Any]",
+      "docstring": "Get expense line items for a user."
+    },
+    {
+      "name": "get_custom_budget",
+      "async": true,
+      "parameters": [
+        {
+          "name": "user_id",
+          "type": "int",
+          "default": null
+        }
+      ],
+      "return_type": "dict[str, Any] | None",
+      "docstring": "Get custom budget for a user if they have one."
+    }
+  ]
+}

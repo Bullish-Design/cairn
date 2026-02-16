@@ -1,0 +1,16 @@
+{
+  "inputs": [
+    {
+      "name": "budget_limit",
+      "type": "float",
+      "required": true,
+      "default": null
+    },
+    {
+      "name": "department",
+      "type": "str",
+      "required": false,
+      "default": "Engineering"
+    }
+  ]
+}
