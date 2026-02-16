@@ -3,7 +3,13 @@
 from cairn.agent import AgentContext, AgentState
 from cairn.external_functions import CairnExternalFunctions, create_external_functions
 from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import CodeProvider, CodeProviderError, FileCodeProvider, InlineCodeProvider
+from cairn.providers import (
+    CodeProvider,
+    CodeProviderError,
+    FileCodeProvider,
+    InlineCodeProvider,
+    resolve_code_provider,
+)
 from cairn.queue import QueuedTask, TaskPriority, TaskQueue
 from cairn.retry import RetryStrategy
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
@@ -20,6 +26,7 @@ __all__ = [
     "FileCodeProvider",
     "FileWatcher",
     "InlineCodeProvider",
+    "resolve_code_provider",
     "ExecutorSettings",
     "OrchestratorSettings",
     "PathsSettings",

@@ -18,7 +18,7 @@ from cairn.commands import (
     parse_command_payload,
 )
 from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import FileCodeProvider, InlineCodeProvider
+from cairn.providers import CodeProvider, resolve_code_provider
 from cairn.queue import TaskPriority
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 
@@ -61,12 +61,13 @@ def _resolve_settings(args: argparse.Namespace) -> tuple[PathsSettings, Orchestr
     )
 
 
-def _resolve_provider(args: argparse.Namespace, project_root: Path | None) -> FileCodeProvider | InlineCodeProvider:
-    if args.provider == "inline":
-        return InlineCodeProvider()
-
-    base_path = Path(args.provider_base_path) if args.provider_base_path else project_root or Path(".")
-    return FileCodeProvider(base_path=base_path)
+def _resolve_provider(args: argparse.Namespace, project_root: Path | None) -> CodeProvider:
+    base_path = Path(args.provider_base_path) if args.provider_base_path else None
+    return resolve_code_provider(
+        args.provider,
+        project_root=project_root,
+        base_path=base_path,
+    )
 
 
 async def _run_up(args: argparse.Namespace) -> int:
@@ -93,7 +94,7 @@ class CairnCommandClient:
         path_settings: PathsSettings,
         orchestrator_settings: OrchestratorSettings,
         executor_settings: ExecutorSettings,
-        provider: FileCodeProvider | InlineCodeProvider,
+        provider: CodeProvider,
     ) -> None:
         self.path_settings = path_settings
         self.orchestrator_settings = orchestrator_settings
@@ -191,8 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-execution-time", type=float, default=None)
     parser.add_argument("--max-memory-bytes", type=int, default=None)
     parser.add_argument("--max-recursion-depth", type=int, default=None)
-    parser.add_argument("--provider", choices=("file", "inline"), default="file")
-    parser.add_argument("--provider-base-path", default=None)
+    parser.add_argument("--provider", default="file", help="Code provider (file, inline, or plugin)")
+    parser.add_argument("--provider-base-path", default=None, help="Base path for file provider")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 

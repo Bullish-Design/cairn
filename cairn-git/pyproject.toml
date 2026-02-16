@@ -1,0 +1,15 @@
+[project]
+name = "cairn-git"
+version = "0.1.0"
+description = "Git code provider plugin for Cairn"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Bullish Design" }]
+dependencies = ["cairn"]
+
+[project.entry-points."cairn.providers"]
+git = "cairn_git.provider:GitCodeProvider"
+
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"

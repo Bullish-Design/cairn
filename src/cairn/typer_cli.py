@@ -24,7 +24,7 @@ from cairn.commands import (
     parse_command_payload,
 )
 from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import FileCodeProvider, InlineCodeProvider
+from cairn.providers import CodeProvider, resolve_code_provider
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.queue import TaskPriority
 
@@ -63,12 +63,12 @@ def resolve_provider(
     provider: str,
     project_root: Optional[Path],
     provider_base_path: Optional[Path],
-) -> FileCodeProvider | InlineCodeProvider:
-    if provider == "inline":
-        return InlineCodeProvider()
-
-    base_path = provider_base_path or project_root or Path(".")
-    return FileCodeProvider(base_path=base_path)
+) -> CodeProvider:
+    return resolve_code_provider(
+        provider,
+        project_root=project_root,
+        base_path=provider_base_path,
+    )
 
 
 async def get_orchestrator(
@@ -601,7 +601,7 @@ def agent_spawn(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
-    provider: Annotated[str, typer.Option(help="Code provider (file or inline)")] = "file",
+    provider: Annotated[str, typer.Option(help="Code provider name (file, inline, or plugin)")] = "file",
     provider_base_path: Annotated[Optional[Path], typer.Option(help="Base path for file provider")] = None,
 ):
     """Spawn a high-priority agent task."""
@@ -633,7 +633,7 @@ def agent_queue(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
-    provider: Annotated[str, typer.Option(help="Code provider (file or inline)")] = "file",
+    provider: Annotated[str, typer.Option(help="Code provider name (file, inline, or plugin)")] = "file",
     provider_base_path: Annotated[Optional[Path], typer.Option(help="Base path for file provider")] = None,
 ):
     """Queue a normal-priority agent task."""

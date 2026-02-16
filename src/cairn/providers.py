@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from importlib import metadata
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, cast, runtime_checkable
+import inspect
 
 
 class CodeProviderError(RuntimeError):
@@ -16,6 +18,7 @@ class CodeProvider(Protocol):
 
     async def get_code(self, reference: str, context: dict[str, Any]) -> str:
         """Return source code for the given reference."""
+        raise NotImplementedError
 
     async def validate_code(self, code: str) -> tuple[bool, str | None]:
         """Validate code before execution."""
@@ -72,3 +75,85 @@ class InlineCodeProvider:
     async def validate_code(self, code: str) -> tuple[bool, str | None]:
         _ = code
         return True, None
+
+
+def resolve_code_provider(
+    provider: str,
+    *,
+    project_root: Path | None,
+    base_path: Path | None,
+) -> CodeProvider:
+    """Resolve a code provider by name or entry point."""
+    if provider == "inline":
+        return InlineCodeProvider()
+
+    if provider == "file":
+        resolved_base_path = base_path or project_root or Path(".")
+        return FileCodeProvider(base_path=resolved_base_path)
+
+    return _load_provider_from_entrypoints(
+        provider,
+        project_root=project_root,
+        base_path=base_path,
+    )
+
+
+def _load_provider_from_entrypoints(
+    provider: str,
+    *,
+    project_root: Path | None,
+    base_path: Path | None,
+) -> CodeProvider:
+    entry_points = metadata.entry_points(group="cairn.providers")
+    matches = [entry for entry in entry_points if entry.name == provider]
+
+    if not matches:
+        raise CodeProviderError(f"Unknown provider '{provider}'. Install the plugin package to use it.")
+
+    if len(matches) > 1:
+        raise CodeProviderError(f"Multiple providers registered for '{provider}'. Ensure only one plugin is installed.")
+
+    factory = matches[0].load()
+    return _instantiate_provider(factory, project_root=project_root, base_path=base_path)
+
+
+def _instantiate_provider(
+    factory: object,
+    *,
+    project_root: Path | None,
+    base_path: Path | None,
+) -> CodeProvider:
+    if isinstance(factory, type):
+        return _call_with_supported_kwargs(
+            cast(Callable[..., Any], factory),
+            project_root=project_root,
+            base_path=base_path,
+        )
+
+    if callable(factory):
+        return _call_with_supported_kwargs(
+            cast(Callable[..., Any], factory),
+            project_root=project_root,
+            base_path=base_path,
+        )
+
+    raise CodeProviderError("Provider entry point must resolve to a callable or class")
+
+
+def _call_with_supported_kwargs(
+    callable_target: Callable[..., Any],
+    *,
+    project_root: Path | None,
+    base_path: Path | None,
+) -> CodeProvider:
+    try:
+        signature = inspect.signature(callable_target)
+    except (TypeError, ValueError):
+        return cast(CodeProvider, callable_target())
+
+    kwargs: dict[str, object] = {}
+    for key, value in {"project_root": project_root, "base_path": base_path}.items():
+        if key in signature.parameters:
+            kwargs[key] = value
+
+    return cast(CodeProvider, callable_target(**kwargs))

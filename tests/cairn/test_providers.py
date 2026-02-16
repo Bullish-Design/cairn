@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from cairn.providers import CodeProviderError, FileCodeProvider, InlineCodeProvider
+import cairn.providers as providers
+from cairn.providers import CodeProviderError, FileCodeProvider, InlineCodeProvider, resolve_code_provider
 
 
 @pytest.mark.asyncio
@@ -33,3 +34,46 @@ async def test_file_provider_missing_reference_raises(tmp_path: Path) -> None:
 
     with pytest.raises(CodeProviderError):
         await provider.get_code("missing", {})
+
+
+class DummyEntryPoint:
+    def __init__(self, name: str, target: object) -> None:
+        self.name = name
+        self._target = target
+
+    def load(self) -> object:
+        return self._target
+
+
+class DummyProvider:
+    def __init__(self, project_root: Path | None = None, base_path: Path | None = None) -> None:
+        self.project_root = project_root
+        self.base_path = base_path
+
+    async def get_code(self, reference: str, context: dict[str, object]) -> str:
+        _ = context
+        return reference
+
+    async def validate_code(self, code: str) -> tuple[bool, str | None]:
+        _ = code
+        return True, None
+
+
+def test_resolve_provider_from_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_entry_points(group: str):
+        assert group == "cairn.providers"
+        return [DummyEntryPoint("dummy", DummyProvider)]
+
+    monkeypatch.setattr(providers.metadata, "entry_points", fake_entry_points)
+
+    provider = resolve_code_provider("dummy", project_root=tmp_path, base_path=None)
+
+    assert isinstance(provider, DummyProvider)
+    assert provider.project_root == tmp_path
+
+
+def test_resolve_provider_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(providers.metadata, "entry_points", lambda group: [])
+
+    with pytest.raises(CodeProviderError):
+        resolve_code_provider("missing", project_root=None, base_path=None)
