@@ -15,7 +15,7 @@ This step integrates the existing but unused `RetryStrategy` module into critica
 
 ### Issue #3: RetryStrategy Module Unused
 **Severity:** MEDIUM
-**File:** `retry.py` (entire module)
+**File:** `src/cairn/retry.py` (entire module)
 
 **Problem:**
 - Complete retry implementation exists with `RetryStrategy` class
@@ -24,10 +24,22 @@ This step integrates the existing but unused `RetryStrategy` module into critica
 
 **Critical operations needing retries:**
 1. Lifecycle persistence (database writes)
-2. Code provider fetches (network operations)
+2. Code provider reads via `get_code(...)` (filesystem/plugin operations)
 3. Workspace operations (I/O operations)
 4. Grail script loading
 5. Signal processing
+
+---
+
+## Planned vs Actual Compatibility Map
+
+| Planned name/path | Actual symbol/path to use |
+| --- | --- |
+| `src/cairn/providers.py` + planned `fetch_code(...)` | `src/cairn/providers.py` + `CodeProvider.get_code(...)`, `FileCodeProvider.get_code(...)`, and plugin providers returned by `resolve_code_provider(...)` must expose `get_code(...)`. |
+| `src/cairn/lifecycle.py` + planned version-check helpers | `src/cairn/lifecycle.py` currently exposes `save`, `load`, `delete`, `list_all`, `list_active`, and `cleanup_old`. Add optimistic-lock retry via repo-level compare-and-save helpers only if/when those helpers exist; otherwise document fallback behavior and avoid inventing non-existent methods. |
+| `src/cairn/workspace_manager.py` + planned `merge_workspace(...)` | `src/cairn/workspace_manager.py` has concrete retry targets in `_open_workspace(...)`, `open_workspace(...)`, and `close_workspace(...)` (plus `close_all(...)` fan-out behavior). |
+| `src/cairn/orchestrator.py` generic planned Grail-load wrapper | `src/cairn/orchestrator.py` defines `_load_grail_script(...)` and currently calls it in `_run_agent(...)`; apply retry around that usage site rather than adding disconnected wrappers. |
+| `src/cairn/signals.py` generic planned process API | `src/cairn/signals.py` dispatch/read flow is in `process_signals_once(...)`, `_dispatch(...)`, and `_load_payload(...)`; place retry there. |
 
 ---
 
@@ -37,7 +49,7 @@ This step integrates the existing but unused `RetryStrategy` module into critica
 
 First, let's understand what we have:
 
-**File:** `cairn/retry.py` (existing)
+**File:** `src/cairn/retry.py` (existing)
 
 The module should contain:
 - `RetryStrategy` class with exponential backoff
@@ -49,7 +61,7 @@ If the existing implementation needs any adjustments, document them here.
 
 ### 2. Create Retry Decorators for Common Patterns
 
-**File:** `cairn/retry_utils.py` (NEW FILE)
+**File:** `src/cairn/retry_utils.py` (NEW FILE)
 
 ```python
 """Retry utilities and decorators for common retry patterns.
@@ -263,9 +275,11 @@ def database_retry() -> dict[str, Any]:
     }
 ```
 
-### 3. Add Retry to Lifecycle Persistence
+### 3. Add Retry to Existing LifecycleStore Methods
 
-**File:** `cairn/lifecycle.py`
+**File:** `src/cairn/lifecycle.py`
+
+Scope this step to methods that exist today: `save`, `load`, `delete`, `list_all`, `list_active`, and `cleanup_old`. For optimistic locking, only add a retrying compare-and-save/update helper if the underlying repository exposes version-check APIs; otherwise keep the current methods and document a deferred follow-up.
 
 ```python
 from cairn.retry_utils import with_retry, database_retry
@@ -330,7 +344,7 @@ class LifecycleStore:
         retry_on=(VersionConflictError,),
         operation_name="lifecycle_update"
     )
-    async def update_with_version_check(
+    async def update_with_version_check(  # add only if repo supports version checks
         self,
         agent_id: str,
         update_fn: Callable[[LifecycleRecord], LifecycleRecord],
@@ -369,9 +383,9 @@ class LifecycleStore:
             raise
 ```
 
-### 4. Add Retry to Code Provider Operations
+### 4. Add Retry to Code Provider `get_code(...)` Operations
 
-**File:** `cairn/providers.py`
+**File:** `src/cairn/providers.py`
 
 ```python
 from cairn.retry_utils import with_retry, network_retry
@@ -383,9 +397,9 @@ class FileCodeProvider:
 
     @with_retry(
         **workspace_retry(),
-        operation_name="provider_fetch_code"
+        operation_name="provider_get_code"
     )
-    async def fetch_code(self, agent_id: str) -> str:
+    async def get_code(self, reference: str, context: dict[str, Any]) -> str:
         """Fetch agent code from file with retry.
 
         Args:
@@ -398,12 +412,12 @@ class FileCodeProvider:
             ProviderError: If fetch fails after retries
         """
         try:
-            return await self._fetch_code_impl(agent_id)
+            return await self._fetch_code_impl(reference, context)
         except Exception as exc:
             raise ProviderError(
-                f"Failed to fetch code for agent: {agent_id}",
+                f"Failed to get code for reference: {reference}",
                 error_code="PROVIDER_FETCH_FAILED",
-                context={"agent_id": agent_id, "provider": "file"}
+                context={"reference": reference, "provider": "file"}
             ) from exc
 
 
@@ -412,9 +426,9 @@ class PluginCodeProvider:
 
     @with_retry(
         **network_retry(),
-        operation_name="plugin_fetch_code"
+        operation_name="plugin_get_code"
     )
-    async def fetch_code(self, agent_id: str) -> str:
+    async def get_code(self, reference: str, context: dict[str, Any]) -> str:
         """Fetch agent code from plugin with retry.
 
         Args:
@@ -427,18 +441,18 @@ class PluginCodeProvider:
             ProviderError: If fetch fails after retries
         """
         try:
-            return await self._plugin_fetch_impl(agent_id)
+            return await self._plugin_get_impl(reference, context)
         except Exception as exc:
             raise ProviderError(
-                f"Failed to fetch code from plugin: {agent_id}",
+                f"Failed to get code from plugin: {reference}",
                 error_code="PLUGIN_FETCH_FAILED",
-                context={"agent_id": agent_id, "plugin": self.plugin_name}
+                context={"reference": reference, "plugin": self.plugin_name}
             ) from exc
 ```
 
-### 5. Add Retry to Workspace Operations
+### 5. Add Retry to Concrete Workspace Operations
 
-**File:** `cairn/workspace_manager.py`
+**File:** `src/cairn/workspace_manager.py`
 
 ```python
 from cairn.retry_utils import with_retry, workspace_retry
@@ -449,14 +463,15 @@ class WorkspaceManager:
 
     @with_retry(
         **workspace_retry(),
-        operation_name="workspace_merge"
+        operation_name="workspace_open"
     )
-    async def merge_workspace(
+    async def open_workspace(
         self,
-        source_ws: Workspace,
-        target_ws: Workspace,
-    ) -> MergeResult:
-        """Merge source workspace into target with retry.
+        path: Path | str,
+        *,
+        readonly: bool = False,
+    ) -> Workspace:
+        """Open workspace with retry around `_open_workspace(...)`.
 
         Args:
             source_ws: Source workspace
@@ -469,21 +484,20 @@ class WorkspaceManager:
             WorkspaceMergeError: If merge fails after retries
         """
         try:
-            return await self._merge_impl(source_ws, target_ws)
+            return await _open_workspace(path, readonly=readonly)
         except Exception as exc:
             raise WorkspaceMergeError(
-                "Workspace merge failed",
-                error_code="WORKSPACE_MERGE_FAILED",
+                "Workspace open failed",
+                error_code="WORKSPACE_OPEN_FAILED",
                 context={
-                    "source": str(source_ws.path),
-                    "target": str(target_ws.path),
+                    "path": str(path), "readonly": readonly,
                 }
             ) from exc
 ```
 
 ### 6. Add Retry to Orchestrator Grail Script Loading
 
-**File:** `cairn/orchestrator.py`
+**File:** `src/cairn/orchestrator.py`
 
 ```python
 from cairn.retry_utils import with_retry, workspace_retry
@@ -529,7 +543,7 @@ class CairnOrchestrator:
 
 ### 7. Add Retry to Signal Processing
 
-**File:** `cairn/signals.py`
+**File:** `src/cairn/signals.py`
 
 ```python
 from cairn.retry_utils import with_retry, workspace_retry
@@ -540,9 +554,9 @@ class SignalProcessor:
 
     @with_retry(
         **workspace_retry(),
-        operation_name="process_signal"
+        operation_name="process_signals_once"
     )
-    async def _process_signal(self, signal_file: Path) -> None:
+    async def process_signals_once(self) -> None:
         """Process a single signal file with retry.
 
         Args:
@@ -557,7 +571,7 @@ class SignalProcessor:
             signal = json.loads(content)
 
             # Dispatch signal
-            await self._dispatch_signal(signal)
+            await self._dispatch(command)
 
         except (IOError, OSError) as exc:
             raise RecoverableError(
@@ -580,7 +594,7 @@ class SignalProcessor:
 
 ### Unit Tests to Add/Update
 
-**File:** `tests/test_retry_utils.py` (NEW FILE)
+**File:** `tests/cairn/test_retry_utils.py` (NEW FILE)
 
 ```python
 """Tests for retry utilities and decorators."""
@@ -682,7 +696,7 @@ async def test_retry_async_with_lambda():
     assert call_count == 2
 ```
 
-**File:** `tests/test_lifecycle_retry.py` (NEW FILE)
+**File:** `tests/cairn/test_lifecycle_retry.py` (NEW FILE)
 
 ```python
 """Tests for lifecycle operations with retry logic."""
@@ -750,7 +764,7 @@ async def test_lifecycle_version_conflict_retry():
 
 ### Integration Test Scenarios
 
-**File:** `tests/test_retry_integration.py` (NEW FILE)
+**File:** `tests/cairn/test_retry_integration.py` (NEW FILE)
 
 ```python
 """Integration tests for retry logic across components."""
@@ -781,20 +795,20 @@ async def test_provider_retries_on_network_error(tmp_path):
 
 ## Files to Create
 
-1. `cairn/retry_utils.py` - Retry decorators and utilities
-2. `tests/test_retry_utils.py` - Retry utility tests
-3. `tests/test_lifecycle_retry.py` - Lifecycle retry tests
-4. `tests/test_retry_integration.py` - Integration tests
+1. `src/cairn/retry_utils.py` - Retry decorators and utilities
+2. `tests/cairn/test_retry_utils.py` - Retry utility tests
+3. `tests/cairn/test_lifecycle_retry.py` - Lifecycle retry tests
+4. `tests/cairn/test_retry_integration.py` - Integration tests
 
 ---
 
 ## Files to Modify
 
-1. `cairn/lifecycle.py` - Add retry to save/load operations
-2. `cairn/providers.py` - Add retry to code fetch operations
-3. `cairn/workspace_manager.py` - Add retry to merge operations
-4. `cairn/orchestrator.py` - Add retry to Grail script loading
-5. `cairn/signals.py` - Add retry to signal processing
+1. `src/cairn/lifecycle.py` - Add retry to existing methods (`save`, `load`, `delete`, `list_all`, `list_active`, `cleanup_old`) and gate optimistic-lock retries on available version-check helpers
+2. `src/cairn/providers.py` - Add retry to code fetch operations
+3. `src/cairn/workspace_manager.py` - Add retry to `_open_workspace(...)`/`open_workspace(...)` and `close_workspace(...)`
+4. `src/cairn/orchestrator.py` - Add retry to Grail script loading
+5. `src/cairn/signals.py` - Add retry to signal processing
 
 ---
 
@@ -835,5 +849,5 @@ If issues arise, revert all changes in this step.
 
 - CODE_REVIEW.md - Issue #3 (RetryStrategy Module Unused)
 - CODE_REVIEW.md - Section 4.2 (Error Recovery)
-- retry.py (existing implementation)
-- orchestrator.py:109 (No retry on workspace open)
+- src/cairn/retry.py (existing implementation)
+- src/cairn/orchestrator.py:444 (_load_grail_script call has no retry wrapper yet)
