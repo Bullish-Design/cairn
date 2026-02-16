@@ -10,6 +10,7 @@ from fsdantic import Fsdantic
 from cairn.agent import AgentContext, AgentState
 from cairn.lifecycle import LifecycleStore
 from cairn.orchestrator import CairnOrchestrator, _load_grail_script
+from cairn.exceptions import RecoverableError
 from cairn.queue import TaskPriority
 
 
@@ -20,7 +21,7 @@ async def _safe_close(workspace: object) -> None:
     try:
         await close_method()
     except Exception:
-        pass
+        return
 
 
 class StubCodeProvider:
@@ -403,3 +404,73 @@ async def test_reject_agent_discards_overlay(tmp_path: Path) -> None:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
         await _safe_close(stable)
+
+
+class _FlakyOrchestratorLifecycle:
+    def __init__(self, failures: list[Exception]) -> None:
+        self.failures = failures
+        self.save_calls = 0
+        self.records: list[object] = []
+
+    async def load(self, agent_id: str) -> None:
+        _ = agent_id
+        return None
+
+    async def save(self, record: object) -> None:
+        self.save_calls += 1
+        self.records.append(record)
+        if self.failures:
+            raise self.failures.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_save_lifecycle_record_retries_recoverable_errors(tmp_path: Path) -> None:
+    orch = CairnOrchestrator(project_root=tmp_path / "project", cairn_home=tmp_path / "cairn-home")
+    orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
+
+    lifecycle = _FlakyOrchestratorLifecycle([RecoverableError("t1"), RecoverableError("t2")])
+    orch.lifecycle = lifecycle
+
+    agent_ws = await Fsdantic.open(path=str(tmp_path / "agent-retry-save.db"))
+    ctx = AgentContext(
+        agent_id="agent-retry-save",
+        task="save with retry",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.QUEUED,
+        agent_fs=agent_ws,
+    )
+
+    try:
+        await orch._save_lifecycle_record(ctx)
+        assert lifecycle.save_calls == 3
+    finally:
+        await _safe_close(agent_ws)
+
+
+@pytest.mark.asyncio
+async def test_save_lifecycle_record_retry_exhaustion_bubbles_error(tmp_path: Path) -> None:
+    orch = CairnOrchestrator(project_root=tmp_path / "project", cairn_home=tmp_path / "cairn-home")
+    orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
+
+    lifecycle = _FlakyOrchestratorLifecycle(
+        [RecoverableError("t1"), RecoverableError("t2"), RecoverableError("t3")]
+    )
+    orch.lifecycle = lifecycle
+
+    agent_ws = await Fsdantic.open(path=str(tmp_path / "agent-retry-exhausted.db"))
+    ctx = AgentContext(
+        agent_id="agent-retry-exhausted",
+        task="save retry exhausted",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.QUEUED,
+        agent_fs=agent_ws,
+    )
+
+    try:
+        with pytest.raises(RecoverableError, match="t3"):
+            await orch._save_lifecycle_record(ctx)
+
+        assert lifecycle.save_calls == 3
+    finally:
+        await _safe_close(agent_ws)
+
