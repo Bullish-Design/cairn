@@ -219,18 +219,27 @@ class CairnOrchestrator:
 
     async def accept_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
-        ctx.transition(AgentState.ACCEPTED)
-        await self._save_lifecycle_record(ctx)
+        if ctx.state is not AgentState.REVIEWING:
+            raise ValueError(f"Agent {agent_id} not in reviewing state")
 
         if self.stable is None:
             raise RuntimeError("Stable workspace not initialized")
 
-        await self.stable.overlay.merge(ctx.agent_fs, strategy=MergeStrategy.OVERWRITE)
+        merge_result = await self.stable.overlay.merge(ctx.agent_fs, strategy=MergeStrategy.OVERWRITE)
+        merge_errors = getattr(merge_result, "errors", None)
+        if merge_errors:
+            raise RuntimeError(f"Failed to merge agent overlay: {merge_errors}")
+
+        ctx.transition(AgentState.ACCEPTED)
+        await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
         await self.persist_state()
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
+        if ctx.state is not AgentState.REVIEWING:
+            raise ValueError(f"Agent {agent_id} not in reviewing state")
+
         ctx.transition(AgentState.REJECTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
@@ -301,7 +310,6 @@ class CairnOrchestrator:
                 await self._save_lifecycle_record(ctx)
                 await self.persist_state()
 
-            await transition(AgentState.SPAWNING)
             await transition(AgentState.GENERATING)
 
             if self.stable is None:
@@ -380,8 +388,7 @@ class CairnOrchestrator:
                 "running": sum(
                     1
                     for ctx in self.active_agents.values()
-                    if ctx.state
-                    in {AgentState.SPAWNING, AgentState.GENERATING, AgentState.EXECUTING, AgentState.SUBMITTING}
+                    if ctx.state in {AgentState.GENERATING, AgentState.EXECUTING, AgentState.SUBMITTING}
                 ),
             },
         }

@@ -89,6 +89,33 @@ async def _setup_orchestrator(
     return orch, stable, bin_ws, agent_ws
 
 
+async def _setup_orchestrator_with_agent_db(
+    tmp_path: Path,
+    agent_id: str,
+    code_provider: StubCodeProvider | None = None,
+) -> tuple[CairnOrchestrator, object, object, object]:
+    orch = CairnOrchestrator(
+        project_root=tmp_path / "project",
+        cairn_home=tmp_path / "cairn-home",
+        code_provider=code_provider or StubCodeProvider(),
+    )
+    orch.project_root.mkdir(parents=True, exist_ok=True)
+    orch.cairn_home.mkdir(parents=True, exist_ok=True)
+    (orch.cairn_home / "workspaces").mkdir(parents=True, exist_ok=True)
+    orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
+
+    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
+    agent_db = orch.agentfs_dir / f"{agent_id}.db"
+    agent_ws = await Fsdantic.open(path=str(agent_db))
+
+    orch.stable = stable
+    orch.bin = bin_ws
+    orch.lifecycle = LifecycleStore(bin_ws)
+
+    return orch, stable, bin_ws, agent_ws
+
+
 @pytest.mark.asyncio
 async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     provider = StubCodeProvider()
@@ -205,6 +232,106 @@ async def test_run_agent_validation_failure_transitions_to_errored(
         assert ctx.state is AgentState.ERRORED
         assert "Grail validation failed" in (ctx.error or "")
         assert "invalid code" in (ctx.error or "")
+    finally:
+        await agent_ws.close()
+        await bin_ws.close()
+        await stable.close()
+
+
+@pytest.mark.asyncio
+async def test_accept_agent_requires_reviewing_state(tmp_path: Path) -> None:
+    agent_id = "agent-accept-invalid"
+    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+
+    ctx = AgentContext(
+        agent_id=agent_id,
+        task="not ready",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.EXECUTING,
+        agent_fs=agent_ws,
+    )
+    orch.active_agents[ctx.agent_id] = ctx
+
+    try:
+        with pytest.raises(ValueError, match="reviewing"):
+            await orch.accept_agent(agent_id)
+    finally:
+        await agent_ws.close()
+        await bin_ws.close()
+        await stable.close()
+
+
+@pytest.mark.asyncio
+async def test_accept_agent_merges_overlay_and_cleans(tmp_path: Path) -> None:
+    agent_id = "agent-accept"
+    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+
+    ctx = AgentContext(
+        agent_id=agent_id,
+        task="accept",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.REVIEWING,
+        agent_fs=agent_ws,
+    )
+    orch.active_agents[ctx.agent_id] = ctx
+
+    try:
+        await agent_ws.files.write("notes/accept.txt", "accepted")
+        await orch.accept_agent(agent_id)
+
+        assert await stable.files.read("notes/accept.txt") == "accepted"
+        assert agent_id not in orch.active_agents
+        assert (orch.agentfs_dir / f"bin-{agent_id}.db").exists()
+    finally:
+        await agent_ws.close()
+        await bin_ws.close()
+        await stable.close()
+
+
+@pytest.mark.asyncio
+async def test_reject_agent_requires_reviewing_state(tmp_path: Path) -> None:
+    agent_id = "agent-reject-invalid"
+    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+
+    ctx = AgentContext(
+        agent_id=agent_id,
+        task="not ready",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.SUBMITTING,
+        agent_fs=agent_ws,
+    )
+    orch.active_agents[ctx.agent_id] = ctx
+
+    try:
+        with pytest.raises(ValueError, match="reviewing"):
+            await orch.reject_agent(agent_id)
+    finally:
+        await agent_ws.close()
+        await bin_ws.close()
+        await stable.close()
+
+
+@pytest.mark.asyncio
+async def test_reject_agent_discards_overlay(tmp_path: Path) -> None:
+    agent_id = "agent-reject"
+    orch, stable, bin_ws, agent_ws = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+
+    ctx = AgentContext(
+        agent_id=agent_id,
+        task="reject",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.REVIEWING,
+        agent_fs=agent_ws,
+    )
+    orch.active_agents[ctx.agent_id] = ctx
+
+    try:
+        await agent_ws.files.write("notes/reject.txt", "no")
+        await orch.reject_agent(agent_id)
+
+        assert await stable.files.exists("notes/reject.txt") is False
+        assert agent_id not in orch.active_agents
+        assert (orch.agentfs_dir / f"bin-{agent_id}.db").exists()
     finally:
         await agent_ws.close()
         await bin_ws.close()

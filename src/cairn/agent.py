@@ -16,7 +16,6 @@ class AgentState(str, Enum):
     """Agent lifecycle states from queueing through completion."""
 
     QUEUED = "queued"
-    SPAWNING = "spawning"
     GENERATING = "generating"
     EXECUTING = "executing"
     SUBMITTING = "submitting"

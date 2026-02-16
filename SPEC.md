@@ -160,7 +160,7 @@ Validation errors prevent execution and transition agent to ERRORED state.
 
 ### Agent lifecycle
 
-`QUEUED -> SPAWNING -> GENERATING -> EXECUTING -> SUBMITTING -> REVIEWING -> (ACCEPTED | REJECTED | ERRORED)`
+`QUEUED -> GENERATING -> EXECUTING -> SUBMITTING -> REVIEWING -> (ACCEPTED | REJECTED | ERRORED)`
 
 ### Lifecycle metadata storage
 
