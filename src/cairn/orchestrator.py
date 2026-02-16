@@ -482,108 +482,143 @@ class CairnOrchestrator:
             if ctx is None:
                 return
 
-            async def transition(new_state: AgentState) -> None:
-                ctx.transition(new_state)
-                await self._save_lifecycle_record(ctx)
-                await self.persist_state()
-
-            await transition(AgentState.GENERATING)
-
-            if self.stable is None:
-                raise RuntimeError("Stable workspace not initialized")
-
-            agent_fs = await self._get_agent_workspace(ctx)
-            context = {"agent_id": ctx.agent_id, "workspace": agent_fs, "stable": self.stable}
-
-            try:
-                generated = await self.code_provider.get_code(ctx.task, context)
-            except ProviderError as exc:
-                ctx.error = str(exc)
-                await transition(AgentState.ERRORED)
-                return
-
-            ctx.generated_code = generated
-            is_valid, error = await self.code_provider.validate_code(generated)
-            if not is_valid:
-                ctx.error = error or "Code provider validation failed"
-                await transition(AgentState.ERRORED)
-                return
-
-            await transition(AgentState.EXECUTING)
-            tools = self.tools_factory(agent_id, agent_fs, self.stable)
-
-            grail_dir = self.project_root / ".grail" / "agents" / ctx.agent_id
-            grail_dir.mkdir(parents=True, exist_ok=True)
-            pym_path = grail_dir / "task.pym"
-            pym_path.write_text(generated, encoding="utf-8")
-
-            # Support both legacy Grail `load` and newer 2.x file loader names.
-            script = _load_grail_script(pym_path)
-            check_result = script.check()
-            check_payload = {
-                "valid": bool(getattr(check_result, "valid", False)),
-                "errors": [str(error) for error in (getattr(check_result, "errors", None) or [])],
-            }
-            (grail_dir / "check.json").write_text(
-                json.dumps(check_payload, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            if not check_result.valid:
-                ctx.error = self._format_grail_errors(check_result)
-                await transition(AgentState.ERRORED)
-                return
-
-            limiter = ResourceLimiter(
-                timeout_seconds=self.executor_settings.max_execution_time,
-                max_memory_bytes=self.executor_settings.max_memory_bytes,
-            )
-
-            async with limiter.limit():
-                await run_with_timeout(
-                    script.run(inputs={"task_description": ctx.task}, externals=tools),
-                    timeout_seconds=self.executor_settings.max_execution_time,
-                )
-
-            await transition(AgentState.SUBMITTING)
-            submission_repo = agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
-            submission_record = await submission_repo.load(SUBMISSION_KEY)
-            ctx.submission = submission_record.submission if submission_record else None
-
-            preview_dir = self.cairn_home / "workspaces" / agent_id
-            await agent_fs.materialize.to_disk(
-                target_path=preview_dir,
-                base=self.stable,
-                clean=True,
-                allow_root=self.cairn_home / "workspaces",
-            )
-
-            await transition(AgentState.REVIEWING)
+            await self._execute_agent_lifecycle(ctx)
         except GRAIL_EXECUTION_ERRORS as exc:
-            if ctx is not None:
-                ctx.error = str(exc)
-                ctx.transition(AgentState.ERRORED)
-                await self._save_lifecycle_record(ctx)
+            await self._handle_agent_error(ctx, exc)
         except (ResourceLimitError, CairnTimeoutError) as exc:
-            if ctx is not None:
-                ctx.error = str(exc)
-                ctx.transition(AgentState.ERRORED)
-                await self._save_lifecycle_record(ctx)
+            await self._handle_agent_error(ctx, exc)
             return
         except CairnError as exc:
-            if ctx is not None:
-                ctx.error = str(exc)
-                ctx.transition(AgentState.ERRORED)
-                await self._save_lifecycle_record(ctx)
+            await self._handle_agent_error(ctx, exc)
             if isinstance(exc, RecoverableError):
                 return
         except Exception as exc:
-            if ctx is not None:
-                ctx.error = str(exc)
-                ctx.transition(AgentState.ERRORED)
-                await self._save_lifecycle_record(ctx)
+            await self._handle_agent_error(ctx, exc)
         finally:
             self._semaphore.release()
             await self.persist_state()
+
+    async def _execute_agent_lifecycle(self, ctx: AgentContext) -> None:
+        """Run the full agent lifecycle through each phase."""
+        await self._transition_agent_state(ctx, AgentState.GENERATING)
+
+        generated = await self._generate_code(ctx)
+        if generated is None:
+            return
+
+        await self._transition_agent_state(ctx, AgentState.EXECUTING)
+
+        script = await self._validate_code(ctx, generated)
+        if script is None:
+            return
+
+        await self._execute_script(ctx, script)
+        await self._transition_agent_state(ctx, AgentState.SUBMITTING)
+        await self._submit_results(ctx)
+        await self._transition_agent_state(ctx, AgentState.REVIEWING)
+
+    async def _transition_agent_state(self, ctx: AgentContext, new_state: AgentState) -> None:
+        """Persist an agent state transition."""
+        ctx.transition(new_state)
+        await self._save_lifecycle_record(ctx)
+        await self.persist_state()
+
+    async def _generate_code(self, ctx: AgentContext) -> str | None:
+        """Fetch and validate provider code for the agent."""
+        if self.stable is None:
+            raise RuntimeError("Stable workspace not initialized")
+
+        agent_fs = await self._get_agent_workspace(ctx)
+        context = {"agent_id": ctx.agent_id, "workspace": agent_fs, "stable": self.stable}
+
+        try:
+            generated = await self.code_provider.get_code(ctx.task, context)
+        except ProviderError as exc:
+            ctx.error = str(exc)
+            await self._transition_agent_state(ctx, AgentState.ERRORED)
+            return None
+
+        ctx.generated_code = generated
+        is_valid, error = await self.code_provider.validate_code(generated)
+        if not is_valid:
+            ctx.error = error or "Code provider validation failed"
+            await self._transition_agent_state(ctx, AgentState.ERRORED)
+            return None
+
+        return generated
+
+    async def _validate_code(self, ctx: AgentContext, generated: str) -> GrailScript | None:
+        """Write and validate the Grail script for generated code."""
+        grail_dir = self.project_root / ".grail" / "agents" / ctx.agent_id
+        grail_dir.mkdir(parents=True, exist_ok=True)
+        pym_path = grail_dir / "task.pym"
+        pym_path.write_text(generated, encoding="utf-8")
+
+        script = _load_grail_script(pym_path)
+        check_result = script.check()
+        check_payload = {
+            "valid": bool(getattr(check_result, "valid", False)),
+            "errors": [str(error) for error in (getattr(check_result, "errors", None) or [])],
+        }
+        (grail_dir / "check.json").write_text(
+            json.dumps(check_payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        if not check_result.valid:
+            ctx.error = self._format_grail_errors(check_result)
+            await self._transition_agent_state(ctx, AgentState.ERRORED)
+            return None
+
+        return script
+
+    async def _execute_script(self, ctx: AgentContext, script: GrailScript) -> None:
+        """Execute the Grail script within resource limits."""
+        if self.stable is None:
+            raise RuntimeError("Stable workspace not initialized")
+
+        agent_fs = ctx.agent_fs
+        if agent_fs is None:
+            agent_fs = await self._get_agent_workspace(ctx)
+
+        tools = self.tools_factory(ctx.agent_id, agent_fs, self.stable)
+        limiter = ResourceLimiter(
+            timeout_seconds=self.executor_settings.max_execution_time,
+            max_memory_bytes=self.executor_settings.max_memory_bytes,
+        )
+
+        async with limiter.limit():
+            await run_with_timeout(
+                script.run(inputs={"task_description": ctx.task}, externals=tools),
+                timeout_seconds=self.executor_settings.max_execution_time,
+            )
+
+    async def _submit_results(self, ctx: AgentContext) -> None:
+        """Load submission metadata and materialize preview workspace."""
+        agent_fs = ctx.agent_fs
+        if agent_fs is None:
+            agent_fs = await self._get_agent_workspace(ctx)
+
+        submission_repo = agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
+        submission_record = await submission_repo.load(SUBMISSION_KEY)
+        ctx.submission = submission_record.submission if submission_record else None
+
+        preview_dir = self.cairn_home / "workspaces" / ctx.agent_id
+        await agent_fs.materialize.to_disk(
+            target_path=preview_dir,
+            base=self.stable,
+            clean=True,
+            allow_root=self.cairn_home / "workspaces",
+        )
+
+    async def _handle_agent_error(self, ctx: AgentContext | None, exc: Exception) -> None:
+        """Record agent failure details and persist lifecycle state."""
+        if ctx is None:
+            return
+
+        ctx.error = str(exc)
+        ctx.transition(AgentState.ERRORED)
+        await self._save_lifecycle_record(ctx)
 
     async def persist_state(self) -> None:
         state_dir = self.state_file.parent
