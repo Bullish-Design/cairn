@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fsdantic import Fsdantic, MergeStrategy, Workspace
-from grail import MontyContext
-from pydantic import BaseModel
+import grail
 
 from cairn.agent import AgentContext, AgentState
 from cairn.agent_tools import create_agent_tools
@@ -31,10 +30,6 @@ from cairn.queue import TaskPriority, TaskQueue
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.signals import SignalHandler
 from cairn.watcher import FileWatcher
-
-
-class EmptyInput(BaseModel):
-    """No-input model for generated agent code."""
 
 
 class CairnOrchestrator:
@@ -310,15 +305,26 @@ class CairnOrchestrator:
             await transition(AgentState.GENERATING)
             generated = await self.llm.generate(ctx.task)
             ctx.generated_code = generated
-            self._validate_code(generated)
 
             if self.stable is None:
                 raise RuntimeError("Stable workspace not initialized")
 
             await transition(AgentState.EXECUTING)
             tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable, self.llm)
-            monty = MontyContext(input_model=EmptyInput, tools=tools, limits=self._grail_limits())
-            await monty.execute_async(generated, {})
+
+            grail_dir = self.project_root / ".grail" / "agents" / ctx.agent_id
+            grail_dir.mkdir(parents=True, exist_ok=True)
+            pym_path = grail_dir / "task.pym"
+            pym_path.write_text(generated, encoding="utf-8")
+
+            script = grail.load(str(pym_path))
+            check_result = script.check()
+            if not check_result.valid:
+                ctx.error = self._format_grail_errors(check_result)
+                await transition(AgentState.ERRORED)
+                return
+
+            await script.run(inputs={"task_description": ctx.task}, externals=tools)
 
             await transition(AgentState.SUBMITTING)
             submission_repo = ctx.agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
@@ -334,6 +340,11 @@ class CairnOrchestrator:
             )
 
             await transition(AgentState.REVIEWING)
+        except (grail.ExecutionError, grail.InputError) as exc:
+            if ctx is not None:
+                ctx.error = str(exc)
+                ctx.transition(AgentState.ERRORED)
+                await self._save_lifecycle_record(ctx)
         except Exception as exc:
             if ctx is not None:
                 ctx.error = str(exc)
@@ -404,12 +415,9 @@ class CairnOrchestrator:
             raise KeyError(f"Unknown agent_id: {agent_id}")
         return ctx
 
-    def _validate_code(self, code: str) -> None:
-        compile(code, "<agent-generated>", "exec")
-
-    def _grail_limits(self) -> dict[str, Any]:
-        return {
-            "max_duration_secs": float(self.executor_settings.max_execution_time),
-            "max_memory": self.executor_settings.max_memory_bytes,
-            "max_recursion_depth": self.executor_settings.max_recursion_depth,
-        }
+    @staticmethod
+    def _format_grail_errors(check_result: Any) -> str:
+        errors = getattr(check_result, "errors", None)
+        if errors:
+            return "Grail validation failed: " + "; ".join(str(error) for error in errors)
+        return "Grail validation failed"

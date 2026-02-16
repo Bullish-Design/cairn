@@ -22,32 +22,34 @@ class BenchmarkCodeGenerator:
         return f"# task:{task}\npass"
 
 
-class BenchmarkMonty:
+class CheckResult:
+    def __init__(self, valid: bool, errors: list[str] | None = None) -> None:
+        self.valid = valid
+        self.errors = errors or []
+
+
+class BenchmarkScript:
     metrics_by_task: dict[str, dict[str, int]] = {
         "refactor-small-file": {"peak_memory_bytes": 1_048_576},
     }
 
-    def __init__(self, *, input_model, tools, limits):
-        _ = input_model
-        _ = limits
-        self.tools = {tool.__name__: tool for tool in tools}
-        self.last_metrics: dict[str, int] | None = None
+    def check(self) -> CheckResult:
+        return CheckResult(True)
 
-    async def execute_async(self, code: str, payload: dict) -> None:
-        _ = payload
-        task = code.split("task:", maxsplit=1)[1].strip()
+    async def run(self, *, inputs: dict, externals: list[object]) -> None:
+        task = inputs["task_description"]
+        tools = {tool.__name__: tool for tool in externals}
 
         if task == "refactor-small-file":
-            await self.tools["write_file"]("changes/small.py", "value = 1")
+            await tools["write_file"]("changes/small.py", "value = 1")
         elif task == "generate-docs":
-            await self.tools["write_file"]("docs/README.md", "# generated")
-            await self.tools["write_file"]("docs/USAGE.md", "usage")
-            await self.tools["write_file"]("docs/API.md", "api")
+            await tools["write_file"]("docs/README.md", "# generated")
+            await tools["write_file"]("docs/USAGE.md", "usage")
+            await tools["write_file"]("docs/API.md", "api")
         else:
-            await self.tools["write_file"]("changes/default.txt", task)
+            await tools["write_file"]("changes/default.txt", task)
 
-        await self.tools["submit_result"](f"completed {task}", [])
-        self.last_metrics = self.metrics_by_task.get(task)
+        await tools["submit_result"](f"completed {task}", [])
 
 
 async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object, object, object]:
@@ -81,7 +83,7 @@ async def test_agent_lifecycle_latency_benchmarks(
 ) -> None:
     """Benchmark phase-5 latency targets from CAIRN_REFACTOR-STEP_5.md."""
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
-    monkeypatch.setattr("cairn.orchestrator.MontyContext", BenchmarkMonty)
+    monkeypatch.setattr("cairn.orchestrator.grail.load", lambda _: BenchmarkScript())
 
     spawned_agent_id: str | None = None
 
@@ -164,7 +166,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
 ) -> None:
     """Benchmark representative execution durations and capture optional Grail memory telemetry."""
     orch, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
-    monkeypatch.setattr("cairn.orchestrator.MontyContext", BenchmarkMonty)
+    monkeypatch.setattr("cairn.orchestrator.grail.load", lambda _: BenchmarkScript())
 
     ctx = AgentContext(
         agent_id=f"agent-{task}",
@@ -185,7 +187,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
         record_property("execution_duration_threshold_seconds", max_duration_seconds)
         assert elapsed < max_duration_seconds
 
-        memory_metric = BenchmarkMonty.metrics_by_task.get(task, {}).get("peak_memory_bytes")
+        memory_metric = BenchmarkScript.metrics_by_task.get(task, {}).get("peak_memory_bytes")
         if memory_metric is not None:
             record_property("peak_memory_bytes", memory_metric)
             assert memory_metric > 0
