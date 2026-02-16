@@ -12,7 +12,8 @@ from typing import Annotated, Any
 from pydantic import BaseModel, Field
 from pydantic.functional_validators import AfterValidator
 
-MAX_FILE_SIZE = 10 * 1024 * 1024
+from cairn.constants import MAX_FILE_SIZE_BYTES
+from cairn.exceptions import PathValidationError
 
 
 def _validate_path(value: str, *, allow_root: bool = False) -> str:
@@ -22,9 +23,17 @@ def _validate_path(value: str, *, allow_root: bool = False) -> str:
 
     path = PurePosixPath(value)
     if path.is_absolute():
-        raise ValueError(f"Invalid path: {value}")
+        raise PathValidationError(
+            f"Absolute paths not allowed in sandbox: {value}",
+            error_code="PATH_ABSOLUTE",
+            context={"path": value},
+        )
     if ".." in path.parts:
-        raise ValueError(f"Invalid path: {value}")
+        raise PathValidationError(
+            f"Path traversal not allowed: {value}",
+            error_code="PATH_TRAVERSAL",
+            context={"path": value},
+        )
     return value
 
 
@@ -41,7 +50,7 @@ def validate_relative_or_root_path(value: str) -> str:
 def validate_max_file_size_text(value: str) -> str:
     """Validate UTF-8 text size against MAX_FILE_SIZE."""
     size = len(value.encode("utf-8"))
-    if size > MAX_FILE_SIZE:
+    if size > MAX_FILE_SIZE_BYTES:
         raise ValueError(f"Content too large: {size} bytes")
     return value
 

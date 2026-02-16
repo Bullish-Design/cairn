@@ -7,9 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, cast, runtime_checkable
 import inspect
 
-
-class CodeProviderError(RuntimeError):
-    """Raised when a code provider cannot supply code."""
+from cairn.exceptions import CodeProviderError
 
 
 @runtime_checkable

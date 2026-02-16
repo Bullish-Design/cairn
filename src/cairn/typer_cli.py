@@ -1,4 +1,12 @@
-"""Typer-based CLI for interacting with Cairn workspaces and agents."""
+"""Typer-based CLI interface for Cairn orchestrator.
+
+This module provides the command-line interface using the Typer library,
+offering commands for managing agent tasks, inspecting state, and controlling
+the orchestrator lifecycle.
+
+The CLI communicates with the orchestrator through the command pattern defined
+in commands.py, providing a user-friendly interface for all orchestrator operations.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,17 @@
-"""Shared command models and parsing for CLI and signal handling."""
+"""Command pattern implementation for Cairn orchestrator operations.
+
+This module defines the command objects used to communicate with the orchestrator,
+implementing a command pattern for operation dispatching. Commands are immutable
+dataclasses that encapsulate operation parameters.
+
+Supported Commands:
+    - QueueCommand: Queue a new agent task
+    - AcceptCommand: Accept an agent's changes
+    - RejectCommand: Reject an agent's changes
+    - ListCommand: List agents with filtering
+    - InspectCommand: Inspect agent details
+    - StatusCommand: Get orchestrator status
+"""
 
 from __future__ import annotations
 

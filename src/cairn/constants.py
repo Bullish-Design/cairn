@@ -1,0 +1,58 @@
+"""Constants for Cairn configuration and limits.
+
+This module defines all magic numbers and configuration constants used
+throughout the Cairn codebase, providing a single source of truth.
+"""
+
+from __future__ import annotations
+
+# Time constants (in seconds)
+SECOND = 1.0
+MINUTE = 60.0
+HOUR = 3600.0
+DAY = 86400.0
+WEEK = 7 * DAY
+
+# Polling intervals
+SIGNAL_POLL_INTERVAL_SECONDS = 0.5
+WATCHER_DEBOUNCE_SECONDS = 0.1
+
+# File size limits
+KB = 1024
+MB = 1024 * KB
+GB = 1024 * MB
+
+MAX_FILE_SIZE_BYTES = 10 * MB
+MAX_CONTENT_SIZE_BYTES = 10 * MB
+
+# Execution limits
+DEFAULT_EXECUTION_TIMEOUT_SECONDS = 60.0
+DEFAULT_MAX_MEMORY_BYTES = 100 * MB
+
+# Lifecycle management
+LIFECYCLE_CLEANUP_MAX_AGE_SECONDS = 7 * DAY
+LIFECYCLE_MAX_RETRY_ATTEMPTS = 3
+LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS = 0.1
+LIFECYCLE_RETRY_BACKOFF_FACTOR = 2.0
+
+# Queue configuration
+DEFAULT_QUEUE_PRIORITY = 5
+MIN_QUEUE_PRIORITY = 1
+MAX_QUEUE_PRIORITY = 10
+
+# Concurrency limits
+DEFAULT_MAX_CONCURRENT_AGENTS = 4
+MAX_WORKSPACE_CACHE_SIZE = 100
+
+# Retry configuration
+DEFAULT_RETRY_ATTEMPTS = 3
+DEFAULT_RETRY_INITIAL_DELAY_SECONDS = 1.0
+DEFAULT_RETRY_BACKOFF_FACTOR = 2.0
+DEFAULT_RETRY_MAX_DELAY_SECONDS = 60.0
+
+# Regex timeout (for ReDoS protection)
+REGEX_TIMEOUT_SECONDS = 1.0
+
+# Agent ID constraints
+AGENT_ID_MAX_LENGTH = 255
+AGENT_ID_ALLOWED_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"

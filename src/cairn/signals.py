@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cairn.commands import CairnCommand, CommandType, parse_command_payload
+from cairn.constants import SIGNAL_POLL_INTERVAL_SECONDS
 
 if TYPE_CHECKING:
     from cairn.orchestrator import CairnOrchestrator
@@ -42,7 +43,7 @@ class SignalHandler:
         self.signals_dir.mkdir(parents=True, exist_ok=True)
 
         while True:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(SIGNAL_POLL_INTERVAL_SECONDS)
             await self.process_signals_once()
 
     async def process_signals_once(self) -> None:

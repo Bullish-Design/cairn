@@ -25,6 +25,8 @@ from cairn.commands import (
     RejectCommand,
     StatusCommand,
 )
+from cairn.constants import LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
+from cairn.exceptions import CairnError, RecoverableError
 from cairn.lifecycle import LifecycleRecord, LifecycleStore, SUBMISSION_KEY, SubmissionRecord
 from cairn.queue import TaskPriority, TaskQueue
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
@@ -409,6 +411,13 @@ class CairnOrchestrator:
                 ctx.error = str(exc)
                 ctx.transition(AgentState.ERRORED)
                 await self._save_lifecycle_record(ctx)
+        except CairnError as exc:
+            if ctx is not None:
+                ctx.error = str(exc)
+                ctx.transition(AgentState.ERRORED)
+                await self._save_lifecycle_record(ctx)
+            if isinstance(exc, RecoverableError):
+                return
         except Exception as exc:
             if ctx is not None:
                 ctx.error = str(exc)
@@ -436,7 +445,10 @@ class CairnOrchestrator:
         }
         self.state_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    async def cleanup_completed_agents(self, max_age_seconds: float = 86400 * 7) -> int:
+    async def cleanup_completed_agents(
+        self,
+        max_age_seconds: float = LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
+    ) -> int:
         if self.lifecycle is None:
             return 0
         return await self.lifecycle.cleanup_old(max_age_seconds, self.agentfs_dir)

@@ -10,6 +10,7 @@ from fsdantic import VersionedKVRecord, Workspace
 from pydantic import field_validator, model_validator
 
 from cairn.agent import AgentState
+from cairn.constants import LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
 
 AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
@@ -78,7 +79,7 @@ class LifecycleStore:
 
     async def cleanup_old(
         self,
-        max_age_seconds: float = 86400 * 7,
+        max_age_seconds: float = LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
         agentfs_dir: Path | None = None,
     ) -> int:
         cutoff = time.time() - max_age_seconds
