@@ -5,7 +5,7 @@ for handling transient failures in async operations.
 """
 
 import asyncio
-from typing import Awaitable, Callable, TypeVar
+from typing import Awaitable, Callable, Optional, TypeVar
 
 T = TypeVar("T")
 

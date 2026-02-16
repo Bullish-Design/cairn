@@ -1,15 +1,16 @@
 [project]
 name = "cairn"
 version = "0.1.0"
-description = "Cairn orchestrator runtime for sandboxed AI code agents on fsdantic workspaces"
+description = "Cairn orchestrator runtime for sandboxed code execution on fsdantic workspaces"
 readme = "README.md"
 requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Bullish Design" }]
 dependencies = [
     "agentfs-sdk>=0.6.0",
-    "fsdantic",
-    "grail",
+    "fsdantic>=0.3.0",
+    "grail>=2.0.0",
+    "pydantic>=2.0.0",
     "watchfiles>=0.20.0",
     "pydantic-settings>=2.0.0",
     "typer>=0.9.0",

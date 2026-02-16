@@ -24,7 +24,9 @@ Cairn provides:
 1. **README.md** (this file): install + quickstart.
 2. **[CONCEPT.md](CONCEPT.md)**: philosophy and constraints.
 3. **[SPEC.md](SPEC.md)**: runtime architecture and contracts.
-4. **[TESTING.md](TESTING.md)**: repository test commands.
+4. **[PROVIDERS.md](PROVIDERS.md)**: code provider reference.
+5. **[MIGRATION.md](MIGRATION.md)**: V2 migration overview.
+6. **[TESTING.md](TESTING.md)**: repository test commands.
 
 > **Source-of-truth note:** `SPEC.md` defines runtime contracts; when implementation changes in `src/cairn/*`, update `SPEC.md` in the same PR.
 

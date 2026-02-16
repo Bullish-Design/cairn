@@ -33,6 +33,8 @@ Current test modules under `tests/cairn/`:
 - `test_lifecycle.py`
 - `test_orchestrator.py`
 - `test_performance.py`
+- `test_plugin_providers.py`
+- `test_providers.py`
 - `test_watcher.py`
 - `test_workspace.py`
 
