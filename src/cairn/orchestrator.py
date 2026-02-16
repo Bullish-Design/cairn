@@ -32,6 +32,39 @@ from cairn.signals import SignalHandler
 from cairn.watcher import FileWatcher
 
 
+def _load_grail_script(pym_path: Path) -> Any:
+    """Load a Grail script using legacy and current loader entry points."""
+
+    script_path = str(pym_path)
+
+    # Grail 1.x exposed a top-level `load` function.
+    legacy_loader = getattr(grail, "load", None)
+    if callable(legacy_loader):
+        return legacy_loader(script_path)
+
+    # Grail 2.x loaders can vary by release; try known file-based entry points.
+    candidate_loaders: tuple[tuple[str, str], ...] = (
+        ("Script", "from_file"),
+        ("Script", "load"),
+        ("Program", "from_file"),
+        ("Program", "load"),
+    )
+    for class_name, method_name in candidate_loaders:
+        cls = getattr(grail, class_name, None)
+        if cls is None:
+            continue
+        loader = getattr(cls, method_name, None)
+        if callable(loader):
+            return loader(script_path)
+
+    available_attrs = ", ".join(sorted(name for name in dir(grail) if not name.startswith("_")))
+    raise RuntimeError(
+        "No supported Grail script loader found. Expected `grail.load` or a supported "
+        "2.x loader (Script/Program from_file/load). "
+        f"Available grail attributes: {available_attrs}"
+    )
+
+
 class CairnOrchestrator:
     """Main orchestrator managing agent lifecycle."""
 
@@ -339,7 +372,8 @@ class CairnOrchestrator:
             pym_path = grail_dir / "task.pym"
             pym_path.write_text(generated, encoding="utf-8")
 
-            script = grail.load(str(pym_path))
+            # Support both legacy Grail `load` and newer 2.x file loader names.
+            script = _load_grail_script(pym_path)
             check_result = script.check()
             if not check_result.valid:
                 ctx.error = self._format_grail_errors(check_result)
