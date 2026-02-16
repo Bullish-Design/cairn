@@ -59,10 +59,17 @@ from cairn.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
-GRAIL_EXECUTION_ERRORS: tuple[type[Exception], ...] = (grail.GrailExecutionError,)
+_grail_errors: list[type[Exception]] = [grail.GrailExecutionError]
+_execution_error = getattr(grail, "ExecutionError", None)
+if _execution_error is None:
+    _execution_error = grail.GrailExecutionError
+    setattr(grail, "ExecutionError", _execution_error)
+if isinstance(_execution_error, type) and issubclass(_execution_error, Exception):
+    _grail_errors.append(_execution_error)
 _input_error = getattr(grail, "InputError", None)
 if isinstance(_input_error, type) and issubclass(_input_error, Exception):
-    GRAIL_EXECUTION_ERRORS = (grail.GrailExecutionError, _input_error)
+    _grail_errors.append(_input_error)
+GRAIL_EXECUTION_ERRORS = tuple(dict.fromkeys(_grail_errors))
 
 
 def _load_grail_script(pym_path: Path) -> GrailScript:
@@ -398,17 +405,15 @@ class CairnOrchestrator:
         ctx.transition(AgentState.ACCEPTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
-        await self.persist_state()
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
-        if ctx.state is not AgentState.REVIEWING:
+        if ctx.state not in {AgentState.REVIEWING, AgentState.QUEUED}:
             raise ValueError(f"Agent {agent_id} not in reviewing state")
 
         ctx.transition(AgentState.REJECTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
-        await self.persist_state()
 
     async def trash_agent(self, agent_id: str) -> None:
         ctx = self.active_agents.get(agent_id)
