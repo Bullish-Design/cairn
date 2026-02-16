@@ -15,7 +15,7 @@ import grail
 
 from cairn.agent import AgentContext, AgentState
 from cairn.agent_tools import create_agent_tools
-from cairn.code_generator import CodeGenerator
+from cairn.providers import CodeProvider, CodeProviderError, FileCodeProvider
 from cairn.commands import (
     AcceptCommand,
     CairnCommand,
@@ -41,7 +41,7 @@ class CairnOrchestrator:
         cairn_home: Path | str | None = None,
         config: OrchestratorSettings | None = None,
         executor_settings: ExecutorSettings | None = None,
-        code_generator: CodeGenerator | None = None,
+        code_provider: CodeProvider | None = None,
         tools_factory: Callable[[str, Workspace, Workspace, Any], list[Callable[..., Any]]] | None = None,
     ):
         path_settings = PathsSettings()
@@ -60,7 +60,7 @@ class CairnOrchestrator:
         self._semaphore = asyncio.Semaphore(self.config.max_concurrent_agents)
         self._running_tasks: set[asyncio.Task[None]] = set()
 
-        self.llm = code_generator or CodeGenerator()
+        self.code_provider = code_provider or FileCodeProvider(base_path=self.project_root)
         self.tools_factory = tools_factory or create_agent_tools
 
         self.watcher: FileWatcher | None = None
@@ -303,14 +303,28 @@ class CairnOrchestrator:
 
             await transition(AgentState.SPAWNING)
             await transition(AgentState.GENERATING)
-            generated = await self.llm.generate(ctx.task)
-            ctx.generated_code = generated
 
             if self.stable is None:
                 raise RuntimeError("Stable workspace not initialized")
 
+            context = {"agent_id": ctx.agent_id, "workspace": ctx.agent_fs, "stable": self.stable}
+
+            try:
+                generated = await self.code_provider.get_code(ctx.task, context)
+            except CodeProviderError as exc:
+                ctx.error = str(exc)
+                await transition(AgentState.ERRORED)
+                return
+
+            ctx.generated_code = generated
+            is_valid, error = await self.code_provider.validate_code(generated)
+            if not is_valid:
+                ctx.error = error or "Code provider validation failed"
+                await transition(AgentState.ERRORED)
+                return
+
             await transition(AgentState.EXECUTING)
-            tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable, self.llm)
+            tools = self.tools_factory(agent_id, ctx.agent_fs, self.stable, None)
 
             grail_dir = self.project_root / ".grail" / "agents" / ctx.agent_id
             grail_dir.mkdir(parents=True, exist_ok=True)

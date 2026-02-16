@@ -17,9 +17,14 @@ ACCEPT_REJECT_LATENCY_TARGET_SECONDS = 0.05
 EXECUTION_DURATION_TARGET_SECONDS = 5.0
 
 
-class BenchmarkCodeGenerator:
-    async def generate(self, task: str) -> str:
-        return f"# task:{task}\npass"
+class BenchmarkCodeProvider:
+    async def get_code(self, reference: str, context: dict) -> str:
+        _ = context
+        return f"# task:{reference}\npass"
+
+    async def validate_code(self, code: str) -> tuple[bool, str | None]:
+        _ = code
+        return True, None
 
 
 class CheckResult:
@@ -56,7 +61,7 @@ async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
-        code_generator=BenchmarkCodeGenerator(),
+        code_provider=BenchmarkCodeProvider(),
     )
     orch.project_root.mkdir(parents=True, exist_ok=True)
     orch.cairn_home.mkdir(parents=True, exist_ok=True)
