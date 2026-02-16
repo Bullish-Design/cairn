@@ -4,25 +4,32 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 
 ## Project Overview
 
-**Cairn** is an orchestration system for AI code agents that provides isolated workspace overlays, sandboxed execution, and explicit human control over integration.
+**Cairn** is a workspace-aware orchestration runtime for sandboxed code execution that provides isolated workspace overlays, pluggable code providers, and explicit human control over integration.
 
 ### Key Components
 
-1. **Cairn Orchestrator** (`src/cairn/`) - Agent spawning, execution, and management
-2. **Neovim Plugin** (`src/cairn/nvim/`) - UI for reviewing and accepting agent changes
-3. **Nix Modules** (`modules/`) - devenv.sh integration (optional)
-4. **Documentation** - README, CONCEPT, SPEC, TESTING guides
+1. **Cairn Orchestrator** (`src/cairn/`) - Task orchestration, execution, and lifecycle management
+2. **Code Providers** (`src/cairn/providers.py`) - Pluggable code sourcing (file, inline, LLM, git, registry)
+3. **External Functions** (`src/cairn/external_functions.py`) - Capability surface for sandboxed code
+4. **Neovim Plugin** (`src/cairn/nvim/`) - UI for reviewing and accepting changes
+5. **Nix Modules** (`modules/`) - devenv.sh integration (optional)
+6. **Documentation** - README, CONCEPT, SPEC, TESTING guides
 
 ### Technology Stack
 
 - **Nix/devenv** - Development environment management
 - **Python 3.11+** - Orchestrator and libraries
-- **AgentFS** - SQLite-based filesystem with overlays
-- **Monty** - Sandboxed Python interpreter
-- **llm library** - Pluggable LLM providers
+- **FSdantic** - Type-safe workspace management with overlay semantics
+- **Grail** - `.pym` file-based execution with pre-flight validation
+- **Monty** - Sandboxed Python interpreter (via Grail)
 - **Neovim + Lua** - Editor integration
 - **TMUX** - Workspace management
 - **Jujutsu** - Version control integration
+
+**Optional plugins:**
+- **cairn-llm** - LLM-based code generation via `LLMCodeProvider`
+- **cairn-git** - Git repository code sourcing via `GitCodeProvider`
+- **cairn-registry** - Registry-based code sourcing via `RegistryCodeProvider`
 
 ## Development Philosophy
 
@@ -52,14 +59,12 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 ```
 cairn/
 ├── src/cairn/               # Main orchestrator library
-│   ├── orchestrator.py      # Main process
+│   ├── orchestrator.py      # Main orchestration runtime
+│   ├── providers.py         # CodeProvider protocol + built-in providers
+│   ├── external_functions.py # External function factory
 │   ├── agent.py             # Agent state models
 │   ├── queue.py             # Task queue
-│   ├── executor.py          # Monty sandbox executor
-│   ├── code_generator.py    # LLM-based code generation
-│   ├── external_functions.py # Functions exposed to agents
 │   ├── lifecycle.py         # Lifecycle storage
-│   ├── workspace.py         # Preview materialization
 │   ├── cli.py               # Command-line interface
 │   ├── commands.py          # Command models
 │   ├── settings.py          # Configuration
@@ -76,6 +81,18 @@ cairn/
 │       │   └── ghost.lua
 │       ├── doc/cairn.txt
 │       └── tests/
+│
+├── .grail/                  # Grail artifacts directory
+│   └── agents/
+│       └── {agent_id}/
+│           ├── task.pym     # Generated/loaded code
+│           ├── check.json   # Validation results
+│           └── run.log      # Execution log
+│
+├── .agentfs/                # FSdantic databases
+│   ├── stable.db
+│   ├── bin.db
+│   └── agent-{id}.db
 │
 ├── modules/                 # Nix modules (optional)
 │   ├── agentfs.nix
@@ -256,27 +273,53 @@ For detailed information on specific subsystems, see:
 
 ## Common Pitfalls
 
-### AgentFS
+### FSdantic Workspaces
 
-❌ **Don't:** Assume file exists in overlay
+❌ **Don't:** Use old API patterns
 ```python
-content = await agent_fs.fs.read_file("file.txt")  # Might not exist
+# Old API (deprecated)
+content = await agent_fs.raw.fs.read_file("file.txt")
+ops = FileOperations(agent_fs.raw, base_fs=stable_fs.raw)
 ```
 
-✅ **Do:** Check or handle exception
+✅ **Do:** Use workspace managers
 ```python
-try:
-    content = await agent_fs.fs.read_file("file.txt")
-except FileNotFoundError:
-    # Fall back to stable or handle
-    pass
+# New API
+content = await agent_fs.files.read("file.txt")
+results = await agent_fs.files.query(ViewQuery(path_pattern="**/*.py"))
 ```
 
-### Monty
+### Grail and .pym files
 
-❌ **Don't:** Use stdlib functions in agent code
+❌ **Don't:** Generate code strings without validation
 ```python
-# This will fail - no imports allowed
+# Skip validation
+code = await provider.get_code(task, context)
+result = await execute_string(code)  # No validation!
+```
+
+✅ **Do:** Write to .pym and validate before execution
+```python
+# Write code to .pym file
+pym_file = Path(f".grail/agents/{agent_id}/task.pym")
+pym_file.write_text(code)
+
+# Load and validate
+script = grail.load(str(pym_file))
+check_result = script.check()
+if not check_result.valid:
+    handle_errors(check_result.errors)
+    return
+
+# Execute
+result = await script.run(inputs={...}, externals={...})
+```
+
+### Monty Sandbox
+
+❌ **Don't:** Use imports in .pym code
+```python
+# This will fail in sandbox
 code = """
 import json
 data = json.loads(content)
@@ -286,7 +329,8 @@ data = json.loads(content)
 ✅ **Do:** Provide as external function
 ```python
 # Add to external_functions
-def parse_json(text: str) -> dict:
+@external
+async def parse_json(text: str) -> dict:
     import json
     return json.loads(text)
 ```

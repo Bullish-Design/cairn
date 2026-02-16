@@ -1,6 +1,23 @@
 # Cairn
 
-Cairn is an orchestration runtime for AI code agents with isolated fsdantic workspaces and explicit human accept/reject control.
+Cairn is a workspace-aware orchestration runtime for sandboxed code execution with copy-on-write isolation and explicit human integration control.
+
+## What is Cairn?
+
+Cairn provides:
+- **Safe execution of untrusted code** in sandboxed environments
+- **Isolated workspace management** with copy-on-write overlays
+- **Human-controlled integration** via explicit accept/reject gates
+- **Pluggable code providers** for sourcing code from files, LLMs, git repos, registries, or custom sources
+- **Preview environments** for inspecting changes before integration
+
+## Use Cases
+
+- **File-based task execution** - Run pre-written `.pym` scripts in isolated workspaces
+- **LLM code generation** - Generate and execute code from natural language (via `cairn-llm` plugin)
+- **Untrusted user scripts** - Execute user-submitted code safely
+- **Preview environments** - Test code changes in isolation before merging
+- **CI/CD workflows** - Run build/test scripts in sandboxed workspaces
 
 ## Read this first (canonical docs)
 
@@ -29,10 +46,18 @@ uv run cairn up
 
 ### Queue work
 
+**With file-based code provider (default):**
 ```bash
-uv run cairn spawn "Add docstrings to public functions"
-# or normal-priority queueing
-uv run cairn queue "Refactor watcher tests"
+# Run a pre-written .pym script
+uv run cairn spawn scripts/refactor_imports.pym
+uv run cairn queue scripts/add_type_hints.pym
+```
+
+**With LLM code provider (requires `cairn-llm` plugin):**
+```bash
+# Generate and execute code from natural language
+uv run cairn spawn "Add docstrings to public functions" --provider llm
+uv run cairn queue "Refactor watcher tests" --provider llm
 ```
 
 ### Inspect state
