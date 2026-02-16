@@ -375,6 +375,14 @@ class CairnOrchestrator:
             # Support both legacy Grail `load` and newer 2.x file loader names.
             script = _load_grail_script(pym_path)
             check_result = script.check()
+            check_payload = {
+                "valid": bool(getattr(check_result, "valid", False)),
+                "errors": [str(error) for error in (getattr(check_result, "errors", None) or [])],
+            }
+            (grail_dir / "check.json").write_text(
+                json.dumps(check_payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
             if not check_result.valid:
                 ctx.error = self._format_grail_errors(check_result)
                 await transition(AgentState.ERRORED)

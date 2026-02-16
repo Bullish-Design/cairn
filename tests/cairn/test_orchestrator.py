@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import grail
@@ -192,6 +193,10 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
 
         pym_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "task.pym"
         assert pym_file.read_text(encoding="utf-8") == "x = 1"
+
+        check_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "check.json"
+        assert json.loads(check_file.read_text(encoding="utf-8")) == {"errors": [], "valid": True}
+
         assert provider.reference == ctx.task
         assert provider.context is not None
         assert provider.context["agent_id"] == ctx.agent_id
@@ -281,6 +286,9 @@ async def test_run_agent_validation_failure_transitions_to_errored(
         assert ctx.state is AgentState.ERRORED
         assert "Grail validation failed" in (ctx.error or "")
         assert "invalid code" in (ctx.error or "")
+
+        check_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "check.json"
+        assert json.loads(check_file.read_text(encoding="utf-8")) == {"errors": ["invalid code"], "valid": False}
     finally:
         await agent_ws.close()
         await bin_ws.close()
