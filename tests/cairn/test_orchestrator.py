@@ -8,7 +8,7 @@ from fsdantic import Fsdantic
 
 from cairn.agent import AgentContext, AgentState
 from cairn.lifecycle import LifecycleStore
-from cairn.orchestrator import CairnOrchestrator
+from cairn.orchestrator import CairnOrchestrator, _load_grail_script
 from cairn.queue import TaskPriority
 
 
@@ -63,6 +63,55 @@ class InvalidScript:
 
     async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
         raise AssertionError("run should not be called")
+
+
+def test_load_grail_script_uses_legacy_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def _legacy_loader(path: str) -> object:
+        calls.append(path)
+        return SuccessfulScript()
+
+    monkeypatch.setattr("cairn.orchestrator.grail.load", _legacy_loader)
+
+    pym_path = tmp_path / "legacy-task.pym"
+    pym_path.write_text("x = 1", encoding="utf-8")
+
+    script = _load_grail_script(pym_path)
+
+    assert isinstance(script, SuccessfulScript)
+    assert calls == [str(pym_path)]
+
+
+def test_load_grail_script_uses_modern_loader_when_legacy_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class ScriptLoader:
+        @classmethod
+        def from_file(cls, path: str) -> object:
+            return {"path": path, "loader": cls.__name__}
+
+    monkeypatch.delattr("cairn.orchestrator.grail.load", raising=False)
+    monkeypatch.setattr("cairn.orchestrator.grail.Script", ScriptLoader, raising=False)
+
+    pym_path = tmp_path / "modern-task.pym"
+    pym_path.write_text("x = 1", encoding="utf-8")
+
+    script = _load_grail_script(pym_path)
+
+    assert script == {"path": str(pym_path), "loader": "ScriptLoader"}
+
+
+def test_load_grail_script_raises_when_no_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delattr("cairn.orchestrator.grail.load", raising=False)
+    monkeypatch.delattr("cairn.orchestrator.grail.Script", raising=False)
+    monkeypatch.delattr("cairn.orchestrator.grail.Program", raising=False)
+
+    pym_path = tmp_path / "missing-loader-task.pym"
+    pym_path.write_text("x = 1", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="No supported Grail script loader found"):
+        _load_grail_script(pym_path)
 
 
 async def _setup_orchestrator(
