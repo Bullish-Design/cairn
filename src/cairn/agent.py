@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import time
 from enum import Enum
-from typing import Any
 
 from fsdantic import Workspace
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cairn.queue import TaskPriority
+from cairn.types import ExecutionResult, SubmissionData
 
 
 class AgentState(str, Enum):
@@ -36,8 +36,8 @@ class AgentContext(BaseModel):
     state: AgentState
     agent_fs: Workspace
     generated_code: str | None = None
-    execution_result: Any | None = None
-    submission: dict | None = None
+    execution_result: ExecutionResult | None = None
+    submission: SubmissionData | None = None
     error: str | None = None
     created_at: float = Field(default_factory=time.time)
     state_changed_at: float = Field(default_factory=time.time)

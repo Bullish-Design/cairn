@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Iterable
 import re
-from typing import Any
+from typing import cast
 
 from fsdantic import FileNotFoundError, ViewQuery, Workspace
 
@@ -22,8 +22,7 @@ from cairn.external_models import (
     WriteFileRequest,
 )
 from cairn.lifecycle import SUBMISSION_KEY, SubmissionRecord
-
-ExternalFunction = Callable[..., Awaitable[Any]]
+from cairn.types import ExternalTools, FileEntryProtocol, SearchContentMatchData
 
 
 class CairnExternalFunctions:
@@ -62,7 +61,7 @@ class CairnExternalFunctions:
         files = await self.agent_fs.files.search(request.pattern)
         return [file_path.lstrip("/") for file_path in files]
 
-    async def search_content(self, pattern: str, path: str = ".") -> list[dict[str, Any]]:
+    async def search_content(self, pattern: str, path: str = ".") -> list[SearchContentMatchData]:
         request = SearchContentRequest(pattern=pattern, path=path)
         path_pattern = self._search_content_path_pattern(request.path)
         regex = re.compile(request.pattern)
@@ -78,8 +77,8 @@ class CairnExternalFunctions:
         stable_entries = await self.stable_fs.files.query(query)
         agent_paths = {entry.path for entry in agent_entries}
 
-        def build_matches(entries: list[Any]) -> list[dict[str, Any]]:
-            matches: list[dict[str, Any]] = []
+        def build_matches(entries: Iterable[FileEntryProtocol]) -> list[SearchContentMatchData]:
+            matches: list[SearchContentMatchData] = []
             for entry in entries:
                 content = entry.content
                 if content is None:
@@ -88,13 +87,12 @@ class CairnExternalFunctions:
                     content = content.decode("utf-8", errors="ignore")
                 for line_number, line in enumerate(str(content).splitlines(), start=1):
                     if regex.search(line):
-                        matches.append(
-                            SearchContentMatch(
-                                file=entry.path.lstrip("/"),
-                                line=line_number,
-                                text=line,
-                            ).model_dump()
-                        )
+                        match = SearchContentMatch(
+                            file=entry.path.lstrip("/"),
+                            line=line_number,
+                            text=line,
+                        ).model_dump()
+                        matches.append(cast(SearchContentMatchData, match))
             return matches
 
         all_matches = build_matches(agent_entries)
@@ -128,7 +126,7 @@ class CairnExternalFunctions:
         return True
 
 
-def create_external_functions(agent_id: str, agent_fs: Workspace, stable_fs: Workspace) -> dict[str, ExternalFunction]:
+def create_external_functions(agent_id: str, agent_fs: Workspace, stable_fs: Workspace) -> ExternalTools:
     """Create the external function map for Grail execution."""
     ext = CairnExternalFunctions(agent_id=agent_id, agent_fs=agent_fs, stable_fs=stable_fs)
 
@@ -147,7 +145,7 @@ def create_external_functions(agent_id: str, agent_fs: Workspace, stable_fs: Wor
     async def search_files(pattern: str) -> list[str]:
         return await ext.search_files(pattern)
 
-    async def search_content(pattern: str, path: str = ".") -> list[dict[str, Any]]:
+    async def search_content(pattern: str, path: str = ".") -> list[SearchContentMatchData]:
         return await ext.search_content(pattern, path)
 
     async def submit_result(summary: str, changed_files: list[str]) -> bool:

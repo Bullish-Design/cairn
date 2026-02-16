@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
-
 from fsdantic import VersionedKVRecord, Workspace
 from pydantic import field_validator, model_validator
 
 from cairn.agent import AgentState
 from cairn.constants import LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
+from cairn.types import SubmissionData
 
 AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
@@ -25,7 +24,7 @@ class LifecycleRecord(VersionedKVRecord):
     state: AgentState
     state_changed_at: float
     db_path: str
-    submission: dict[str, Any] | None = None
+    submission: SubmissionData | None = None
     error: str | None = None
 
     @field_validator("agent_id")
@@ -51,7 +50,7 @@ class SubmissionRecord(VersionedKVRecord):
     """Submission payload written by the agent runtime tools."""
 
     agent_id: str
-    submission: dict[str, Any]
+    submission: SubmissionData
 
 
 class LifecycleStore:

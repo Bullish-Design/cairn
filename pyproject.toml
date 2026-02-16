@@ -58,6 +58,19 @@ grail = { git = "https://github.com/Bullish-Design/grail.git" }
 [tool.uv]
 prerelease = "allow"
 
+[tool.mypy]
+python_version = "3.13"
+strict = true
+mypy_path = "stubs"
+files = ["src/cairn"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cairn"]
+include = ["src/cairn/py.typed", "stubs/**"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/cairn/py.typed", "stubs/**"]
+
 [build-system]
 requires = ["hatchling>=1.24.0"]
 build-backend = "hatchling.build"

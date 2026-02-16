@@ -8,7 +8,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import cast
 
 from fsdantic import Fsdantic, MergeStrategy, Workspace
 import grail
@@ -31,10 +31,11 @@ from cairn.lifecycle import LifecycleRecord, LifecycleStore, SUBMISSION_KEY, Sub
 from cairn.queue import TaskPriority, TaskQueue
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.signals import SignalHandler
+from cairn.types import AgentSummary, GrailCheckResult, GrailScript, ToolsFactory
 from cairn.watcher import FileWatcher
 
 
-def _load_grail_script(pym_path: Path) -> Any:
+def _load_grail_script(pym_path: Path) -> GrailScript:
     """Load a Grail script using legacy and current loader entry points."""
 
     script_path = str(pym_path)
@@ -42,7 +43,7 @@ def _load_grail_script(pym_path: Path) -> Any:
     # Grail 1.x exposed a top-level `load` function.
     legacy_loader = getattr(grail, "load", None)
     if callable(legacy_loader):
-        return legacy_loader(script_path)
+        return cast(GrailScript, legacy_loader(script_path))
 
     # Grail 2.x loaders can vary by release; try known file-based entry points.
     candidate_loaders: tuple[tuple[str, str], ...] = (
@@ -57,7 +58,7 @@ def _load_grail_script(pym_path: Path) -> Any:
             continue
         loader = getattr(cls, method_name, None)
         if callable(loader):
-            return loader(script_path)
+            return cast(GrailScript, loader(script_path))
 
     available_attrs = ", ".join(sorted(name for name in dir(grail) if not name.startswith("_")))
     raise RuntimeError(
@@ -77,7 +78,7 @@ class CairnOrchestrator:
         config: OrchestratorSettings | None = None,
         executor_settings: ExecutorSettings | None = None,
         code_provider: CodeProvider | None = None,
-        tools_factory: Callable[[str, Workspace, Workspace], dict[str, Callable[..., Any]]] | None = None,
+        tools_factory: ToolsFactory | None = None,
     ):
         path_settings = PathsSettings()
         self.project_root = Path(path_settings.project_root or project_root).resolve()
@@ -220,7 +221,7 @@ class CairnOrchestrator:
         )
 
     async def _handle_list_agents(self, command: ListAgentsCommand) -> CommandResult:
-        agents_dict: dict[str, dict[str, Any]] = {
+        agents_dict: dict[str, AgentSummary] = {
             agent_id: {"state": ctx.state.value, "task": ctx.task, "priority": int(ctx.priority)}
             for agent_id, ctx in self.active_agents.items()
         }
@@ -491,7 +492,7 @@ class CairnOrchestrator:
         return ctx
 
     @staticmethod
-    def _format_grail_errors(check_result: Any) -> str:
+    def _format_grail_errors(check_result: GrailCheckResult) -> str:
         errors = getattr(check_result, "errors", None)
         if errors:
             return "Grail validation failed: " + "; ".join(str(error) for error in errors)
