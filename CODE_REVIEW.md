@@ -856,8 +856,8 @@ Should use more specific types or TypedDict for structured data.
    - Effort: Large (1 week)
 
 4. **Implement secrets detection**
-   - Scan submissions for secrets before acceptance
-   - Priority: 🔴 CRITICAL (if handling sensitive data)
+   - Scan submissions for secrets before acceptance 
+   - Priority: 🔴 CRITICAL (for eventual production)
    - Effort: Medium (2 days)
 
 ### 10.2 High Priority (Should Fix Soon)
