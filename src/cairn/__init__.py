@@ -12,6 +12,7 @@ from cairn.providers import (
 )
 from cairn.queue import QueuedTask, TaskPriority, TaskQueue
 from cairn.retry import RetryStrategy
+from cairn.retry_utils import with_retry
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.signals import SignalHandler
 from cairn.watcher import FileWatcher
@@ -32,6 +33,7 @@ __all__ = [
     "PathsSettings",
     "QueuedTask",
     "RetryStrategy",
+    "with_retry",
     "SignalHandler",
     "TaskPriority",
     "TaskQueue",
