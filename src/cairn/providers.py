@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, cast, runtime_checkable
 import inspect
 
-from cairn.exceptions import CodeProviderError
+from cairn.exceptions import CodeProviderError, ProviderError, RecoverableError
+from cairn.retry_utils import with_retry
+
+PROVIDER_RETRY_EXCEPTIONS: tuple[type[Exception], ...] = (
+    RecoverableError,
+    TimeoutError,
+    ConnectionError,
+)
 
 
 @runtime_checkable
@@ -33,11 +40,23 @@ class FileCodeProvider:
         _ = context
         path = self._resolve_path(reference)
         if not path.exists():
-            raise CodeProviderError(f"Code reference not found: {path}")
+            raise ProviderError(f"Code reference not found: {path}")
+
         try:
-            return path.read_text(encoding="utf-8")
+            return await self._read_code_with_retry(path)
+        except PROVIDER_RETRY_EXCEPTIONS:
+            raise
         except Exception as exc:  # pragma: no cover - defensive
-            raise CodeProviderError(f"Failed to read code from {path}: {exc}") from exc
+            raise ProviderError(f"Failed to read code from {path}: {exc}") from exc
+
+    @with_retry(
+        max_attempts=3,
+        initial_delay=0.0,
+        max_delay=0.0,
+        retry_exceptions=PROVIDER_RETRY_EXCEPTIONS,
+    )
+    async def _read_code_with_retry(self, path: Path) -> str:
+        return path.read_text(encoding="utf-8")
 
     async def validate_code(self, code: str) -> tuple[bool, str | None]:
         _ = code
@@ -45,14 +64,14 @@ class FileCodeProvider:
 
     def _resolve_path(self, reference: str) -> Path:
         if not reference.strip():
-            raise CodeProviderError("Code reference must be non-empty")
+            raise ProviderError("Code reference must be non-empty")
 
         path = Path(reference)
         if path.suffix == "":
             path = path.with_suffix(".pym")
 
         if path.suffix != ".pym":
-            raise CodeProviderError("Code reference must point to a .pym file")
+            raise ProviderError("Code reference must point to a .pym file")
 
         if not path.is_absolute():
             base_path = self.base_path or Path.cwd()
@@ -67,7 +86,7 @@ class InlineCodeProvider:
     async def get_code(self, reference: str, context: dict[str, Any]) -> str:
         _ = context
         if not reference.strip():
-            raise CodeProviderError("Inline code reference must be non-empty")
+            raise ProviderError("Inline code reference must be non-empty")
         return reference
 
     async def validate_code(self, code: str) -> tuple[bool, str | None]:
@@ -106,10 +125,10 @@ def _load_provider_from_entrypoints(
     matches = [entry for entry in entry_points if entry.name == provider]
 
     if not matches:
-        raise CodeProviderError(f"Unknown provider '{provider}'. Install the plugin package to use it.")
+        raise ProviderError(f"Unknown provider '{provider}'. Install the plugin package to use it.")
 
     if len(matches) > 1:
-        raise CodeProviderError(f"Multiple providers registered for '{provider}'. Ensure only one plugin is installed.")
+        raise ProviderError(f"Multiple providers registered for '{provider}'. Ensure only one plugin is installed.")
 
     factory = matches[0].load()
     return _instantiate_provider(factory, project_root=project_root, base_path=base_path)
@@ -135,7 +154,7 @@ def _instantiate_provider(
             base_path=base_path,
         )
 
-    raise CodeProviderError("Provider entry point must resolve to a callable or class")
+    raise ProviderError("Provider entry point must resolve to a callable or class")
 
 
 def _call_with_supported_kwargs(

@@ -7,6 +7,7 @@ import pytest
 from fsdantic import Fsdantic
 
 from cairn.agent import AgentState
+from cairn.exceptions import LifecycleError
 from cairn.lifecycle import LifecycleRecord, LifecycleStore
 
 
@@ -82,3 +83,57 @@ def test_lifecycle_record_rejects_invalid_timestamp(tmp_path: Path) -> None:
             state_changed_at=now - 1,
             db_path=str(tmp_path / "agent-bad.db"),
         )
+
+
+class _FlakyLifecycleRepo:
+    def __init__(self, failures: list[Exception]) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    async def save(self, key: str, record: LifecycleRecord) -> None:
+        _ = key
+        _ = record
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_store_retries_recoverable_errors() -> None:
+    record = LifecycleRecord(
+        agent_id="agent-retry",
+        task="retry",
+        priority=1,
+        state=AgentState.QUEUED,
+        created_at=time.time(),
+        state_changed_at=time.time(),
+        db_path="/tmp/agent-retry.db",
+    )
+
+    store = object.__new__(LifecycleStore)
+    store.repo = _FlakyLifecycleRepo([ConnectionError("temporary"), ConnectionError("temporary")])
+
+    await store.save(record)
+
+    assert store.repo.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_store_fails_fast_for_non_retryable_errors() -> None:
+    record = LifecycleRecord(
+        agent_id="agent-fail-fast",
+        task="fail",
+        priority=1,
+        state=AgentState.QUEUED,
+        created_at=time.time(),
+        state_changed_at=time.time(),
+        db_path="/tmp/agent-fail-fast.db",
+    )
+
+    store = object.__new__(LifecycleStore)
+    store.repo = _FlakyLifecycleRepo([ValueError("permanent")])
+
+    with pytest.raises(LifecycleError, match="Failed to save lifecycle record"):
+        await store.save(record)
+
+    assert store.repo.calls == 1

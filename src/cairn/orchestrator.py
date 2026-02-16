@@ -18,7 +18,7 @@ import grail
 from cairn.agent import AgentContext, AgentState
 from cairn.error_formatting import format_agent_error
 from cairn.external_functions import create_external_functions
-from cairn.providers import CodeProvider, CodeProviderError, FileCodeProvider
+from cairn.providers import CodeProvider, FileCodeProvider
 from cairn.commands import (
     AcceptCommand,
     CairnCommand,
@@ -29,7 +29,7 @@ from cairn.commands import (
     StatusCommand,
 )
 from cairn.constants import DEFAULT_EXECUTION_TIMEOUT_SECONDS, LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
-from cairn.exceptions import CairnError, RecoverableError, WorkspaceMergeError
+from cairn.exceptions import CairnError, ProviderError, RecoverableError, WorkspaceMergeError
 from cairn.lifecycle import LifecycleRecord, LifecycleStore, SUBMISSION_KEY, SubmissionRecord
 from cairn.queue import TaskPriority, TaskQueue
 from cairn.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
@@ -420,7 +420,7 @@ class CairnOrchestrator:
 
             try:
                 generated = await self.code_provider.get_code(ctx.task, context)
-            except CodeProviderError as exc:
+            except ProviderError as exc:
                 ctx.error = str(exc)
                 await transition(AgentState.ERRORED)
                 return
