@@ -9,10 +9,20 @@ from pydantic import field_validator, model_validator
 
 from cairn.agent import AgentState
 from cairn.constants import LIFECYCLE_CLEANUP_MAX_AGE_SECONDS
+from cairn.exceptions import LifecycleError, RecoverableError, VersionConflictError
+from cairn.retry_utils import with_retry
 from cairn.types import SubmissionData
 
 AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
+
+LIFECYCLE_RETRY_EXCEPTIONS: tuple[type[Exception], ...] = (
+    RecoverableError,
+    VersionConflictError,
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
 
 
 class LifecycleRecord(VersionedKVRecord):
@@ -60,6 +70,20 @@ class LifecycleStore:
         self.repo = workspace.kv.repository(prefix=AGENT_KEY_PREFIX, model_type=LifecycleRecord)
 
     async def save(self, record: LifecycleRecord) -> None:
+        try:
+            await self._save_with_retry(record)
+        except LIFECYCLE_RETRY_EXCEPTIONS:
+            raise
+        except Exception as exc:
+            raise LifecycleError(f"Failed to save lifecycle record for {record.agent_id}") from exc
+
+    @with_retry(
+        max_attempts=3,
+        initial_delay=0.0,
+        max_delay=0.0,
+        retry_exceptions=LIFECYCLE_RETRY_EXCEPTIONS,
+    )
+    async def _save_with_retry(self, record: LifecycleRecord) -> None:
         await self.repo.save(record.agent_id, record)
 
     async def load(self, agent_id: str) -> LifecycleRecord | None:
