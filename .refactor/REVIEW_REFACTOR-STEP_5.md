@@ -1,7 +1,7 @@
 # Refactoring Step 5: Security Hardening
 
 ## Overview
-This step implements critical security improvements including ReDoS protection, resource limit enforcement, and secrets detection. These changes address security vulnerabilities that could lead to denial of service, resource exhaustion, or accidental exposure of sensitive information.
+This step implements critical security improvements including ReDoS protection, and resource limit enforcement. These changes address security vulnerabilities that could lead to denial of service, resource exhaustion, or accidental exposure of sensitive information.
 
 **Priority:** 🔴 CRITICAL (Security)
 **Estimated Effort:** 6-8 hours
@@ -33,13 +33,6 @@ await script.run(inputs={"task_description": ctx.task}, externals=tools)
 ```
 Settings exist for `max_execution_time` and `max_memory_bytes` but are never applied.
 
-### Security Recommendation: Secrets Detection
-**Severity:** HIGH
-
-**Problem:**
-- No detection of secrets in agent submissions
-- Could accidentally commit API keys, passwords, tokens
-- Need to scan for common secret patterns before accepting changes
 
 ---
 
@@ -515,218 +508,6 @@ async def _execute_script(self, ctx: AgentContext) -> None:
         ) from exc
 ```
 
-### 5. Implement Secrets Detection
-
-**File:** `cairn/secrets_detection.py` (NEW FILE)
-
-```python
-"""Secrets detection for preventing accidental exposure.
-
-This module provides utilities for detecting common secret patterns in code
-and preventing them from being committed.
-"""
-
-import re
-from pathlib import Path
-from typing import NamedTuple
-
-from cairn.exceptions import SecretsDetectedError
-
-
-class SecretMatch(NamedTuple):
-    """A detected secret match."""
-    file: str
-    line_number: int
-    secret_type: str
-    match: str  # Redacted
-    context: str  # Line context
-
-
-# Common secret patterns
-SECRET_PATTERNS = {
-    "aws_access_key": re.compile(r"AKIA[0-9A-Z]{16}"),
-    "aws_secret_key": re.compile(r"aws_secret_access_key\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE),
-    "github_token": re.compile(r"gh[ps]_[a-zA-Z0-9]{36,}"),
-    "generic_api_key": re.compile(r"api[_-]?key\s*[=:]\s*['\"]([a-zA-Z0-9_\-]{20,})['\"]", re.IGNORECASE),
-    "generic_secret": re.compile(r"secret\s*[=:]\s*['\"]([a-zA-Z0-9_\-]{20,})['\"]", re.IGNORECASE),
-    "generic_password": re.compile(r"password\s*[=:]\s*['\"]([^'\"]{8,})['\"]", re.IGNORECASE),
-    "private_key": re.compile(r"-----BEGIN (RSA |DSA |EC )?PRIVATE KEY-----"),
-    "jwt_token": re.compile(r"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"),
-    "slack_token": re.compile(r"xox[baprs]-[0-9a-zA-Z]{10,}"),
-    "stripe_key": re.compile(r"sk_live_[0-9a-zA-Z]{24,}"),
-    "google_api_key": re.compile(r"AIza[0-9A-Za-z_-]{35}"),
-}
-
-
-# Patterns to ignore (test data, examples, etc.)
-IGNORE_PATTERNS = [
-    re.compile(r"example\.com"),
-    re.compile(r"test[_-]?data"),
-    re.compile(r"dummy[_-]?secret"),
-    re.compile(r"fake[_-]?key"),
-    re.compile(r"placeholder"),
-    re.compile(r"xxx+", re.IGNORECASE),
-]
-
-
-def scan_file_for_secrets(file_path: Path, content: str) -> list[SecretMatch]:
-    """Scan file content for potential secrets.
-
-    Args:
-        file_path: Path to file being scanned
-        content: File content
-
-    Returns:
-        List of detected secret matches
-    """
-    matches: list[SecretMatch] = []
-
-    for line_num, line in enumerate(content.splitlines(), 1):
-        # Skip if line contains ignore patterns
-        if any(pattern.search(line) for pattern in IGNORE_PATTERNS):
-            continue
-
-        # Check each secret pattern
-        for secret_type, pattern in SECRET_PATTERNS.items():
-            if match := pattern.search(line):
-                # Redact the actual secret
-                redacted = match.group(0)[:4] + "***REDACTED***"
-
-                matches.append(
-                    SecretMatch(
-                        file=str(file_path),
-                        line_number=line_num,
-                        secret_type=secret_type,
-                        match=redacted,
-                        context=line.strip()[:100]  # Limited context
-                    )
-                )
-
-    return matches
-
-
-async def scan_workspace_for_secrets(workspace, *, exclude_patterns: list[str] | None = None) -> list[SecretMatch]:
-    """Scan entire workspace for secrets.
-
-    Args:
-        workspace: Workspace to scan
-        exclude_patterns: File patterns to exclude (e.g., ["*.md", "test_*"])
-
-    Returns:
-        List of all detected secrets
-
-    Raises:
-        SecretsDetectedError: If secrets are found (with details)
-    """
-    all_matches: list[SecretMatch] = []
-    exclude_patterns = exclude_patterns or []
-
-    # Get all files
-    files = await workspace.list_files("**/*")
-
-    for file_path in files:
-        # Skip excluded patterns
-        if any(Path(file_path).match(pattern) for pattern in exclude_patterns):
-            continue
-
-        # Skip binary files, large files
-        if Path(file_path).suffix in [".pyc", ".so", ".dll", ".exe", ".bin"]:
-            continue
-
-        try:
-            content = await workspace.read_file(file_path)
-
-            # Skip very large files
-            if len(content) > 1_000_000:  # 1MB
-                continue
-
-            matches = scan_file_for_secrets(Path(file_path), content)
-            all_matches.extend(matches)
-
-        except Exception:
-            # Skip files that can't be read
-            continue
-
-    return all_matches
-
-
-def validate_no_secrets(matches: list[SecretMatch]) -> None:
-    """Validate that no secrets were detected.
-
-    Args:
-        matches: List of detected secrets
-
-    Raises:
-        SecretsDetectedError: If any secrets found
-    """
-    if matches:
-        error_msg = f"Detected {len(matches)} potential secret(s) in submission:\n"
-        for match in matches[:5]:  # Show first 5
-            error_msg += f"  - {match.file}:{match.line_number} ({match.secret_type})\n"
-
-        if len(matches) > 5:
-            error_msg += f"  ... and {len(matches) - 5} more\n"
-
-        raise SecretsDetectedError(
-            error_msg,
-            error_code="SECRETS_DETECTED",
-            context={
-                "secret_count": len(matches),
-                "files": list(set(m.file for m in matches)),
-                "secret_types": list(set(m.secret_type for m in matches)),
-            }
-        )
-```
-
-### 6. Integrate Secrets Detection into Submission Flow
-
-**File:** `cairn/orchestrator.py`
-
-```python
-from cairn.secrets_detection import scan_workspace_for_secrets, validate_no_secrets
-
-
-async def _submit_results(self, ctx: AgentContext) -> None:
-    """Submit agent results with secrets detection.
-
-    Args:
-        ctx: Agent execution context
-
-    Raises:
-        SecretsDetectedError: If secrets detected in changes
-    """
-    ctx.state = AgentState.SUBMITTING
-    await self._save_lifecycle_record(ctx)
-
-    try:
-        # Scan for secrets before submitting
-        secrets = await scan_workspace_for_secrets(
-            ctx.agent_fs,
-            exclude_patterns=["*.md", "test_*", "*_test.py"]
-        )
-
-        # Validate no secrets found
-        validate_no_secrets(secrets)
-
-        # Continue with normal submission
-        # ... existing submission logic
-
-    except SecretsDetectedError as exc:
-        ctx.error = str(exc)
-        ctx.state = AgentState.ERRORED
-        await self._save_lifecycle_record(ctx)
-
-        logger.error(
-            "Agent submission blocked - secrets detected",
-            extra={
-                "agent_id": ctx.agent_id,
-                "secret_count": len(secrets),
-                "files": [s.file for s in secrets],
-            }
-        )
-        raise
-```
-
 ---
 
 ## Testing Requirements
@@ -782,72 +563,21 @@ async def test_search_with_timeout_exceeds():
         await search_with_timeout(pattern, text, timeout=0.1)
 ```
 
-**File:** `tests/test_secrets_detection.py`
-
-```python
-"""Tests for secrets detection."""
-
-import pytest
-from cairn.secrets_detection import scan_file_for_secrets, validate_no_secrets
-from cairn.exceptions import SecretsDetectedError
-from pathlib import Path
-
-
-def test_detect_aws_access_key():
-    """Test detecting AWS access key."""
-    content = 'AWS_ACCESS_KEY = "AKIAIOSFODNN7EXAMPLE"'
-    matches = scan_file_for_secrets(Path("test.py"), content)
-    assert len(matches) > 0
-    assert any(m.secret_type == "aws_access_key" for m in matches)
-
-
-def test_detect_generic_api_key():
-    """Test detecting generic API key."""
-    content = 'api_key = "sk_1234567890abcdefghij"'
-    matches = scan_file_for_secrets(Path("config.py"), content)
-    assert len(matches) > 0
-
-
-def test_ignore_test_data():
-    """Test ignoring test data patterns."""
-    content = 'api_key = "test_data_fake_key_xxxxx"'
-    matches = scan_file_for_secrets(Path("test.py"), content)
-    assert len(matches) == 0  # Should be ignored
-
-
-def test_validate_no_secrets_raises():
-    """Test validate raises when secrets found."""
-    matches = [
-        SecretMatch(
-            file="test.py",
-            line_number=10,
-            secret_type="api_key",
-            match="sk_***REDACTED***",
-            context="api_key = 'secret'"
-        )
-    ]
-
-    with pytest.raises(SecretsDetectedError):
-        validate_no_secrets(matches)
-```
-
 ---
 
 ## Files to Create
 
 1. `cairn/regex_utils.py` - Safe regex utilities
 2. `cairn/resource_limits.py` - Resource limit enforcement
-3. `cairn/secrets_detection.py` - Secrets detection
-4. `tests/test_regex_utils.py` - Regex utility tests
-5. `tests/test_resource_limits.py` - Resource limit tests
-6. `tests/test_secrets_detection.py` - Secrets detection tests
+3. `tests/test_regex_utils.py` - Regex utility tests
+4. `tests/test_resource_limits.py` - Resource limit tests
 
 ---
 
 ## Files to Modify
 
 1. `cairn/external_functions.py` - Use safe regex
-2. `cairn/orchestrator.py` - Enforce resource limits and scan for secrets
+2. `cairn/orchestrator.py` - Enforce resource limits 
 3. `cairn/constants.py` - Add REGEX_TIMEOUT_SECONDS constant
 
 ---
@@ -857,7 +587,6 @@ def test_validate_no_secrets_raises():
 ### Success Criteria
 - ✅ ReDoS protection prevents dangerous patterns
 - ✅ Resource limits enforced on all agent execution
-- ✅ Secrets detection blocks suspicious patterns
 - ✅ All security tests pass
 - ✅ No performance degradation from safety checks
 
@@ -868,7 +597,6 @@ def test_validate_no_secrets_raises():
 ### Time Estimates
 - regex_utils.py: 2 hours
 - resource_limits.py: 2 hours
-- secrets_detection.py: 2 hours
 - Update existing files: 1.5 hours
 - Tests: 2.5 hours
 - **Total: 10 hours**
@@ -879,4 +607,3 @@ def test_validate_no_secrets_raises():
 
 - CODE_REVIEW.md - Issue #6 (ReDoS Vulnerability)
 - CODE_REVIEW.md - Issue #2 (Resource Limits Not Enforced)
-- CODE_REVIEW.md - Section 3.3 (Secrets Management)
