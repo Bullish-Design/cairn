@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.agent import AgentState
-from cairn.lifecycle import LifecycleRecord, LifecycleStore
-from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import InlineCodeProvider
-from cairn.settings import OrchestratorSettings
+from cairn.runtime.agent import AgentState
+from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.providers.providers import InlineCodeProvider
+from cairn.runtime.settings import OrchestratorSettings
 
 
 @pytest.mark.asyncio

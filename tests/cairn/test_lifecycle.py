@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.agent import AgentState
-from cairn.exceptions import LifecycleError
-from cairn.lifecycle import LifecycleRecord, LifecycleStore
+from cairn.runtime.agent import AgentState
+from cairn.core.exceptions import LifecycleError
+from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
 
 
 @pytest.mark.asyncio
@@ -161,4 +161,3 @@ async def test_lifecycle_store_recoverable_retry_exhaustion_raises_last_error() 
         await store.save(record)
 
     assert store.repo.calls == 3
-

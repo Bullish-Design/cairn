@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from cairn.agent import AgentState
-from cairn.exceptions import ResourceLimitError
-from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import InlineCodeProvider
-from cairn.resource_limits import ResourceLimiter
-from cairn.settings import ExecutorSettings, OrchestratorSettings
+from cairn.runtime.agent import AgentState
+from cairn.core.exceptions import ResourceLimitError
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.providers.providers import InlineCodeProvider
+from cairn.runtime.resource_limits import ResourceLimiter
+from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings
 
 
 class CheckResult:
@@ -89,7 +89,7 @@ async def test_execution_timeout_marks_agent_errored(monkeypatch: pytest.MonkeyP
     await orch.initialize()
 
     monkeypatch.setattr(
-        "cairn.orchestrator._load_grail_script",
+        "cairn.orchestrator.orchestrator._load_grail_script",
         lambda _: SlowScript(),
     )
 
@@ -111,7 +111,7 @@ async def test_memory_limit_marks_agent_errored(monkeypatch: pytest.MonkeyPatch,
     def fake_rss() -> int:
         return values.pop(0) if values else 5000
 
-    from cairn import resource_limits
+    from cairn.runtime import resource_limits
 
     class FastLimiter(ResourceLimiter):
         def __init__(self, *, timeout_seconds: float, max_memory_bytes: int) -> None:
@@ -122,7 +122,7 @@ async def test_memory_limit_marks_agent_errored(monkeypatch: pytest.MonkeyPatch,
             )
 
     monkeypatch.setattr(resource_limits, "_get_rss_bytes", fake_rss)
-    monkeypatch.setattr("cairn.orchestrator.ResourceLimiter", FastLimiter)
+    monkeypatch.setattr("cairn.orchestrator.orchestrator.ResourceLimiter", FastLimiter)
 
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
@@ -144,7 +144,7 @@ async def test_memory_limit_marks_agent_errored(monkeypatch: pytest.MonkeyPatch,
             await asyncio.sleep(0.05)
 
     monkeypatch.setattr(
-        "cairn.orchestrator._load_grail_script",
+        "cairn.orchestrator.orchestrator._load_grail_script",
         lambda _: NoOpScript(),
     )
 

@@ -1,6 +1,6 @@
 """Tests for constants module."""
 
-from cairn.constants import (
+from cairn.core.constants import (
     DAY,
     GB,
     HOUR,

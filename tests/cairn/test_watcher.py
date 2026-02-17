@@ -6,7 +6,7 @@ import pytest
 from fsdantic import Fsdantic
 from watchfiles import Change
 
-from cairn.watcher import FileWatcher
+from cairn.watcher.watcher import FileWatcher
 
 
 @pytest.mark.asyncio
@@ -34,7 +34,7 @@ async def test_watcher_syncs_file_changes_into_workspace(monkeypatch: pytest.Mon
                 (Change.deleted, str(deleted)),
             }
 
-        monkeypatch.setattr("cairn.watcher.awatch", fake_awatch)
+        monkeypatch.setattr("cairn.watcher.watcher.awatch", fake_awatch)
 
         await watcher.watch()
 

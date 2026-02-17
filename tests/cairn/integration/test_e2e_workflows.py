@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from cairn.agent import AgentState
-from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import InlineCodeProvider
-from cairn.settings import OrchestratorSettings
+from cairn.runtime.agent import AgentState
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.providers.providers import InlineCodeProvider
+from cairn.runtime.settings import OrchestratorSettings
 
 
 class CheckResult:
@@ -73,7 +73,7 @@ async def _build_orchestrator(tmp_path: Path) -> CairnOrchestrator:
 async def test_complete_agent_lifecycle_accept(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     orch = await _build_orchestrator(tmp_path)
     script = StubScript("hello.py", "done")
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: script)
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: script)
 
     try:
         agent_id = await orch.spawn_agent("x = 1")
@@ -96,7 +96,7 @@ async def test_complete_agent_lifecycle_accept(monkeypatch: pytest.MonkeyPatch, 
 async def test_agent_rejection_workflow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     orch = await _build_orchestrator(tmp_path)
     monkeypatch.setattr(
-        "cairn.orchestrator._load_grail_script",
+        "cairn.orchestrator.orchestrator._load_grail_script",
         lambda _: StubScript("note.txt", "done"),
     )
 
@@ -122,7 +122,7 @@ async def test_agent_rejection_workflow(monkeypatch: pytest.MonkeyPatch, tmp_pat
 async def test_multiple_agents_processed_sequentially(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     orch = await _build_orchestrator(tmp_path)
     monkeypatch.setattr(
-        "cairn.orchestrator._load_grail_script",
+        "cairn.orchestrator.orchestrator._load_grail_script",
         lambda _: StubScript("file.txt", "done"),
     )
 
@@ -142,7 +142,7 @@ async def test_multiple_agents_processed_sequentially(monkeypatch: pytest.Monkey
 async def test_agent_error_transitions_to_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     orch = await _build_orchestrator(tmp_path)
     monkeypatch.setattr(
-        "cairn.orchestrator._load_grail_script", lambda _: StubScript("boom.py", "fail", should_fail=True)
+        "cairn.orchestrator.orchestrator._load_grail_script", lambda _: StubScript("boom.py", "fail", should_fail=True)
     )
 
     try:

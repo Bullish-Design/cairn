@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import InlineCodeProvider
-from cairn.settings import ExecutorSettings, OrchestratorSettings
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.providers.providers import InlineCodeProvider
+from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings
 
 
 @pytest.fixture

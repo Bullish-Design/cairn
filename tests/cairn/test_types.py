@@ -4,8 +4,8 @@ from typing import get_type_hints
 
 import pytest
 
-from cairn.external_functions import CairnExternalFunctions
-from cairn.types import Result, SearchContentMatchData, SubmissionData
+from cairn.runtime.external_functions import CairnExternalFunctions
+from cairn.core.types import Result, SearchContentMatchData, SubmissionData
 
 
 def test_search_content_match_structure() -> None:

@@ -4,8 +4,8 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-import cairn.typer_cli as typer_cli
-from cairn.commands import CommandResult, CommandType
+import cairn.cli.typer_cli as typer_cli
+from cairn.cli.commands import CommandResult, CommandType
 
 
 runner = CliRunner()

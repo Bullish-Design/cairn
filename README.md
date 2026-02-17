@@ -22,13 +22,13 @@ Cairn provides:
 ## Read this first (canonical docs)
 
 1. **README.md** (this file): install + quickstart.
-2. **[CONCEPT.md](CONCEPT.md)**: philosophy and constraints.
-3. **[SPEC.md](SPEC.md)**: runtime architecture and contracts.
-4. **[PROVIDERS.md](PROVIDERS.md)**: code provider reference.
-5. **[MIGRATION.md](MIGRATION.md)**: V2 migration overview.
-6. **[TESTING.md](TESTING.md)**: repository test commands.
+2. **[CONCEPT.md](docs/CONCEPT.md)**: philosophy and constraints.
+3. **[SPEC.md](docs/SPEC.md)**: runtime architecture and contracts.
+4. **[PROVIDERS.md](docs/PROVIDERS.md)**: code provider reference.
+5. **[MIGRATION.md](docs/MIGRATION.md)**: V2 migration overview.
+6. **[TESTING.md](docs/TESTING.md)**: repository test commands.
 
-> **Source-of-truth note:** `SPEC.md` defines runtime contracts; when implementation changes in `src/cairn/*`, update `SPEC.md` in the same PR.
+> **Source-of-truth note:** `docs/SPEC.md` defines runtime contracts; when implementation changes in `src/cairn/*`, update `docs/SPEC.md` in the same PR.
 
 ## Installation
 
@@ -80,5 +80,5 @@ uv run cairn reject agent-<id>
 ## Contributing
 
 - Workflow conventions: [AGENT.md](AGENT.md)
-- Architecture and contracts: [CONCEPT.md](CONCEPT.md), [SPEC.md](SPEC.md)
-- Tests and local validation: [TESTING.md](TESTING.md)
+- Architecture and contracts: [CONCEPT.md](docs/CONCEPT.md), [SPEC.md](docs/SPEC.md)
+- Tests and local validation: [TESTING.md](docs/TESTING.md)

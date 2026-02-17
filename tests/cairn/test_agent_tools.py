@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.external_functions import create_external_functions
-from cairn.lifecycle import SUBMISSION_KEY, SubmissionRecord
+from cairn.runtime.external_functions import create_external_functions
+from cairn.orchestrator.lifecycle import SUBMISSION_KEY, SubmissionRecord
 
 
 @pytest.mark.asyncio

@@ -7,11 +7,11 @@ import grail
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.agent import AgentContext, AgentState
-from cairn.lifecycle import LifecycleStore
-from cairn.orchestrator import CairnOrchestrator, _load_grail_script
-from cairn.exceptions import RecoverableError
-from cairn.queue import TaskPriority
+from cairn.runtime.agent import AgentContext, AgentState
+from cairn.orchestrator.lifecycle import LifecycleStore
+from cairn.orchestrator.orchestrator import CairnOrchestrator, _load_grail_script
+from cairn.core.exceptions import RecoverableError
+from cairn.orchestrator.queue import TaskPriority
 
 
 async def _safe_close(workspace: object) -> None:
@@ -185,7 +185,7 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
     provider = StubCodeProvider()
     orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path, provider)
 
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: SuccessfulScript())
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: SuccessfulScript())
 
     ctx = AgentContext(
         agent_id="agent-success",
@@ -227,7 +227,7 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
 async def test_run_agent_transitions_to_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
 
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: FailingScript())
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: FailingScript())
 
     ctx = AgentContext(
         agent_id="agent-fail",
@@ -259,7 +259,7 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(
     def _raise(_: str) -> object:
         raise AssertionError("_load_grail_script should not be called")
 
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", _raise)
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", _raise)
 
     ctx = AgentContext(
         agent_id="agent-provider-invalid",
@@ -287,7 +287,7 @@ async def test_run_agent_validation_failure_transitions_to_errored(
 ) -> None:
     orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
 
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: InvalidScript())
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: InvalidScript())
 
     ctx = AgentContext(
         agent_id="agent-invalid",

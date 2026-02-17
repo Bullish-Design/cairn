@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.agent import AgentContext, AgentState
-from cairn.exceptions import ProviderError
-from cairn.lifecycle import LifecycleStore, SUBMISSION_KEY, SubmissionRecord
-from cairn.orchestrator import CairnOrchestrator
-from cairn.queue import TaskPriority
+from cairn.runtime.agent import AgentContext, AgentState
+from cairn.core.exceptions import ProviderError
+from cairn.orchestrator.lifecycle import LifecycleStore, SUBMISSION_KEY, SubmissionRecord
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.orchestrator.queue import TaskPriority
 
 
 async def _safe_close(workspace: object) -> None:
@@ -144,7 +144,7 @@ async def test_generate_code_handles_provider_error(tmp_path: Path) -> None:
 async def test_validate_code_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
 
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: DummyScript())
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: DummyScript())
 
     try:
         await orch._transition_agent_state(ctx, AgentState.EXECUTING)

@@ -6,8 +6,8 @@ import asyncio
 
 import pytest
 
-from cairn.exceptions import ResourceLimitError, TimeoutError as CairnTimeoutError
-from cairn.resource_limits import ResourceLimiter, run_with_timeout
+from cairn.core.exceptions import ResourceLimitError, TimeoutError as CairnTimeoutError
+from cairn.runtime.resource_limits import ResourceLimiter, run_with_timeout
 
 
 @pytest.mark.asyncio
@@ -40,7 +40,7 @@ async def test_resource_limiter_detects_memory_growth(monkeypatch: pytest.Monkey
     def fake_rss() -> int:
         return values.pop(0) if values else 4000
 
-    from cairn import resource_limits
+    from cairn.runtime import resource_limits
 
     monkeypatch.setattr(resource_limits, "_get_rss_bytes", fake_rss)
     limiter = ResourceLimiter(timeout_seconds=1.0, max_memory_bytes=1000, poll_interval_seconds=0.01)

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from watchfiles import Change
 
-from cairn.commands import CommandType
-from cairn.signals import SignalHandler
+from cairn.cli.commands import CommandType
+from cairn.orchestrator.signals import SignalHandler
 
 
 class StubOrchestrator:
@@ -35,7 +35,7 @@ async def test_signal_watch_processes_event(monkeypatch: pytest.MonkeyPatch, tmp
         )
         yield {(Change.added, str(signal_file))}
 
-    monkeypatch.setattr("cairn.signals.awatch", fake_awatch)
+    monkeypatch.setattr("cairn.orchestrator.signals.awatch", fake_awatch)
 
     await handler.watch()
 

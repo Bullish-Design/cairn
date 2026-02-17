@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cairn.error_formatting import (
+from cairn.utils.error_formatting import (
     format_agent_error,
     format_lifecycle_error,
     format_workspace_error,

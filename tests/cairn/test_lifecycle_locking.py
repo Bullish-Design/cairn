@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.agent import AgentState
-from cairn.exceptions import VersionConflictError
-from cairn.lifecycle import LifecycleRecord, LifecycleStore
+from cairn.runtime.agent import AgentState
+from cairn.core.exceptions import VersionConflictError
+from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
 
 
 @pytest.mark.asyncio

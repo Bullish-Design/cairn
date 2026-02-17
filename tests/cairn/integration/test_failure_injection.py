@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.agent import AgentContext, AgentState
-from cairn.exceptions import RecoverableError
-from cairn.lifecycle import LifecycleRecord, LifecycleStore
-from cairn.orchestrator import CairnOrchestrator
-from cairn.queue import TaskPriority
+from cairn.runtime.agent import AgentContext, AgentState
+from cairn.core.exceptions import RecoverableError
+from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.orchestrator.queue import TaskPriority
 
 
 @pytest.mark.asyncio

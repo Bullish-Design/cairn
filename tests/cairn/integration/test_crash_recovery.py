@@ -6,9 +6,9 @@ from pathlib import Path
 import asyncio
 import pytest
 
-from cairn.agent import AgentState
-from cairn.orchestrator import CairnOrchestrator
-from cairn.providers import InlineCodeProvider
+from cairn.runtime.agent import AgentState
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.providers.providers import InlineCodeProvider
 
 
 async def _build_orchestrator(project_root: Path, cairn_home: Path) -> CairnOrchestrator:

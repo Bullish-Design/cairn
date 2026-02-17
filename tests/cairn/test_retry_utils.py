@@ -5,8 +5,8 @@ import logging
 
 import pytest
 
-import cairn.retry as retry_module
-from cairn.retry_utils import with_retry
+import cairn.utils.retry as retry_module
+from cairn.utils.retry_utils import with_retry
 
 
 @pytest.mark.asyncio
@@ -86,7 +86,9 @@ async def test_with_retry_exhaustion_raises_last_error(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_with_retry_logs_retry_attempts(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_with_retry_logs_retry_attempts(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     logger = logging.getLogger("tests.retry-utils")
     attempts = 0
 

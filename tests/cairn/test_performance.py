@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.agent import AgentContext, AgentState
-from cairn.lifecycle import LifecycleStore
-from cairn.orchestrator import CairnOrchestrator
-from cairn.queue import TaskPriority
+from cairn.runtime.agent import AgentContext, AgentState
+from cairn.orchestrator.lifecycle import LifecycleStore
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.orchestrator.queue import TaskPriority
 
 SPAWN_LATENCY_TARGET_SECONDS = 1.0
 PREVIEW_LATENCY_TARGET_SECONDS = 0.1
@@ -90,7 +90,7 @@ async def test_agent_lifecycle_latency_benchmarks(
 ) -> None:
     """Benchmark phase-5 latency targets from CAIRN_REFACTOR-STEP_5.md."""
     orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: BenchmarkScript())
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: BenchmarkScript())
 
     spawned_agent_id: str | None = None
 
@@ -175,7 +175,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
 ) -> None:
     """Benchmark representative execution durations and capture optional Grail memory telemetry."""
     orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
-    monkeypatch.setattr("cairn.orchestrator._load_grail_script", lambda _: BenchmarkScript())
+    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: BenchmarkScript())
 
     ctx = AgentContext(
         agent_id=f"agent-{task}",
@@ -212,7 +212,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
 @pytest.mark.asyncio
 @pytest.mark.benchmark
 async def test_queue_throughput_benchmark(record_property: pytest.RecordProperty) -> None:
-    from cairn.queue import TaskPriority, TaskQueue
+    from cairn.orchestrator.queue import TaskPriority, TaskQueue
 
     queue = TaskQueue()
     iterations = 200

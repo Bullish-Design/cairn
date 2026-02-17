@@ -6,7 +6,11 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-for rel_path in ("cairn-llm/src", "cairn-git/src", "cairn-registry/src"):
+for rel_path in (
+    "extensions/cairn-llm/src",
+    "extensions/cairn-git/src",
+    "extensions/cairn-registry/src",
+):
     sys.path.append(str(ROOT / rel_path))
 
 from cairn_git.cache import GitReference

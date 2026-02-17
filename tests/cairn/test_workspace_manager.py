@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.exceptions import WorkspaceError
-from cairn.workspace_manager import WorkspaceManager
+from cairn.core.exceptions import WorkspaceError
+from cairn.runtime.workspace_manager import WorkspaceManager
 
 
 @pytest.mark.asyncio
@@ -55,7 +55,7 @@ async def test_workspace_open_invalid_path(monkeypatch: pytest.MonkeyPatch, tmp_
         _ = readonly
         raise RuntimeError("nope")
 
-    monkeypatch.setattr("cairn.workspace_manager._open_workspace", _fail)
+    monkeypatch.setattr("cairn.runtime.workspace_manager._open_workspace", _fail)
 
     with pytest.raises(WorkspaceError, match="Failed to open workspace"):
         async with manager.open_workspace(tmp_path):
@@ -73,7 +73,7 @@ async def test_workspace_open_failure_does_not_retry(monkeypatch: pytest.MonkeyP
         calls["count"] += 1
         raise ConnectionError("transient")
 
-    monkeypatch.setattr("cairn.workspace_manager._open_workspace", _fail_once)
+    monkeypatch.setattr("cairn.runtime.workspace_manager._open_workspace", _fail_once)
 
     with pytest.raises(WorkspaceError, match="Failed to open workspace"):
         async with manager.open_workspace(tmp_path / "no-retry.db"):

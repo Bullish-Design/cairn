@@ -7,8 +7,8 @@ from typing import Pattern, cast
 
 import pytest
 
-from cairn.exceptions import SecurityError
-from cairn.regex_utils import RegexTimeoutError, compile_safe_regex, search_with_timeout
+from cairn.core.exceptions import SecurityError
+from cairn.utils.regex_utils import RegexTimeoutError, compile_safe_regex, search_with_timeout
 
 
 class SlowPattern:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cairn.workspace_cache import WorkspaceCache
+from cairn.runtime.workspace_cache import WorkspaceCache
 
 
 class DummyWorkspace:

@@ -2,9 +2,9 @@
 
 from typing import TYPE_CHECKING
 
-from cairn.external_functions import create_external_functions
-from cairn.orchestrator import CairnOrchestrator
-from cairn.types import ExternalTools
+from cairn.runtime.external_functions import create_external_functions
+from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.core.types import ExternalTools
 
 
 if TYPE_CHECKING:

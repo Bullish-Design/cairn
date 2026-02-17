@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from cairn.orchestrator import CairnOrchestrator
+from cairn.orchestrator.orchestrator import CairnOrchestrator
 
 
 @pytest.mark.asyncio

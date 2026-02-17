@@ -1,6 +1,6 @@
 """Tests for exception hierarchy and error handling."""
 
-from cairn.exceptions import (
+from cairn.core.exceptions import (
     CairnError,
     FatalError,
     LifecycleError,

@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-import cairn.providers as providers
-from cairn.exceptions import ProviderError
-from cairn.providers import FileCodeProvider, InlineCodeProvider, resolve_code_provider
+import cairn.providers.providers as providers
+from cairn.core.exceptions import ProviderError
+from cairn.providers.providers import FileCodeProvider, InlineCodeProvider, resolve_code_provider
 
 
 @pytest.mark.asyncio
@@ -104,7 +104,9 @@ async def test_file_provider_retries_transient_read_failures(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-async def test_file_provider_fails_fast_for_non_retryable_read_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_file_provider_fails_fast_for_non_retryable_read_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     code_path = tmp_path / "task.pym"
     code_path.write_text("x = 1", encoding="utf-8")
 
@@ -153,4 +155,3 @@ async def test_file_provider_retry_exhaustion_raises_last_connection_error(
         await provider.get_code("task", {})
 
     assert calls["count"] == 3
-

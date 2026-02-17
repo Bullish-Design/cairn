@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from cairn.exceptions import ResourceLimitError
-from cairn.queue import TaskPriority, TaskQueue
+from cairn.core.exceptions import ResourceLimitError
+from cairn.orchestrator.queue import TaskPriority, TaskQueue
 
 
 @pytest.mark.asyncio
