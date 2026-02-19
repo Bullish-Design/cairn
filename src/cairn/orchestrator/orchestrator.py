@@ -59,17 +59,8 @@ from cairn.runtime.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
-_grail_errors: list[type[Exception]] = [grail.GrailExecutionError]
-_execution_error = getattr(grail, "ExecutionError", None)
-if _execution_error is None:
-    _execution_error = grail.GrailExecutionError
-    setattr(grail, "ExecutionError", _execution_error)
-if isinstance(_execution_error, type) and issubclass(_execution_error, Exception):
-    _grail_errors.append(_execution_error)
-_input_error = getattr(grail, "InputError", None)
-if isinstance(_input_error, type) and issubclass(_input_error, Exception):
-    _grail_errors.append(_input_error)
-GRAIL_EXECUTION_ERRORS = tuple(dict.fromkeys(_grail_errors))
+# Grail 2.0 exceptions
+GRAIL_EXECUTION_ERRORS = (grail.ExecutionError, grail.InputError)
 
 
 def _load_grail_script(pym_path: Path) -> GrailScript:
