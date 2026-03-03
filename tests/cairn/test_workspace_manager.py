@@ -50,7 +50,7 @@ async def test_workspace_close_all(tmp_path: Path) -> None:
 async def test_workspace_open_invalid_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     manager = WorkspaceManager()
 
-    async def _fail(path: Path | str, *, readonly: bool) -> object:
+    async def _fail(path: Path | str, *, readonly: bool, enable_wal: bool = True, enable_mvcc: bool = False) -> object:
         _ = path
         _ = readonly
         raise RuntimeError("nope")
@@ -67,7 +67,9 @@ async def test_workspace_open_failure_does_not_retry(monkeypatch: pytest.MonkeyP
     manager = WorkspaceManager()
     calls = {"count": 0}
 
-    async def _fail_once(path: Path | str, *, readonly: bool) -> object:
+    async def _fail_once(
+        path: Path | str, *, readonly: bool, enable_wal: bool = True, enable_mvcc: bool = False
+    ) -> object:
         _ = path
         _ = readonly
         calls["count"] += 1
