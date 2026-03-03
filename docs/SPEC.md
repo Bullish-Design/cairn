@@ -1,8 +1,8 @@
 # Cairn Technical Specification
 
-Version: 1.2
+Version: 1.3
 Status: Active
-Updated: 2026-02-13
+Updated: 2026-03-03
 
 ## Canonical scope of this document
 
@@ -49,6 +49,54 @@ Cairn runtime contracts are implemented by four concrete layers:
    - `submit_result(...)` writes review payloads to the agent workspace KV submission record consumed by the orchestrator lifecycle flow.
 
 > **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator/orchestrator.py`, `src/cairn/providers/providers.py`, `src/cairn/runtime/external_functions.py`).
+
+## Public inspection and state APIs
+
+Cairn exposes public APIs for workspace inspection and agent state management. These are the stable entry points for downstream consumers (e.g. Remora).
+
+### Workspace opening
+
+`open_workspace(path, *, readonly=False) -> Workspace` (`cairn.runtime.workspace_manager`)
+
+Opens a workspace database without requiring a context manager. The caller owns the returned workspace and is responsible for closing it. Wraps internal errors in `WorkspaceError` with error code `WORKSPACE_OPEN_FAILED`.
+
+### Workspace inspection
+
+`WorkspaceInspector` (`cairn.runtime.inspection`) provides read-only workspace access:
+
+- `WorkspaceInspector(workspace)` — wraps an existing workspace (caller retains ownership)
+- `await WorkspaceInspector.from_path(path)` — opens a workspace in readonly mode (inspector owns lifecycle)
+- Supports `async with` for automatic cleanup when created via `from_path`
+
+**Methods:**
+- `tree(path="/", max_depth=None)` — directory tree as nested dicts
+- `list_dir(path="/", include_stats=False)` — directory listing (names or name+size+type dicts)
+- `read(path)` / `read_bytes(path)` — file contents as text or bytes
+- `exists(path)` — path existence check
+- `stats()` — returns `WorkspaceStats(file_count, dir_count, total_bytes)`
+
+### Agent state management
+
+`AgentStateManager` (`cairn.runtime.state`) provides typed state persistence via the workspace KV store:
+
+- `AgentStateManager(workspace, agent_id)` — state is automatically namespaced under `agent:{agent_id}:`
+- `get(key, default=None)` / `set(key, value)` / `delete(key)` / `exists(key)` — basic KV operations
+- `get_typed(key, model)` / `set_typed(key, value)` — Pydantic model serialization
+- `increment(key, amount=1)` — atomic counter increment
+- `increment_turn()` / `get_turn()` — convenience turn counter
+- `touch()` / `get_last_active()` — activity timestamps
+- `list_keys()` — all keys for this agent (stripped of prefix)
+- `clear_all()` — remove all state for this agent
+
+### Top-level exports
+
+All public APIs are re-exported from `cairn` and `cairn.runtime`:
+
+```python
+from cairn import open_workspace, WorkspaceInspector, WorkspaceStats, AgentStateManager
+# or
+from cairn.runtime import open_workspace, WorkspaceInspector, WorkspaceStats, AgentStateManager
+```
 
 ## Data layout contract
 
@@ -235,5 +283,5 @@ Signals are an optional transport adapter. When `enable_signal_polling=true`, th
 To avoid drift:
 - `../README.md`: setup + first commands only.
 - `CONCEPT.md`: conceptual model and invariants only.
-- `SPEC.md`: runtime details and contracts only.
+- `SPEC.md`: runtime details, contracts, and public APIs only.
 - `.agents/skills/*`: implementation workflows that link back to these canonical docs.

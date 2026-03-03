@@ -31,6 +31,45 @@ async def _open_workspace(path: Path | str, *, readonly: bool) -> Workspace:
     return await Fsdantic.open(path=str(path))
 
 
+async def open_workspace(
+    path: Path | str,
+    *,
+    readonly: bool = False,
+) -> Workspace:
+    """Open a Cairn workspace.
+
+    This is the public API for opening workspaces without a context manager.
+    The caller is responsible for closing the workspace when done.
+
+    Args:
+        path: Path to the workspace database file
+        readonly: If True, open in read-only mode (default: False)
+
+    Returns:
+        An open Workspace instance
+
+    Raises:
+        WorkspaceError: If the workspace cannot be opened
+
+    Example:
+        workspace = await open_workspace("/path/to/workspace.db")
+        try:
+            content = await workspace.files.read("/file.txt")
+        finally:
+            await workspace.close()
+    """
+    try:
+        return await _open_workspace(path, readonly=readonly)
+    except WorkspaceError:
+        raise
+    except Exception as exc:
+        raise WorkspaceError(
+            f"Failed to open workspace: {path}",
+            error_code="WORKSPACE_OPEN_FAILED",
+            context={"path": str(path), "readonly": readonly},
+        ) from exc
+
+
 class WorkspaceManager:
     """Manages workspace lifecycle with automatic cleanup."""
 

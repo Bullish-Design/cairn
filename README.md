@@ -18,6 +18,8 @@ Cairn provides:
 - **Untrusted user scripts** - Execute user-submitted code safely
 - **Preview environments** - Test code changes in isolation before merging
 - **CI/CD workflows** - Run build/test scripts in sandboxed workspaces
+- **Workspace inspection** - Read-only inspection of workspace contents via `WorkspaceInspector`
+- **Agent state persistence** - Typed state management for agents via `AgentStateManager`
 
 ## Read this first (canonical docs)
 

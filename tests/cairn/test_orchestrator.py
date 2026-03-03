@@ -66,7 +66,7 @@ class FailingScript:
     async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
         _ = inputs
         _ = externals
-        raise grail.ExecutionError("execution failed")
+        raise grail.GrailExecutionError("execution failed")
 
 
 class InvalidScript:

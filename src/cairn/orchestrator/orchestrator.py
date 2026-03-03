@@ -59,8 +59,10 @@ from cairn.runtime.workspace_manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
-# Grail 2.0 exceptions
-GRAIL_EXECUTION_ERRORS = (grail.ExecutionError, grail.InputError)
+# Grail 2.0 exceptions - handle both legacy and current names
+_ExecutionError = getattr(grail, "ExecutionError", None) or getattr(grail, "GrailExecutionError", None) or Exception
+_InputError = getattr(grail, "InputError", None) or getattr(grail, "GrailValidationError", None) or Exception
+GRAIL_EXECUTION_ERRORS = (_ExecutionError, _InputError)
 
 
 def _load_grail_script(pym_path: Path) -> GrailScript:

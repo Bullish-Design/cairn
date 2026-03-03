@@ -16,6 +16,13 @@ from cairn.utils.retry_utils import with_retry
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.orchestrator.signals import SignalHandler
 from cairn.watcher.watcher import FileWatcher
+from cairn.runtime import (
+    open_workspace,
+    WorkspaceManager,
+    WorkspaceInspector,
+    WorkspaceStats,
+    AgentStateManager,
+)
 
 __all__ = [
     "AgentContext",
@@ -38,6 +45,12 @@ __all__ = [
     "TaskPriority",
     "TaskQueue",
     "create_external_functions",
+    # Workspace APIs
+    "open_workspace",
+    "WorkspaceManager",
+    "WorkspaceInspector",
+    "WorkspaceStats",
+    "AgentStateManager",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
