@@ -50,13 +50,25 @@ class OrchestratorSettings(BaseSettings):
 
 
 class ExecutorSettings(BaseSettings):
-    """Settings for Monty execution resource limits."""
+    """Settings for sandboxed execution resource limits and runtime."""
 
     model_config = SettingsConfigDict(env_prefix="CAIRN_EXECUTOR_", extra="ignore")
 
     max_execution_time: float = Field(default=60.0, description="Seconds")
     max_memory_bytes: int = 100 * 1024 * 1024
     max_recursion_depth: int = 1000
+    bwrap_path: str | None = Field(default=None, description="Path to the bubblewrap binary")
+    python_path: str | None = Field(default=None, description="Python interpreter to run inside the sandbox")
+    sandbox_closure_path: str | None = Field(
+        default=None,
+        description="File listing the sandbox interpreter's Nix store closure (one path per line)",
+    )
+    sandbox_uid: int = Field(default=65534, description="UID inside the sandbox (nobody)")
+    sandbox_gid: int = Field(default=65534, description="GID inside the sandbox (nobody)")
+    runtime_mounts: list[tuple[str, str]] | None = Field(
+        default=None,
+        description="Read-only runtime bind mounts (src, dest) for the sandbox fallback",
+    )
 
     @field_validator("max_execution_time")
     @classmethod

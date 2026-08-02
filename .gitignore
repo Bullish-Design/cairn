@@ -221,3 +221,6 @@ __marimo__/
 
 # Cairn AgentFS workspaces
 .agentfs/
+
+# Runtime artifacts
+/.grail/

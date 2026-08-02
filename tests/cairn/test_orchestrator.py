@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import grail
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.runtime.agent import AgentContext, AgentState
-from cairn.orchestrator.lifecycle import LifecycleStore
-from cairn.orchestrator.orchestrator import CairnOrchestrator, _load_grail_script
 from cairn.core.exceptions import RecoverableError
+from cairn.core.exceptions import TimeoutError as CairnTimeoutError
+from cairn.orchestrator.lifecycle import LifecycleStore
+from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
+from cairn.runtime.agent import AgentContext, AgentState
+from cairn.runtime.sandbox import SandboxExecutionError, SandboxResult
 
 
 async def _safe_close(workspace: object) -> None:
@@ -20,7 +21,7 @@ async def _safe_close(workspace: object) -> None:
         return
     try:
         await close_method()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return
 
 
@@ -42,97 +43,80 @@ class StubCodeProvider:
         return self.is_valid, self.error
 
 
-class CheckResult:
-    def __init__(self, valid: bool, errors: list[str] | None = None) -> None:
-        self.valid = valid
-        self.errors = errors or []
+class FakeExecutor:
+    """Simulates the sandbox: writes files into the workdir and records a submission."""
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        workdir: Path | str,
+        agent_fs: object,
+        stable: object,
+        settings: object,
+        allow_root: Path | str | None = None,
+        **kwargs: object,
+    ) -> None:
+        self.agent_id = agent_id
+        self.workdir = Path(workdir)
+        self.agent_fs = agent_fs
+        self.stable = stable
+        self.settings = settings
+        self.allow_root = allow_root
+        self.code: str | None = None
+        self.task: str | None = None
+        self.fail_message: str | None = None
+        self.timeout: bool = False
+
+    async def run(self, *, code: str, task: str) -> SandboxResult:
+        self.code = code
+        self.task = task
+        if self.timeout:
+            raise CairnTimeoutError("Operation exceeded timeout of 0.01s", error_code="EXECUTION_TIMEOUT")
+        if self.fail_message is not None:
+            raise SandboxExecutionError(self.fail_message, error_code="SANDBOX_EXECUTION_FAILED")
+
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        cairn_dir = self.workdir / ".cairn"
+        cairn_dir.mkdir(parents=True, exist_ok=True)
+        (cairn_dir / "task.py").write_text(code, encoding="utf-8")
+        (cairn_dir / "submission.json").write_text(
+            json.dumps({"summary": "ok", "changed_files": ["generated.txt"], "submitted_at": 1.0}),
+            encoding="utf-8",
+        )
+        (self.workdir / "generated.txt").write_text("from sandbox", encoding="utf-8")
+        # Simulate the host-side re-import of the sandbox changeset.
+        await self.agent_fs.files.write("generated.txt", "from sandbox")  # type: ignore[union-attr]
+
+        return SandboxResult(
+            submission={"summary": "ok", "changed_files": ["generated.txt"], "submitted_at": 1.0},
+            changes={"written": ["generated.txt"], "deleted": []},
+            log="",
+        )
 
 
-class SuccessfulScript:
-    def check(self) -> CheckResult:
-        return CheckResult(True)
+def fake_executor_factory(**executor_kwargs: object):
+    """Build an executor factory yielding FakeExecutor instances."""
 
-    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
-        tools = externals
-        assert inputs["task_description"] == "create file"
-        await tools["write_file"]("generated.txt", "from grail")
-        await tools["submit_result"]("ok", ["generated.txt"])
+    def factory(**kwargs: object) -> FakeExecutor:
+        instance = FakeExecutor(**kwargs)
+        for key, value in executor_kwargs.items():
+            setattr(instance, key, value)
+        return instance
 
-
-class FailingScript:
-    def check(self) -> CheckResult:
-        return CheckResult(True)
-
-    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
-        _ = inputs
-        _ = externals
-        raise grail.GrailExecutionError("execution failed")
-
-
-class InvalidScript:
-    def check(self) -> CheckResult:
-        return CheckResult(False, ["invalid code"])
-
-    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
-        raise AssertionError("run should not be called")
-
-
-def test_load_grail_script_uses_legacy_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls: list[str] = []
-
-    def _legacy_loader(path: str) -> object:
-        calls.append(path)
-        return SuccessfulScript()
-
-    monkeypatch.setattr(grail, "load", _legacy_loader, raising=False)
-
-    pym_path = tmp_path / "legacy-task.pym"
-    pym_path.write_text("x = 1", encoding="utf-8")
-
-    script = _load_grail_script(pym_path)
-
-    assert isinstance(script, SuccessfulScript)
-    assert calls == [str(pym_path)]
-
-
-def test_load_grail_script_uses_modern_loader_when_legacy_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    class ScriptLoader:
-        @classmethod
-        def from_file(cls, path: str) -> object:
-            return {"path": path, "loader": cls.__name__}
-
-    monkeypatch.delattr(grail, "load", raising=False)
-    monkeypatch.setattr(grail, "Script", ScriptLoader, raising=False)
-
-    pym_path = tmp_path / "modern-task.pym"
-    pym_path.write_text("x = 1", encoding="utf-8")
-
-    script = _load_grail_script(pym_path)
-
-    assert script == {"path": str(pym_path), "loader": "ScriptLoader"}
-
-
-def test_load_grail_script_raises_when_no_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.delattr(grail, "load", raising=False)
-    monkeypatch.delattr(grail, "Script", raising=False)
-    monkeypatch.delattr(grail, "Program", raising=False)
-
-    pym_path = tmp_path / "missing-loader-task.pym"
-    pym_path.write_text("x = 1", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="No supported Grail script loader found"):
-        _load_grail_script(pym_path)
+    return factory
 
 
 async def _setup_orchestrator(
-    tmp_path: Path, code_provider: StubCodeProvider | None = None
+    tmp_path: Path,
+    code_provider: StubCodeProvider | None = None,
+    executor_factory=None,
 ) -> tuple[CairnOrchestrator, object, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
         code_provider=code_provider or StubCodeProvider(),
+        executor_factory=executor_factory or fake_executor_factory(),
     )
     orch.project_root.mkdir(parents=True, exist_ok=True)
     orch.cairn_home.mkdir(parents=True, exist_ok=True)
@@ -156,11 +140,13 @@ async def _setup_orchestrator_with_agent_db(
     tmp_path: Path,
     agent_id: str,
     code_provider: StubCodeProvider | None = None,
+    executor_factory=None,
 ) -> tuple[CairnOrchestrator, object, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
         code_provider=code_provider or StubCodeProvider(),
+        executor_factory=executor_factory or fake_executor_factory(),
     )
     orch.project_root.mkdir(parents=True, exist_ok=True)
     orch.cairn_home.mkdir(parents=True, exist_ok=True)
@@ -181,11 +167,9 @@ async def _setup_orchestrator_with_agent_db(
 
 
 @pytest.mark.asyncio
-async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_run_agent_transitions_to_reviewing(tmp_path: Path) -> None:
     provider = StubCodeProvider()
     orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path, provider)
-
-    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: SuccessfulScript())
 
     ctx = AgentContext(
         agent_id="agent-success",
@@ -204,13 +188,14 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
         assert ctx.submission["summary"] == "ok"
 
         preview_file = orch.cairn_home / "workspaces" / ctx.agent_id / "generated.txt"
-        assert preview_file.read_text(encoding="utf-8") == "from grail"
+        assert preview_file.read_text(encoding="utf-8") == "from sandbox"
 
-        pym_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "task.pym"
-        assert pym_file.read_text(encoding="utf-8") == "x = 1"
+        task_file = orch.cairn_home / "workspaces" / ctx.agent_id / ".cairn" / "task.py"
+        assert task_file.read_text(encoding="utf-8") == "x = 1"
 
-        check_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "check.json"
-        assert json.loads(check_file.read_text(encoding="utf-8")) == {"errors": [], "valid": True}
+        submission_file = orch.cairn_home / "workspaces" / ctx.agent_id / ".cairn" / "submission.json"
+        payload = json.loads(submission_file.read_text(encoding="utf-8"))
+        assert payload["summary"] == "ok"
 
         assert provider.reference == ctx.task
         assert provider.context is not None
@@ -224,10 +209,11 @@ async def test_run_agent_transitions_to_reviewing(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_run_agent_transitions_to_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
-
-    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: FailingScript())
+async def test_run_agent_sandbox_failure_transitions_to_errored(tmp_path: Path) -> None:
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
+        tmp_path,
+        executor_factory=fake_executor_factory(fail_message="execution failed"),
+    )
 
     ctx = AgentContext(
         agent_id="agent-fail",
@@ -250,16 +236,46 @@ async def test_run_agent_transitions_to_errored(monkeypatch: pytest.MonkeyPatch,
 
 
 @pytest.mark.asyncio
-async def test_run_agent_provider_validation_failure_transitions_to_errored(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_run_agent_timeout_transitions_to_errored(tmp_path: Path) -> None:
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
+        tmp_path,
+        executor_factory=fake_executor_factory(timeout=True),
+    )
+
+    ctx = AgentContext(
+        agent_id="agent-timeout",
+        task="sleep",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.QUEUED,
+        agent_db_path=agent_db_path,
+        agent_fs=agent_ws,
+    )
+    orch.active_agents[ctx.agent_id] = ctx
+
+    try:
+        await orch._run_agent(ctx.agent_id)
+        assert ctx.state is AgentState.ERRORED
+        assert "timeout" in (ctx.error or "").lower()
+    finally:
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_provider_validation_failure_transitions_to_errored(tmp_path: Path) -> None:
     provider = StubCodeProvider(is_valid=False, error="provider validation failed")
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path, provider)
+    calls: list[str] = []
 
-    def _raise(_: str) -> object:
-        raise AssertionError("_load_grail_script should not be called")
+    def _factory(**kwargs: object) -> object:
+        calls.append("called")
+        raise AssertionError("executor should not be created for invalid provider code")
 
-    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", _raise)
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
+        tmp_path,
+        provider,
+        executor_factory=_factory,
+    )
 
     ctx = AgentContext(
         agent_id="agent-provider-invalid",
@@ -275,38 +291,7 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(
         await orch._run_agent(ctx.agent_id)
         assert ctx.state is AgentState.ERRORED
         assert "provider validation failed" in (ctx.error or "")
-    finally:
-        await _safe_close(agent_ws)
-        await _safe_close(bin_ws)
-        await _safe_close(stable)
-
-
-@pytest.mark.asyncio
-async def test_run_agent_validation_failure_transitions_to_errored(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
-
-    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: InvalidScript())
-
-    ctx = AgentContext(
-        agent_id="agent-invalid",
-        task="bad code",
-        priority=TaskPriority.NORMAL,
-        state=AgentState.QUEUED,
-        agent_db_path=agent_db_path,
-        agent_fs=agent_ws,
-    )
-    orch.active_agents[ctx.agent_id] = ctx
-
-    try:
-        await orch._run_agent(ctx.agent_id)
-        assert ctx.state is AgentState.ERRORED
-        assert "Grail validation failed" in (ctx.error or "")
-        assert "invalid code" in (ctx.error or "")
-
-        check_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "check.json"
-        assert json.loads(check_file.read_text(encoding="utf-8")) == {"errors": ["invalid code"], "valid": False}
+        assert calls == []
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
@@ -425,7 +410,6 @@ class _FlakyOrchestratorLifecycle:
 
     async def load(self, agent_id: str) -> None:
         _ = agent_id
-        return None
 
     async def save(self, record: object) -> None:
         self.save_calls += 1

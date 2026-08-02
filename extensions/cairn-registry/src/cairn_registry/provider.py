@@ -12,7 +12,7 @@ from cairn_registry.client import RegistryClient
 
 
 class RegistryCodeProvider(CodeProvider):
-    """Load `.pym` scripts from a remote registry."""
+    """Load Python scripts from a remote registry."""
 
     def __init__(self, base_url: str | None = None, cache_dir: Path | None = None) -> None:
         self.base_url = base_url

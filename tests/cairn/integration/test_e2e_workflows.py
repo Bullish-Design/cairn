@@ -1,39 +1,48 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 
 import pytest
 
-from cairn.runtime.agent import AgentState
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.providers.providers import InlineCodeProvider
+from cairn.runtime.agent import AgentState
+from cairn.runtime.sandbox import SandboxExecutionError, SandboxResult
 from cairn.runtime.settings import OrchestratorSettings
 
 
-class CheckResult:
-    def __init__(self, valid: bool, errors: list[str] | None = None) -> None:
-        self.valid = valid
-        self.errors = errors or []
-
-
-class StubScript:
-    def __init__(self, filename: str, summary: str, *, should_fail: bool = False) -> None:
+class StubExecutor:
+    def __init__(self, filename: str, summary: str, *, should_fail: bool = False, **kwargs: object) -> None:
         self.filename = filename
         self.summary = summary
         self.should_fail = should_fail
+        self.workdir: Path | None = kwargs.get("workdir")  # type: ignore[assignment]
+        self.agent_fs: object | None = kwargs.get("agent_fs")
 
-    def check(self) -> CheckResult:
-        return CheckResult(True)
-
-    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
-        _ = inputs
+    async def run(self, *, code: str, task: str) -> SandboxResult:
+        _ = code
+        _ = task
         if self.should_fail:
-            raise RuntimeError("script failed")
-        tools = externals
-        await tools["write_file"](self.filename, "hello")
-        await tools["submit_result"](self.summary, [self.filename])
+            raise SandboxExecutionError("script failed", error_code="SANDBOX_EXECUTION_FAILED")
+        assert self.workdir is not None
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        (self.workdir / self.filename).write_text("hello", encoding="utf-8")
+        cairn_dir = self.workdir / ".cairn"
+        cairn_dir.mkdir(parents=True, exist_ok=True)
+        (cairn_dir / "submission.json").write_text(
+            json.dumps({"summary": self.summary, "changed_files": [self.filename], "submitted_at": 1.0}),
+            encoding="utf-8",
+        )
+        assert self.agent_fs is not None
+        await self.agent_fs.files.write(self.filename, "hello")  # type: ignore[union-attr]
+        return SandboxResult(
+            submission={"summary": self.summary, "changed_files": [self.filename], "submitted_at": 1.0},
+            changes={"written": [self.filename], "deleted": []},
+            log="",
+        )
 
 
 async def _wait_for_state(
@@ -56,24 +65,26 @@ async def _wait_for_state(
     pytest.fail(f"Agent {agent_id} did not reach state {states}")
 
 
-async def _build_orchestrator(tmp_path: Path) -> CairnOrchestrator:
+def _build_orchestrator(tmp_path: Path, executor_factory=None) -> CairnOrchestrator:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
         config=OrchestratorSettings(max_concurrent_agents=1),
         code_provider=InlineCodeProvider(),
+        executor_factory=executor_factory,
     )
     orch.project_root.mkdir(parents=True, exist_ok=True)
-    await orch.initialize()
     return orch
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_complete_agent_lifecycle_accept(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    orch = await _build_orchestrator(tmp_path)
-    script = StubScript("hello.py", "done")
-    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: script)
+async def test_complete_agent_lifecycle_accept(tmp_path: Path) -> None:
+    orch = _build_orchestrator(
+        tmp_path,
+        executor_factory=lambda **kwargs: StubExecutor("hello.py", "done", **kwargs),
+    )
+    await orch.initialize()
 
     try:
         agent_id = await orch.spawn_agent("x = 1")
@@ -93,12 +104,12 @@ async def test_complete_agent_lifecycle_accept(monkeypatch: pytest.MonkeyPatch, 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_agent_rejection_workflow(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    orch = await _build_orchestrator(tmp_path)
-    monkeypatch.setattr(
-        "cairn.orchestrator.orchestrator._load_grail_script",
-        lambda _: StubScript("note.txt", "done"),
+async def test_agent_rejection_workflow(tmp_path: Path) -> None:
+    orch = _build_orchestrator(
+        tmp_path,
+        executor_factory=lambda **kwargs: StubExecutor("note.txt", "done", **kwargs),
     )
+    await orch.initialize()
 
     try:
         agent_id = await orch.spawn_agent("pass")
@@ -119,12 +130,12 @@ async def test_agent_rejection_workflow(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_multiple_agents_processed_sequentially(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    orch = await _build_orchestrator(tmp_path)
-    monkeypatch.setattr(
-        "cairn.orchestrator.orchestrator._load_grail_script",
-        lambda _: StubScript("file.txt", "done"),
+async def test_multiple_agents_processed_sequentially(tmp_path: Path) -> None:
+    orch = _build_orchestrator(
+        tmp_path,
+        executor_factory=lambda **kwargs: StubExecutor("file.txt", "done", **kwargs),
     )
+    await orch.initialize()
 
     try:
         agent_ids = [await orch.spawn_agent(f"task-{i}") for i in range(3)]
@@ -139,11 +150,12 @@ async def test_multiple_agents_processed_sequentially(monkeypatch: pytest.Monkey
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_agent_error_transitions_to_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    orch = await _build_orchestrator(tmp_path)
-    monkeypatch.setattr(
-        "cairn.orchestrator.orchestrator._load_grail_script", lambda _: StubScript("boom.py", "fail", should_fail=True)
+async def test_agent_error_transitions_to_errored(tmp_path: Path) -> None:
+    orch = _build_orchestrator(
+        tmp_path,
+        executor_factory=lambda **kwargs: StubExecutor("boom.py", "fail", should_fail=True, **kwargs),
     )
+    await orch.initialize()
 
     try:
         agent_id = await orch.spawn_agent("raise")

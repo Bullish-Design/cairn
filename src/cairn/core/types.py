@@ -6,9 +6,7 @@ type safety throughout the Cairn codebase.
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Generic, Protocol, TypeAlias, TypedDict, TypeVar
-
-from fsdantic import Workspace
+from typing import Any, Generic, Protocol, TypeAlias, TypedDict, TypeVar
 
 
 class SearchContentMatchData(TypedDict):
@@ -35,45 +33,6 @@ class AgentSummary(TypedDict):
     priority: int
 
 
-ExternalFunctionResult: TypeAlias = str | bool | list[str] | list[SearchContentMatchData] | dict[str, Any]
-
-ExternalFunction: TypeAlias = Callable[..., Awaitable[ExternalFunctionResult]]
-
-ReadFileFunction: TypeAlias = Callable[[str], Awaitable[str]]
-WriteFileFunction: TypeAlias = Callable[[str, str], Awaitable[bool]]
-FileExistsFunction: TypeAlias = Callable[[str], Awaitable[bool]]
-SearchFilesFunction: TypeAlias = Callable[[str], Awaitable[list[str]]]
-SubmitResultFunction: TypeAlias = Callable[[str, list[str]], Awaitable[bool]]
-LogFunction: TypeAlias = Callable[[str], Awaitable[bool]]
-
-
-class ListDirFunction(Protocol):
-    """Protocol for list_dir with default path."""
-
-    def __call__(self, path: str = ".") -> Awaitable[list[str]]: ...
-
-
-class SearchContentFunction(Protocol):
-    """Protocol for search_content with optional path."""
-
-    def __call__(self, pattern: str, path: str = ".") -> Awaitable[list[SearchContentMatchData]]: ...
-
-
-class ExternalTools(TypedDict):
-    """Typed map of external functions exposed to agents."""
-
-    read_file: ReadFileFunction
-    write_file: WriteFileFunction
-    list_dir: ListDirFunction
-    file_exists: FileExistsFunction
-    search_files: SearchFilesFunction
-    search_content: SearchContentFunction
-    submit_result: SubmitResultFunction
-    log: LogFunction
-
-
-ToolsFactory: TypeAlias = Callable[[str, Workspace, Workspace], ExternalTools]
-
 ExecutionResult: TypeAlias = dict[str, Any]
 
 
@@ -82,25 +41,6 @@ class FileEntryProtocol(Protocol):
 
     path: str
     content: str | bytes | None
-
-
-class GrailCheckResult(Protocol):
-    """Protocol for Grail check results."""
-
-    valid: bool
-    errors: list[object] | None
-
-
-class GrailScript(Protocol):
-    """Protocol for Grail script objects."""
-
-    def check(self) -> GrailCheckResult:
-        """Validate the script before execution."""
-        ...
-
-    async def run(self, inputs: dict[str, Any], externals: ExternalTools) -> dict[str, Any]:
-        """Run the Grail script."""
-        ...
 
 
 T = TypeVar("T")
@@ -114,13 +54,13 @@ class Result(Generic[T]):
         self._error = error
 
     @classmethod
-    def ok(cls, value: T) -> "Result[T]":
+    def ok(cls, value: T) -> Result[T]:
         """Create successful result."""
 
         return cls(value=value)
 
     @classmethod
-    def error(cls, error: str) -> "Result[T]":
+    def error(cls, error: str) -> Result[T]:
         """Create error result."""
 
         return cls(error=error)

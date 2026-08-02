@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.runtime.agent import AgentContext, AgentState
 from cairn.core.exceptions import ProviderError
-from cairn.orchestrator.lifecycle import LifecycleStore, SUBMISSION_KEY, SubmissionRecord
+from cairn.orchestrator.lifecycle import SUBMISSION_KEY, LifecycleStore, SubmissionRecord
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
+from cairn.runtime.agent import AgentContext, AgentState
+from cairn.runtime.sandbox import SandboxResult
 
 
 async def _safe_close(workspace: object) -> None:
@@ -19,7 +19,7 @@ async def _safe_close(workspace: object) -> None:
         return
     try:
         await close_method()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return
 
 
@@ -48,25 +48,24 @@ class StubCodeProvider:
         return self.is_valid, self.error
 
 
-class CheckResult:
-    def __init__(self, valid: bool, errors: list[str] | None = None) -> None:
-        self.valid = valid
-        self.errors = errors or []
+class PhaseExecutor:
+    """Fake sandbox executor that records execution and returns a submission."""
 
-
-class DummyScript:
-    def __init__(self, valid: bool = True) -> None:
-        self.valid = valid
+    def __init__(self, **kwargs: object) -> None:
+        _ = kwargs
         self.ran = False
+        self.code: str | None = None
+        self.task: str | None = None
 
-    def check(self) -> CheckResult:
-        errors = [] if self.valid else ["invalid code"]
-        return CheckResult(self.valid, errors)
-
-    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
-        _ = inputs
-        _ = externals
+    async def run(self, *, code: str, task: str) -> SandboxResult:
         self.ran = True
+        self.code = code
+        self.task = task
+        return SandboxResult(
+            submission={"summary": "done", "changed_files": ["notes.txt"], "submitted_at": 1.0},
+            changes={"written": [], "deleted": []},
+            log="",
+        )
 
 
 async def _setup_orchestrator(
@@ -76,6 +75,7 @@ async def _setup_orchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
         code_provider=code_provider or StubCodeProvider(),
+        executor_factory=lambda **kwargs: PhaseExecutor(**kwargs),
     )
     orch.project_root.mkdir(parents=True, exist_ok=True)
     orch.cairn_home.mkdir(parents=True, exist_ok=True)
@@ -141,18 +141,18 @@ async def test_generate_code_handles_provider_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_validate_code_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_execute_code_phase(tmp_path: Path) -> None:
     orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
-
-    monkeypatch.setattr("cairn.orchestrator.orchestrator._load_grail_script", lambda _: DummyScript())
 
     try:
         await orch._transition_agent_state(ctx, AgentState.EXECUTING)
-        script = await orch._validate_code(ctx, "x = 1")
+        result = await orch._execute_code(ctx, "x = 1")
 
-        assert isinstance(script, DummyScript)
-        check_file = orch.project_root / ".grail" / "agents" / ctx.agent_id / "check.json"
-        assert json.loads(check_file.read_text(encoding="utf-8")) == {"errors": [], "valid": True}
+        assert result.submission is not None
+        assert result.submission["summary"] == "done"
+
+        executor = orch.executor_factory()
+        assert executor.ran is False  # each call gets a fresh executor instance
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
@@ -160,15 +160,18 @@ async def test_validate_code_phase(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_execute_script_phase(tmp_path: Path) -> None:
+async def test_execute_code_passes_code_and_task_to_executor(tmp_path: Path) -> None:
     orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    executor = PhaseExecutor()
+    orch.executor_factory = lambda **kwargs: executor
 
     try:
         await orch._transition_agent_state(ctx, AgentState.EXECUTING)
-        script = DummyScript()
-        await orch._execute_script(ctx, script)
+        await orch._execute_code(ctx, "x = 2")
 
-        assert script.ran is True
+        assert executor.ran is True
+        assert executor.code == "x = 2"
+        assert executor.task == "phase test"
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
@@ -176,31 +179,19 @@ async def test_execute_script_phase(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_results_phase(tmp_path: Path) -> None:
+async def test_submit_results_phase_persists_submission(tmp_path: Path) -> None:
     orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
 
     try:
-        submission_repo = agent_ws.kv.repository(prefix="", model_type=SubmissionRecord)
-        await submission_repo.save(
-            SUBMISSION_KEY,
-            SubmissionRecord(
-                agent_id=ctx.agent_id,
-                submission={
-                    "summary": "done",
-                    "changed_files": ["notes.txt"],
-                    "submitted_at": 1.0,
-                },
-            ),
-        )
-        await agent_ws.files.write("notes.txt", "hello")
+        ctx.submission = {"summary": "done", "changed_files": ["notes.txt"], "submitted_at": 1.0}
 
         await orch._submit_results(ctx)
 
-        assert ctx.submission is not None
-        assert ctx.submission["summary"] == "done"
-
-        preview_file = orch.cairn_home / "workspaces" / ctx.agent_id / "notes.txt"
-        assert preview_file.read_text(encoding="utf-8") == "hello"
+        submission_repo = agent_ws.kv.repository(prefix="", model_type=SubmissionRecord)
+        saved = await submission_repo.load(SUBMISSION_KEY)
+        assert saved is not None
+        assert saved.agent_id == ctx.agent_id
+        assert saved.submission["summary"] == "done"
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)

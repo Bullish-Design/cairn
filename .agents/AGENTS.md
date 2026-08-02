@@ -20,8 +20,8 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 - **Nix/devenv** - Development environment management
 - **Python 3.11+** - Orchestrator and libraries
 - **FSdantic** - Type-safe workspace management with overlay semantics
-- **Grail** - `.pym` file-based execution with pre-flight validation
-- **Monty** - Sandboxed Python interpreter (via Grail)
+- **bubblewrap** - Kernel-namespace sandbox for stock CPython execution
+- **BwrapExecutor** - Materialize → sandbox run → re-import changeset
 - **Neovim + Lua** - Editor integration
 - **TMUX** - Workspace management
 - **Jujutsu** - Version control integration
@@ -81,13 +81,6 @@ cairn/
 │       │   └── ghost.lua
 │       ├── doc/cairn.txt
 │       └── tests/
-│
-├── .grail/                  # Grail artifacts directory
-│   └── agents/
-│       └── {agent_id}/
-│           ├── task.pym     # Generated/loaded code
-│           ├── check.json   # Validation results
-│           └── run.log      # Execution log
 │
 ├── .agentfs/                # FSdantic databases
 │   ├── stable.db
@@ -234,12 +227,11 @@ For detailed information on specific subsystems, see:
 - KV store operations
 - Performance considerations
 
-### [SKILL-MONTY.md](docs/skills/SKILL-MONTY.md)
+### [SKILL-SANDBOX.md](docs/skills/SKILL-SANDBOX.md)
 
-- Monty sandbox constraints
-- External function interface
-- Code generation prompts
-- Error handling
+- bwrap sandbox constraints
+- Sandbox API (read_file, write_file, submit_result, ...)
+- Execution limits and error handling
 - Security model
 
 ### [SKILL-TMUX.md](docs/skills/SKILL-TMUX.md)
@@ -292,51 +284,26 @@ content = await agent_fs.files.read("file.txt")
 results = await agent_fs.files.query(ViewQuery(path_pattern="**/*.py"))
 ```
 
-### Grail and .pym files
+### Sandbox execution (bwrap)
 
-❌ **Don't:** Generate code strings without validation
+❌ **Don't:** Execute agent code in-process
 ```python
-# Skip validation
-code = await provider.get_code(task, context)
-result = await execute_string(code)  # No validation!
+# Runs untrusted code inside the orchestrator — no isolation
+exec(provider_code)
 ```
 
-✅ **Do:** Write to .pym and validate before execution
+✅ **Do:** Run through the sandbox executor
 ```python
-# Write code to .pym file
-pym_file = Path(f".grail/agents/{agent_id}/task.pym")
-pym_file.write_text(code)
-
-# Load and validate
-script = grail.load(str(pym_file))
-check_result = script.check()
-if not check_result.valid:
-    handle_errors(check_result.errors)
-    return
-
-# Execute
-result = await script.run(inputs={...}, externals={...})
+# Materialize → sandbox run → re-import changeset
+executor = BwrapExecutor(agent_id=..., workdir=..., agent_fs=..., stable=..., settings=...)
+result = await executor.run(code=code, task=task)
 ```
 
-### Monty Sandbox
-
-❌ **Don't:** Use imports in .pym code
-```python
-# This will fail in sandbox
-code = """
-import json
-data = json.loads(content)
-"""
-```
-
-✅ **Do:** Provide as external function
-```python
-# Add to external_functions
-@external
-async def parse_json(text: str) -> dict:
-    import json
-    return json.loads(text)
-```
+The sandbox runs stock CPython (stdlib available); the sandbox API
+(`read_file`, `write_file`, `list_dir`, `file_exists`, `delete_file`,
+`search_files`, `search_content`, `submit_result`, `log`) is injected as globals by the
+bootstrap script. Imports are allowed — what the code can import is limited
+by the read-only runtime mounts, not by a language subset.
 
 ### Neovim
 
@@ -370,7 +337,7 @@ jj describe -m "message"
 ### Stable APIs (Don't break without major version bump)
 
 - **AgentFS SDK** - File operations, KV operations
-- **Monty external functions** - Signature and behavior
+- **Sandbox API** - read_file/write_file/list_dir/file_exists/delete_file/search_files/search_content/submit_result/log
 - **Neovim commands** - `:Cairn*` commands
 - **Environment variables** - `CAIRN_*`, `AGENTFS_*`
 
@@ -536,7 +503,7 @@ These can be slower:
 - User files may contain injection attempts
 
 **Ensure:**
-- Monty sandbox prevents filesystem access
+- bwrap sandbox prevents filesystem/network access
 - Overlays can't corrupt stable layer
 - No SQL injection in AgentFS queries
 - No shell injection in subprocess calls
@@ -548,7 +515,7 @@ When handling agent code or user input:
 - [ ] Never use `eval()` or `exec()` on untrusted input
 - [ ] Always use subprocess with list args, not shell strings
 - [ ] Validate paths before filesystem operations
-- [ ] Use Monty sandbox for all agent code execution
+- [ ] Use the bwrap sandbox for all agent code execution
 - [ ] Limit resource usage (time, memory, disk)
 
 ## Release Process
@@ -706,6 +673,6 @@ llm logs
 
 ---
 
-**Remember:** You're working on a system designed to help developers collaborate with AI agents. The code you write will be executed by Monty, reviewed by humans, and iterated on by future agents (maybe even yourself!). Make it clear, make it safe, make it simple.
+**Remember:** You're working on a system designed to help developers collaborate with AI agents. The code you write will be executed inside a bwrap sandbox, reviewed by humans, and iterated on by future agents (maybe even yourself!). Make it clear, make it safe, make it simple.
 
 **Welcome to the pile. Add your stones carefully.**

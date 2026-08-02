@@ -20,7 +20,7 @@ Cairn runtime contracts are implemented by four concrete layers:
 1. **Code Sourcing (`CodeProvider` protocol)**
    - Code providers implement `get_code(reference, context) -> str` to supply executable Python code.
    - Built-in providers:
-     - `FileCodeProvider` - loads code from `.pym` files on disk
+     - `FileCodeProvider` - loads code from Python script files on disk
      - `InlineCodeProvider` - treats reference as code itself
    - Plugin providers (separate packages):
      - `LLMCodeProvider` (cairn-llm) - generates code from natural language
@@ -36,19 +36,25 @@ Cairn runtime contracts are implemented by four concrete layers:
      - overlay operations (`workspace.overlay.merge/list_changes/reset`),
      - materialization (`workspace.materialize.to_disk/diff`).
 
-3. **Execution (`grail.load()` and `.pym` files)**
-   - Code providers generate or fetch code that is written to `.grail/agents/{agent_id}/task.pym`.
-   - Each agent execution uses `grail.load(pym_path)` to create a script object.
-   - Pre-flight validation via `script.check()` catches errors before execution.
-   - Execution via `script.run(inputs={...}, externals={...})` with external functions.
-   - Execution limits (timeout, memory) are enforced by Grail/Monty runtime.
+3. **Execution (`BwrapExecutor` over a materialized workspace)**
+   - Code providers generate or fetch code that is written to `$CAIRN_HOME/workspaces/{agent_id}/.cairn/task.py`.
+   - The agent overlay (over stable) is materialized to a real directory via `workspace.materialize.to_disk()`.
+   - The code runs as stock CPython inside a bubblewrap sandbox (`BwrapExecutor`): only the materialized
+     directory is writable; the interpreter runtime is mounted read-only; network, host filesystem, and
+     other processes are unshared.
+   - After execution the sandbox changeset is re-imported into the agent overlay (added/changed files
+     written, deleted files tombstoned) and `submit_result` payloads are read from `.cairn/submission.json`.
+   - Execution limits (wall-clock timeout, memory, CPU, recursion) are enforced via the sandbox bootstrap
+     (rlimits) and host-side subprocess timeout.
 
-4. **External functions (`create_external_functions`)**
-   - External function callables are created per-agent by `create_external_functions(agent_context)`.
-   - The returned dict (`read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`, `search_content`, `submit_result`, `log`) is the canonical capability surface.
-   - `submit_result(...)` writes review payloads to the agent workspace KV submission record consumed by the orchestrator lifecycle flow.
+4. **Sandbox API (`cairn.runtime.sandbox.boot`)**
+   - The bootstrap script shipped into the sandbox exposes the canonical capability surface
+     (`read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`, `search_content`,
+     `submit_result`, `log`) as plain functions over the workspace directory.
+   - `submit_result(...)` writes `.cairn/submission.json`; the host persists it to the agent workspace
+     KV submission record consumed by the orchestrator lifecycle flow.
 
-> **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator/orchestrator.py`, `src/cairn/providers/providers.py`, `src/cairn/runtime/external_functions.py`).
+> **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator/orchestrator.py`, `src/cairn/providers/providers.py`, `src/cairn/runtime/sandbox/sandbox.py`).
 
 ## Public inspection and state APIs
 
@@ -106,16 +112,16 @@ $PROJECT_ROOT/.agentfs/
 ├── agent-{id}.db
 └── bin.db
 
-$PROJECT_ROOT/.grail/
-└── agents/
-    └── {agent_id}/
-        ├── task.pym           # Generated/loaded agent code
-        ├── check.json         # Validation results
-        └── run.log            # Execution log
-
 $CAIRN_HOME/ (default ~/.cairn)
 ├── workspaces/
-├── previews/
+│   └── {agent_id}/          # Sandbox workdir == preview workspace
+│       ├── .cairn/
+│       │   ├── task.py          # Generated/loaded agent code
+│       │   ├── task.json        # Task inputs (task_description)
+│       │   ├── boot.py          # Sandbox bootstrap (shipped in)
+│       │   ├── submission.json  # submit_result payload
+│       │   └── run.log          # Sandbox stdout/stderr
+│       └── ...                  # Materialized workspace files
 ├── signals/
 └── state/
 ```
@@ -139,68 +145,75 @@ $CAIRN_HOME/ (default ~/.cairn)
 - `mkdir(path) -> None`
 - KV store: `get/set/delete/list`
 
-## Execution contracts (Grail + Monty)
+## Execution contracts (bwrap sandbox)
 
-### .pym File Structure
+### Task file structure
 
-All executable code is written to `.pym` files with the following structure:
+All executable code is written as a plain Python file (`.cairn/task.py`) with the
+following shape. There are no declarations, imports, or restricted dialect —
+the sandbox API is injected as globals:
 
 ```python
-from grail import external, Input
+# Inputs are injected as globals from task.json
+task_description
 
-# Inputs
-task_description: str = Input("task_description")
-
-# External function stubs
-@external
-async def read_file(path: str) -> str: ...
-
-@external
-async def write_file(path: str, content: str) -> bool: ...
-
-@external
-async def submit_result(summary: str, changed_files: list[str]) -> bool: ...
-
-# Task code
-content = await read_file("/src/main.py")
+# Task code — plain Python, stdlib available
+content = read_file("src/main.py")
 # ... process ...
-await submit_result(summary="Done", changed_files=["/src/main.py"])
+write_file("src/main.py", content)
 
-# Return value
-{"status": "complete"}
+# Submission — must be recorded before the script exits
+submit_result(summary="Done", changed_files=["src/main.py"])
 ```
 
 ### Sandbox policy
 
-Allowed:
-- procedural Python constructs,
-- async functions,
-- calls to declared `@external` functions.
+- The sandbox runs stock CPython inside bubblewrap (`bwrap --unshare-all`).
+- Only the materialized workspace directory is writable; the interpreter runtime
+  is mounted read-only from a declarative Nix store closure manifest
+  (``pkgs.writeClosure`` in ``devenv.nix``; falls back to the immutable
+  ``/nix/store`` plus conventional system dirs when no manifest is configured).
+- No network, no host filesystem, no other processes, no environment variables
+  (``--clearenv``).
+- File access is additionally confined to the workspace root by the sandbox API
+  (absolute paths and ``..`` traversal are rejected).
+- Symlinks in the workspace are never followed by the host-side re-import.
 
-Disallowed:
-- imports (except `from grail import ...`),
-- host filesystem/network access except through external functions,
-- subprocess execution,
-- implicit environment access.
+### Sandbox runtime configuration (NixOS/devenv)
 
-### Required external functions exposed to code
+The sandbox runtime is declared in ``devenv.nix`` and consumed via environment
+variables (``ExecutorSettings`` uses the ``CAIRN_EXECUTOR_`` prefix):
+
+- ``CAIRN_EXECUTOR_BWRAP_PATH`` — path to the bubblewrap binary.
+- ``CAIRN_EXECUTOR_PYTHON_PATH`` — the sandbox interpreter (``pkgs.python3``:
+  stdlib only, empty site-packages).
+- ``CAIRN_EXECUTOR_SANDBOX_CLOSURE_PATH`` — a file listing the interpreter's
+  Nix store closure (built with ``pkgs.writeClosure``), one path per line; the
+  executor binds exactly those paths read-only. When unset/missing, the
+  executor falls back to binding the immutable ``/nix/store`` plus conventional
+  system directories.
+
+### Sandbox API exposed to code (globals, no imports needed)
 
 - `read_file(path) -> str`
 - `write_file(path, content) -> bool`
-- `list_dir(path) -> list[str]`
+- `list_dir(path='.') -> list[str]`
 - `file_exists(path) -> bool`
+- `delete_file(path) -> bool`
 - `search_files(pattern) -> list[str]`
 - `search_content(pattern, path='.') -> list[dict]`
 - `submit_result(summary, changed_files) -> bool`
-- `log(message) -> None`
+- `log(message) -> bool`
+
+Deletions re-import into the agent overlay for overlay-owned files; stable-only
+files cannot be tombstoned with the current fsdantic overlay API (the sandbox
+cannot delete files that exist only in stable).
 
 ### Pre-flight validation
 
-Before execution, `grail.load(pym_path).check()` validates:
-- syntax errors,
-- undefined @external functions,
-- type consistency,
-- structural correctness.
+Provider-level `validate_code` is the only pre-flight gate (no check-time
+declared external validation). Syntax errors surface as sandbox tracebacks that
+mark the agent ERRORED.
 
 Validation errors prevent execution and transition agent to ERRORED state.
 
@@ -249,10 +262,10 @@ agent:{agent_id} -> {
 - run a long-lived worker loop that acquires an `asyncio.Semaphore(max_concurrent_agents)` slot before starting each task,
 - release the semaphore slot in one completion `finally` path,
 - use `CodeProvider` to source executable code (from files, LLMs, git, etc.),
-- validate code via `grail.load().check()` before execution,
-- write code to `.grail/agents/{agent_id}/task.pym`,
-- execute code via `grail.load().run()` with external functions,
-- materialize preview workspace via `workspace.materialize.to_disk()`,
+- validate code via provider `validate_code()` before execution,
+- write code to `$CAIRN_HOME/workspaces/{agent_id}/.cairn/task.py`,
+- execute code via `BwrapExecutor` (materialize → sandbox run → re-import),
+- materialize the workspace via `workspace.materialize.to_disk()` (workdir doubles as preview),
 - persist lifecycle metadata to canonical KV store on every state transition,
 - persist queue stats snapshot under `$CAIRN_HOME/state/` (stats only, not agent metadata).
 
@@ -269,9 +282,9 @@ CLI subcommands are a transport adapter: each invocation parses into a normalize
 - `cairn reject <agent-id>` - Reject and discard agent changes
 
 **Reference interpretation:**
-- With `FileCodeProvider` (default): `reference` is a path to a `.pym` file
+- With `FileCodeProvider` (default): `reference` is a path to a Python script file
 - With `LLMCodeProvider` (--provider llm): `reference` is natural language task description
-- With `GitCodeProvider`: `reference` is a git URL with path (e.g., `git://github.com/org/repo:script.pym`)
+- With `GitCodeProvider`: `reference` is a git URL with path (e.g., `git://github.com/org/repo:script.py`)
 - With `RegistryCodeProvider`: `reference` is a registry URL (e.g., `registry://org/script-name:version`)
 
 ### Signal adapter contract

@@ -8,17 +8,12 @@ import logging
 import shutil
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import cast
 
 from fsdantic import Fsdantic, MergeStrategy, Workspace
-import grail
 
-from cairn.runtime.agent import AgentContext, AgentState
-from cairn.utils.error_formatting import format_agent_error
-from cairn.runtime.external_functions import create_external_functions
-from cairn.providers.providers import CodeProvider, FileCodeProvider
 from cairn.cli.commands import (
     AcceptCommand,
     CairnCommand,
@@ -41,61 +36,27 @@ from cairn.core.exceptions import (
     ProviderError,
     RecoverableError,
     ResourceLimitError,
-    TimeoutError as CairnTimeoutError,
     VersionConflictError,
     WorkspaceMergeError,
 )
-from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore, SUBMISSION_KEY, SubmissionRecord
+from cairn.core.exceptions import (
+    TimeoutError as CairnTimeoutError,
+)
+from cairn.core.types import AgentSummary
+from cairn.orchestrator.lifecycle import SUBMISSION_KEY, LifecycleRecord, LifecycleStore, SubmissionRecord
 from cairn.orchestrator.queue import TaskPriority, TaskQueue
-from cairn.runtime.resource_limits import ResourceLimiter, run_with_timeout
-from cairn.utils.retry_utils import with_retry
-from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.orchestrator.signals import SignalHandler
-from cairn.core.types import AgentSummary, GrailCheckResult, GrailScript, ToolsFactory
-from cairn.watcher.watcher import FileWatcher
+from cairn.providers.providers import CodeProvider, FileCodeProvider
+from cairn.runtime.agent import AgentContext, AgentState
+from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError, SandboxExecutor, SandboxResult
+from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.runtime.workspace_cache import WorkspaceCache
 from cairn.runtime.workspace_manager import WorkspaceManager
-
+from cairn.utils.error_formatting import format_agent_error
+from cairn.utils.retry_utils import with_retry
+from cairn.watcher.watcher import FileWatcher
 
 logger = logging.getLogger(__name__)
-
-# Grail 2.0 exceptions - handle both legacy and current names
-_ExecutionError = getattr(grail, "ExecutionError", None) or getattr(grail, "GrailExecutionError", None) or Exception
-_InputError = getattr(grail, "InputError", None) or getattr(grail, "GrailValidationError", None) or Exception
-GRAIL_EXECUTION_ERRORS = (_ExecutionError, _InputError)
-
-
-def _load_grail_script(pym_path: Path) -> GrailScript:
-    """Load a Grail script using legacy and current loader entry points."""
-
-    script_path = str(pym_path)
-
-    # Grail 1.x exposed a top-level `load` function.
-    legacy_loader = getattr(grail, "load", None)
-    if callable(legacy_loader):
-        return cast(GrailScript, legacy_loader(script_path))
-
-    # Grail 2.x loaders can vary by release; try known file-based entry points.
-    candidate_loaders: tuple[tuple[str, str], ...] = (
-        ("Script", "from_file"),
-        ("Script", "load"),
-        ("Program", "from_file"),
-        ("Program", "load"),
-    )
-    for class_name, method_name in candidate_loaders:
-        cls = getattr(grail, class_name, None)
-        if cls is None:
-            continue
-        loader = getattr(cls, method_name, None)
-        if callable(loader):
-            return cast(GrailScript, loader(script_path))
-
-    available_attrs = ", ".join(sorted(name for name in dir(grail) if not name.startswith("_")))
-    raise RuntimeError(
-        "No supported Grail script loader found. Expected `grail.load` or a supported "
-        "2.x loader (Script/Program from_file/load). "
-        f"Available grail attributes: {available_attrs}"
-    )
 
 
 class CairnOrchestrator:
@@ -108,7 +69,7 @@ class CairnOrchestrator:
         config: OrchestratorSettings | None = None,
         executor_settings: ExecutorSettings | None = None,
         code_provider: CodeProvider | None = None,
-        tools_factory: ToolsFactory | None = None,
+        executor_factory: Callable[..., SandboxExecutor] | None = None,
     ):
         path_settings = PathsSettings()
         self.project_root = Path(path_settings.project_root or project_root).resolve()
@@ -127,7 +88,7 @@ class CairnOrchestrator:
         self._running_tasks: set[asyncio.Task[None]] = set()
 
         self.code_provider = code_provider or FileCodeProvider(base_path=self.project_root)
-        self.tools_factory = tools_factory or create_external_functions
+        self.executor_factory = executor_factory or BwrapExecutor
 
         self.watcher: FileWatcher | None = None
         self.signals: SignalHandler | None = None
@@ -229,7 +190,7 @@ class CairnOrchestrator:
                     asyncio.gather(*self._running_tasks, return_exceptions=True),
                     timeout=DEFAULT_EXECUTION_TIMEOUT_SECONDS,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "Some agent tasks did not complete before shutdown timeout",
                     extra={"active_count": len(self._running_tasks)},
@@ -476,9 +437,7 @@ class CairnOrchestrator:
                 return
 
             await self._execute_agent_lifecycle(ctx)
-        except GRAIL_EXECUTION_ERRORS as exc:
-            await self._handle_agent_error(ctx, exc)
-        except (ResourceLimitError, CairnTimeoutError) as exc:
+        except (ResourceLimitError, CairnTimeoutError, SandboxExecutionError) as exc:
             await self._handle_agent_error(ctx, exc)
             return
         except CairnError as exc:
@@ -501,11 +460,10 @@ class CairnOrchestrator:
 
         await self._transition_agent_state(ctx, AgentState.EXECUTING)
 
-        script = await self._validate_code(ctx, generated)
-        if script is None:
-            return
+        result = await self._execute_code(ctx, generated)
+        ctx.execution_result = {"status": "complete"}
+        ctx.submission = result.submission
 
-        await self._execute_script(ctx, script)
         await self._transition_agent_state(ctx, AgentState.SUBMITTING)
         await self._submit_results(ctx)
         await self._transition_agent_state(ctx, AgentState.REVIEWING)
@@ -540,33 +498,13 @@ class CairnOrchestrator:
 
         return generated
 
-    async def _validate_code(self, ctx: AgentContext, generated: str) -> GrailScript | None:
-        """Write and validate the Grail script for generated code."""
-        grail_dir = self.project_root / ".grail" / "agents" / ctx.agent_id
-        grail_dir.mkdir(parents=True, exist_ok=True)
-        pym_path = grail_dir / "task.pym"
-        pym_path.write_text(generated, encoding="utf-8")
+    async def _execute_code(self, ctx: AgentContext, generated: str) -> SandboxResult:
+        """Execute generated code in the bwrap sandbox over the materialized workspace.
 
-        script = _load_grail_script(pym_path)
-        check_result = script.check()
-        check_payload = {
-            "valid": bool(getattr(check_result, "valid", False)),
-            "errors": [str(error) for error in (getattr(check_result, "errors", None) or [])],
-        }
-        (grail_dir / "check.json").write_text(
-            json.dumps(check_payload, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-
-        if not check_result.valid:
-            ctx.error = self._format_grail_errors(check_result)
-            await self._transition_agent_state(ctx, AgentState.ERRORED)
-            return None
-
-        return script
-
-    async def _execute_script(self, ctx: AgentContext, script: GrailScript) -> None:
-        """Execute the Grail script within resource limits."""
+        The executor materializes the agent overlay (over stable) to a real
+        directory, runs the code in the sandbox, and re-imports the changeset
+        back into the agent overlay.
+        """
         if self.stable is None:
             raise RuntimeError("Stable workspace not initialized")
 
@@ -574,35 +512,38 @@ class CairnOrchestrator:
         if agent_fs is None:
             agent_fs = await self._get_agent_workspace(ctx)
 
-        tools = self.tools_factory(ctx.agent_id, agent_fs, self.stable)
-        limiter = ResourceLimiter(
-            timeout_seconds=self.executor_settings.max_execution_time,
-            max_memory_bytes=self.executor_settings.max_memory_bytes,
+        workdir = self.cairn_home / "workspaces" / ctx.agent_id
+        executor = self.executor_factory(
+            agent_id=ctx.agent_id,
+            workdir=workdir,
+            agent_fs=agent_fs,
+            stable=self.stable,
+            settings=self.executor_settings,
+            allow_root=self.cairn_home / "workspaces",
         )
-
-        async with limiter.limit():
-            await run_with_timeout(
-                script.run(inputs={"task_description": ctx.task}, externals=tools),
-                timeout_seconds=self.executor_settings.max_execution_time,
-            )
+        return await executor.run(code=generated, task=ctx.task)
 
     async def _submit_results(self, ctx: AgentContext) -> None:
-        """Load submission metadata and materialize preview workspace."""
+        """Persist the agent submission to the workspace KV store.
+
+        The submission payload itself is produced by the sandbox (written to
+        ``.cairn/submission.json``) and read back during execution; this step
+        only persists it to the canonical KV location consumed by lifecycle.
+        """
+        if ctx.submission is None:
+            return
+
         agent_fs = ctx.agent_fs
         if agent_fs is None:
             agent_fs = await self._get_agent_workspace(ctx)
 
-        submission_repo = agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
-        submission_record = await submission_repo.load(SUBMISSION_KEY)
-        ctx.submission = submission_record.submission if submission_record else None
-
-        preview_dir = self.cairn_home / "workspaces" / ctx.agent_id
-        await agent_fs.materialize.to_disk(
-            target_path=preview_dir,
-            base=self.stable,
-            clean=True,
-            allow_root=self.cairn_home / "workspaces",
+        submission_record = SubmissionRecord(
+            agent_id=ctx.agent_id,
+            submission=ctx.submission,
+            updated_at=time.time(),
         )
+        submission_repo = agent_fs.kv.repository(prefix="", model_type=SubmissionRecord)
+        await submission_repo.save(SUBMISSION_KEY, submission_record)
 
     async def _handle_agent_error(self, ctx: AgentContext | None, exc: Exception) -> None:
         """Record agent failure details and persist lifecycle state."""
@@ -612,6 +553,11 @@ class CairnOrchestrator:
         ctx.error = str(exc)
         ctx.transition(AgentState.ERRORED)
         await self._save_lifecycle_record(ctx)
+
+        # Remove the sandbox workdir so failed runs leave no review surface.
+        workdir = self.cairn_home / "workspaces" / ctx.agent_id
+        if workdir.exists():
+            shutil.rmtree(workdir, ignore_errors=True)
 
     async def persist_state(self) -> None:
         state_dir = self.state_file.parent
@@ -706,10 +652,3 @@ class CairnOrchestrator:
         if ctx is None:
             raise KeyError(f"Unknown agent_id: {agent_id}")
         return ctx
-
-    @staticmethod
-    def _format_grail_errors(check_result: GrailCheckResult) -> str:
-        errors = getattr(check_result, "errors", None)
-        if errors:
-            return "Grail validation failed: " + "; ".join(str(error) for error in errors)
-        return "Grail validation failed"

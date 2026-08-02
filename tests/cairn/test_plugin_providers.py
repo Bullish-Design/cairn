@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -24,21 +24,22 @@ async def test_llm_provider_generates_prompt() -> None:
     provider = LLMCodeProvider()
     code = await provider.get_code("Add docstrings", {})
 
-    assert 'Input("task_description")' in code
-    assert "@external" in code
-    assert "submit_result" in code
+    assert "from grail" not in code
+    assert "@external" not in code
+    assert "submit_result(" in code
+    assert "Task: Add docstrings" in code
     assert await provider.validate_code(code) == (True, None)
 
 
 @pytest.mark.asyncio
 async def test_git_provider_reads_cached_script(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     repo_dir = tmp_path / "repo"
-    script_path = repo_dir / "tasks" / "cleanup.pym"
+    script_path = repo_dir / "tasks" / "cleanup.py"
     script_path.parent.mkdir(parents=True, exist_ok=True)
     script_path.write_text("x = 1", encoding="utf-8")
 
     def fake_parse(_: str) -> GitReference:
-        return GitReference(repo_url="https://example.com/repo", file_path="tasks/cleanup.pym", ref=None)
+        return GitReference(repo_url="https://example.com/repo", file_path="tasks/cleanup.py", ref=None)
 
     def fake_cache(_: GitReference, __: Path) -> Path:
         return repo_dir
@@ -47,7 +48,7 @@ async def test_git_provider_reads_cached_script(monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr("cairn_git.provider.ensure_repo_cache", fake_cache)
 
     provider = GitCodeProvider(cache_dir=tmp_path / "cache")
-    code = await provider.get_code("git://example.com/repo#tasks/cleanup.pym", {})
+    code = await provider.get_code("git://example.com/repo#tasks/cleanup.py", {})
 
     assert code == "x = 1"
 
@@ -67,7 +68,7 @@ async def test_registry_provider_fetches_code(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr("cairn_registry.provider.RegistryClient", StubClient)
 
     provider = RegistryCodeProvider(base_url="https://registry.example.com")
-    code = await provider.get_code("scripts/format.pym", {})
+    code = await provider.get_code("scripts/format.py", {})
 
     assert code == "registry code"
-    assert calls == [("https://registry.example.com", "scripts/format.pym")]
+    assert calls == [("https://registry.example.com", "scripts/format.py")]

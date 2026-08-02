@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable, Protocol, cast, runtime_checkable
-import inspect
+from typing import Any, Protocol, cast, runtime_checkable
 
-from cairn.core.exceptions import CodeProviderError, ProviderError, RecoverableError
+from cairn.core.exceptions import ProviderError, RecoverableError
 from cairn.utils.retry_utils import with_retry
 
 PROVIDER_RETRY_EXCEPTIONS: tuple[type[Exception], ...] = (
@@ -31,7 +32,7 @@ class CodeProvider(Protocol):
 
 
 class FileCodeProvider:
-    """Load .pym files from disk."""
+    """Load Python script files from disk."""
 
     def __init__(self, base_path: Path | str | None = None) -> None:
         self.base_path = Path(base_path).expanduser().resolve() if base_path else None
@@ -68,10 +69,7 @@ class FileCodeProvider:
 
         path = Path(reference)
         if path.suffix == "":
-            path = path.with_suffix(".pym")
-
-        if path.suffix != ".pym":
-            raise ProviderError("Code reference must point to a .pym file")
+            path = path.with_suffix(".py")
 
         if not path.is_absolute():
             base_path = self.base_path or Path.cwd()

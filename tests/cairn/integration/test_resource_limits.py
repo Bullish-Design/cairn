@@ -1,34 +1,50 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
 
 import pytest
+from fsdantic import Fsdantic
 
-from cairn.runtime.agent import AgentState
 from cairn.core.exceptions import ResourceLimitError
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.providers.providers import InlineCodeProvider
-from cairn.runtime.resource_limits import ResourceLimiter
+from cairn.runtime.agent import AgentState
+from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings
 
-
-class CheckResult:
-    def __init__(self, valid: bool) -> None:
-        self.valid = valid
-        self.errors: list[str] = []
+BWRAP = os.environ.get("CAIRN_TEST_BWRAP") or os.environ.get("CAIRN_EXECUTOR_BWRAP_PATH") or shutil.which("bwrap")
 
 
-class SlowScript:
-    def check(self) -> CheckResult:
-        return CheckResult(True)
+def _sandbox_python() -> str | None:
+    """Resolve a Nix-store python for real-sandbox tests (NixOS-only runtime)."""
+    configured = os.environ.get("CAIRN_TEST_PYTHON") or os.environ.get("CAIRN_EXECUTOR_PYTHON_PATH")
+    if configured:
+        return str(Path(configured).resolve())
+    resolved = Path(sys.executable).resolve()
+    if "/nix/store" in resolved.parts:
+        return str(resolved)
+    return None
 
-    async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
-        _ = inputs
-        _ = externals
-        await asyncio.sleep(0.05)
+
+SANDBOX_PYTHON = _sandbox_python()
+
+
+class TimedOutExecutor:
+    def __init__(self, **kwargs: object) -> None:
+        _ = kwargs
+
+    async def run(self, *, code: str, task: str) -> object:
+        from cairn.core.exceptions import TimeoutError as CairnTimeoutError
+
+        _ = code
+        _ = task
+        raise CairnTimeoutError("Operation exceeded timeout of 0.01s", error_code="EXECUTION_TIMEOUT")
 
 
 async def _wait_for_state(
@@ -77,21 +93,17 @@ async def test_queue_size_limit_rejects_overflow(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_execution_timeout_marks_agent_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+async def test_execution_timeout_marks_agent_errored(tmp_path: Path) -> None:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "home",
         config=OrchestratorSettings(max_concurrent_agents=1),
         executor_settings=ExecutorSettings(max_execution_time=0.01),
         code_provider=InlineCodeProvider(),
+        executor_factory=lambda **kwargs: TimedOutExecutor(**kwargs),
     )
     orch.project_root.mkdir(parents=True, exist_ok=True)
     await orch.initialize()
-
-    monkeypatch.setattr(
-        "cairn.orchestrator.orchestrator._load_grail_script",
-        lambda _: SlowScript(),
-    )
 
     try:
         agent_id = await orch.spawn_agent("sleep")
@@ -103,56 +115,32 @@ async def test_execution_timeout_marks_agent_errored(monkeypatch: pytest.MonkeyP
         await orch.shutdown()
 
 
+@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="bwrap or a Nix-store python not available")
 @pytest.mark.asyncio
 @pytest.mark.integration
-async def test_memory_limit_marks_agent_errored(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    values = [10_000_000, 10_000_000, 10_000_000, 13_000_000]
+async def test_memory_limit_kills_oversized_task(tmp_path: Path) -> None:
+    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
 
-    def fake_rss() -> int:
-        return values.pop(0) if values else 5000
-
-    from cairn.runtime import resource_limits
-
-    class FastLimiter(ResourceLimiter):
-        def __init__(self, *, timeout_seconds: float, max_memory_bytes: int) -> None:
-            super().__init__(
-                timeout_seconds=timeout_seconds,
-                max_memory_bytes=max_memory_bytes,
-                poll_interval_seconds=0.01,
-            )
-
-    monkeypatch.setattr(resource_limits, "_get_rss_bytes", fake_rss)
-    monkeypatch.setattr("cairn.orchestrator.orchestrator.ResourceLimiter", FastLimiter)
-
-    orch = CairnOrchestrator(
-        project_root=tmp_path / "project",
-        cairn_home=tmp_path / "home",
-        config=OrchestratorSettings(max_concurrent_agents=1),
-        executor_settings=ExecutorSettings(max_execution_time=1.0, max_memory_bytes=1_048_576),
-        code_provider=InlineCodeProvider(),
+    settings = ExecutorSettings(
+        bwrap_path=BWRAP,
+        python_path=SANDBOX_PYTHON,
+        max_execution_time=30.0,
+        max_memory_bytes=64 * 1024 * 1024,
     )
-    orch.project_root.mkdir(parents=True, exist_ok=True)
-    await orch.initialize()
-
-    class NoOpScript:
-        def check(self) -> CheckResult:
-            return CheckResult(True)
-
-        async def run(self, *, inputs: dict, externals: dict[str, object]) -> None:
-            _ = inputs
-            _ = externals
-            await asyncio.sleep(0.05)
-
-    monkeypatch.setattr(
-        "cairn.orchestrator.orchestrator._load_grail_script",
-        lambda _: NoOpScript(),
+    executor = BwrapExecutor(
+        agent_id="agent-memory",
+        workdir=tmp_path / "work",
+        agent_fs=agent,
+        stable=stable,
+        settings=settings,
     )
 
+    # A 300 MB allocation far exceeds the 64 MB RLIMIT_DATA budget.
+    code = "data = [0] * (300 * 1024 * 1024 // 8)\nsubmit_result(summary='done', changed_files=[])\n"
     try:
-        agent_id = await orch.spawn_agent("memory")
-        await _wait_for_state(orch, agent_id, AgentState.ERRORED)
-        ctx = orch.active_agents.get(agent_id)
-        assert ctx is not None
-        assert "memory" in (ctx.error or "").lower()
+        with pytest.raises(SandboxExecutionError):
+            await executor.run(code=code, task="memory")
     finally:
-        await orch.shutdown()
+        await agent.close()
+        await stable.close()

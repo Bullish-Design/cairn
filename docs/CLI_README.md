@@ -183,7 +183,7 @@ cairn-cli agent spawn "<reference>" [--provider PROVIDER]
 Examples:
 ```bash
 # With file provider (default)
-cairn-cli agent spawn "scripts/add_docstrings.pym"
+cairn-cli agent spawn "scripts/add_docstrings.py"
 
 # With LLM provider (requires cairn-llm plugin)
 cairn-cli agent spawn "Add docstrings to all public functions" --provider llm
@@ -198,14 +198,14 @@ cairn-cli agent queue "<reference>" [--provider PROVIDER]
 Examples:
 ```bash
 # With file provider (default)
-cairn-cli agent queue "scripts/refactor_tests.pym"
+cairn-cli agent queue "scripts/refactor_tests.py"
 
 # With LLM provider (requires cairn-llm plugin)
 cairn-cli agent queue "Refactor test suite" --provider llm
 ```
 
 **Note:** The `reference` argument is interpreted by the code provider:
-- `FileCodeProvider` (default): path to a `.pym` file
+- `FileCodeProvider` (default): path to a Python script file
 - `LLMCodeProvider` (--provider llm): natural language task description
 - `GitCodeProvider`: git URL with path
 - `RegistryCodeProvider`: registry URL

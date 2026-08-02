@@ -11,7 +11,7 @@ from cairn_git.cache import ensure_repo_cache, parse_git_reference
 
 
 class GitCodeProvider(CodeProvider):
-    """Load `.pym` scripts from git references."""
+    """Load Python scripts from git references."""
 
     def __init__(self, cache_dir: Path | None = None) -> None:
         self.cache_dir = cache_dir or Path.home() / ".cache" / "cairn" / "git"

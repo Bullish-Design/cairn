@@ -1,10 +1,7 @@
 """Tests for type definitions and type safety."""
 
-from typing import get_type_hints
-
 import pytest
 
-from cairn.runtime.external_functions import CairnExternalFunctions
 from cairn.core.types import Result, SearchContentMatchData, SubmissionData
 
 
@@ -58,9 +55,3 @@ def test_result_unwrap_or() -> None:
 
     result_ok = Result.ok(42)
     assert result_ok.unwrap_or(999) == 42
-
-
-def test_external_function_return_types() -> None:
-    """Test external functions have correct return type hints."""
-    hints = get_type_hints(CairnExternalFunctions.search_content)
-    assert "return" in hints

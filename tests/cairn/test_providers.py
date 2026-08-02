@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-import cairn.providers.providers as providers
 from cairn.core.exceptions import ProviderError
+from cairn.providers import providers
 from cairn.providers.providers import FileCodeProvider, InlineCodeProvider, resolve_code_provider
 
 
@@ -19,8 +19,8 @@ async def test_inline_provider_returns_reference() -> None:
 
 
 @pytest.mark.asyncio
-async def test_file_provider_reads_pym(tmp_path: Path) -> None:
-    code_path = tmp_path / "task.pym"
+async def test_file_provider_reads_py(tmp_path: Path) -> None:
+    code_path = tmp_path / "task.py"
     code_path.write_text("x = 1", encoding="utf-8")
 
     provider = FileCodeProvider(base_path=tmp_path)
@@ -82,7 +82,7 @@ def test_resolve_provider_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_file_provider_retries_transient_read_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    code_path = tmp_path / "task.pym"
+    code_path = tmp_path / "task.py"
     code_path.write_text("x = 1", encoding="utf-8")
 
     calls = {"count": 0}
@@ -107,7 +107,7 @@ async def test_file_provider_retries_transient_read_failures(tmp_path: Path, mon
 async def test_file_provider_fails_fast_for_non_retryable_read_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    code_path = tmp_path / "task.pym"
+    code_path = tmp_path / "task.py"
     code_path.write_text("x = 1", encoding="utf-8")
 
     calls = {"count": 0}
@@ -134,7 +134,7 @@ async def test_file_provider_fails_fast_for_non_retryable_read_errors(
 async def test_file_provider_retry_exhaustion_raises_last_connection_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    code_path = tmp_path / "task.pym"
+    code_path = tmp_path / "task.py"
     code_path.write_text("x = 1", encoding="utf-8")
 
     calls = {"count": 0}

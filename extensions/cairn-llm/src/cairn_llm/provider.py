@@ -10,7 +10,7 @@ from cairn_llm.prompts import DEFAULT_PROMPT
 
 
 class LLMCodeProvider(CodeProvider):
-    """Generate Grail `.pym` code using an external LLM service."""
+    """Generate sandbox-ready Python code using an external LLM service."""
 
     def __init__(self, prompt_template: str | None = None) -> None:
         self.prompt_template = prompt_template or DEFAULT_PROMPT
@@ -24,8 +24,6 @@ class LLMCodeProvider(CodeProvider):
     async def validate_code(self, code: str) -> tuple[bool, str | None]:
         if not code.strip():
             return False, "Generated code is empty"
-        if "Input(" not in code:
-            return False, "Generated code must include at least one Input()"
-        if "@external" not in code:
-            return False, "Generated code must define at least one external tool"
+        if "submit_result(" not in code:
+            return False, "Generated code must call submit_result(...) to record its submission"
         return True, None
