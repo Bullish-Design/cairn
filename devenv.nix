@@ -67,8 +67,17 @@ in
 
   # https://devenv.sh/tests/
   enterTest = ''
-    echo "Running tests"
-    git --version | grep --color=auto "${pkgs.git.version}"
+    cd "$DEVENV_ROOT"
+    # The test runner does not put uv's .venv/bin on PATH.
+    export PATH="$DEVENV_ROOT/.venv/bin:$PATH"
+    # Fail loudly if the sandbox runtime is not declared, instead of letting
+    # the real-sandbox integration tests silently skip.
+    test -n "$CAIRN_EXECUTOR_BWRAP_PATH" || { echo "CAIRN_EXECUTOR_BWRAP_PATH not set"; exit 1; }
+    test -n "$CAIRN_EXECUTOR_PYTHON_PATH" || { echo "CAIRN_EXECUTOR_PYTHON_PATH not set"; exit 1; }
+    echo "==> Type checking (ty)"
+    ty check
+    echo "==> Tests (pytest, incl. real-sandbox via CAIRN_EXECUTOR_*)"
+    pytest -q
   '';
 
   # https://devenv.sh/pre-commit-hooks/
