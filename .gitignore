@@ -224,3 +224,6 @@ __marimo__/
 
 # Runtime artifacts
 /.grail/
+
+# Scratch notes (never commit)
+/.scratch/
