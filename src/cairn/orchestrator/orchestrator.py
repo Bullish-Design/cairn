@@ -407,6 +407,7 @@ class CairnOrchestrator:
                         state=ctx.state,
                         created_at=ctx.created_at,
                         state_changed_at=ctx.state_changed_at,
+                        updated_at=time.time(),
                         db_path=str(bin_db),
                         submission=ctx.submission,
                         error=ctx.error,
@@ -600,7 +601,8 @@ class CairnOrchestrator:
         record.error = ctx.error
 
     async def _save_lifecycle_record(self, ctx: AgentContext) -> None:
-        if self.lifecycle is None:
+        lifecycle = self.lifecycle
+        if lifecycle is None:
             return
 
         db_path = ctx.agent_db_path
@@ -609,10 +611,10 @@ class CairnOrchestrator:
             if bin_path.exists():
                 db_path = bin_path
 
-        existing = await self.lifecycle.load(ctx.agent_id)
+        existing = await lifecycle.load(ctx.agent_id)
         if existing:
             try:
-                await self.lifecycle.update_atomic(
+                await lifecycle.update_atomic(
                     ctx.agent_id,
                     lambda record: self._apply_lifecycle_update(record, ctx, db_path),
                 )
@@ -630,6 +632,7 @@ class CairnOrchestrator:
             state=ctx.state,
             created_at=ctx.created_at,
             state_changed_at=ctx.state_changed_at,
+            updated_at=time.time(),
             db_path=str(db_path),
             submission=ctx.submission,
             error=ctx.error,
@@ -643,7 +646,7 @@ class CairnOrchestrator:
             retry_exceptions=(RecoverableError,),
         )
         async def _persist_record() -> None:
-            await self.lifecycle.save(record)
+            await lifecycle.save(record)
 
         await _persist_record()
 

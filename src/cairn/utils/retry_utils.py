@@ -55,7 +55,7 @@ def with_retry(
             async def error_handler(error: Exception, attempt: int) -> None:
                 retry_logger.warning(
                     "Retryable operation '%s' failed on attempt %d/%d",
-                    func.__name__,
+                    getattr(func, "__name__", type(func).__name__),
                     attempt + 1,
                     max_attempts,
                     exc_info=error,

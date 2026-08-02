@@ -342,7 +342,8 @@ def files_read(
                 console.print(f"[dim]Binary content ({len(content)} bytes)[/dim]")
                 console.print(content[:200])
             else:
-                console.print(Panel(content, title=f"{workspace}:{path}"))
+                text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+                console.print(Panel(text, title=f"{workspace}:{path}"))
 
         except Exception as e:
             console.print(f"[red]Error reading file: {e}[/red]")

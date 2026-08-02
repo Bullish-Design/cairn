@@ -651,7 +651,7 @@ pytest tests/unit/test_queue.py::test_priority
 pytest --cov=cairn --cov-report=html
 
 # Type checking
-mypy cairn/
+ty check
 ```
 
 ### Debugging

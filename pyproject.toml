@@ -28,6 +28,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "hypothesis>=6.0.0",
     "ruff>=0.1.0",
+    "ty>=0.0.65",
 ]
 
 [tool.ruff]
@@ -74,10 +75,9 @@ fsdantic = { git = "https://github.com/Bullish-Design/fsdantic.git", tag = "v0.3
 [tool.uv]
 prerelease = "allow"
 
-[tool.mypy]
-python_version = "3.13"
-strict = true
-files = ["src/cairn"]
+[tool.ty]
+environment.python-version = "3.13"
+src.include = ["src/cairn"]
 
 
 [tool.hatch.build.targets.wheel]
