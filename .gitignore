@@ -10,7 +10,6 @@ __pycache__/
 #.tmuxp.yaml
 .python-version
 devenv.lock
-uv.lock
 .devenv.flake.nix
 
 
@@ -111,7 +110,8 @@ ipython_config.py
 #   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
 #   This is especially recommended for binary packages to ensure reproducibility, and is more
 #   commonly ignored for libraries.
-#uv.lock
+# NOTE: uv.lock is TRACKED in this repository for reproducible installs (binary runtime deps:
+#   pyturso/libSQL wheels). See the UV block above.
 
 # poetry
 #   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
