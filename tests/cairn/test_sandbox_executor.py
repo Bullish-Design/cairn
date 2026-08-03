@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from fsdantic import Fsdantic
+from fsdantic import Fsdantic, MergeStrategy
 
 from cairn.core.exceptions import TimeoutError as CairnTimeoutError
 from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError, SandboxResult
@@ -290,14 +290,31 @@ async def test_real_sandbox_deletions_tombstoned_in_overlay(tmp_path: Path) -> N
         settings=settings,
     )
 
-    code = "delete_file('overlay.txt')\nsubmit_result(summary='deleted', changed_files=[])\n"
+    # Delete BOTH an overlay-owned file and a stable-only file: the sandbox
+    # sees them both on the materialized disk, and the re-import records a
+    # tombstone for each (fsdantic >= 0.7.0), so stable-only deletions survive
+    # into the accept merge.
+    code = (
+        "delete_file('overlay.txt')\n"
+        "delete_file('keep.txt')\n"
+        "submit_result(summary='deleted', changed_files=[])\n"
+    )
     try:
         result = await executor.run(code=code, task="delete")
-        assert result.changes["deleted"] == ["overlay.txt"]
+        assert sorted(result.changes["deleted"]) == ["keep.txt", "overlay.txt"]
         assert await agent.files.exists("overlay.txt") is False
-        # Files that exist only in stable are untouched (the overlay has no
-        # tombstone mechanism in the current fsdantic API).
-        assert await stable.files.read("keep.txt") == "keep"
+        assert await agent.files.exists("keep.txt") is False
+        # Both deletions are recorded as tombstones (normalized with a
+        # leading slash) in the agent overlay.
+        assert sorted(await agent.overlay.list_tombstones()) == ["/keep.txt", "/overlay.txt"]
+
+        # The accept merge replays the tombstones against stable, so the
+        # stable-only file is deleted there too (fsdantic >= 0.7.0).
+        merge_result = await stable.overlay.merge(agent, strategy=MergeStrategy.OVERWRITE)
+        assert merge_result.tombstones_applied == 2
+        assert merge_result.errors == []
+        assert await stable.files.exists("keep.txt") is False
+        assert await stable.files.exists("overlay.txt") is False
     finally:
         await agent.close()
         await stable.close()

@@ -371,6 +371,11 @@ class BwrapExecutor:
 
         Writes are sequential (with one retry on transient lock errors) to
         avoid SQLite "database is locked" contention on the single connection.
+        Deletions are recorded as overlay tombstones (``overlay.tombstone``,
+        fsdantic >= 0.7.0): the path is removed from the overlay if present and
+        a ``fsdantic:tombstone:<path>`` KV marker is stored, so files that
+        exist only in stable can be deleted too — the accept merge replays the
+        marker against stable (``MergeResult.tombstones_applied``).
         """
         for rel, content in written:
             try:
@@ -385,13 +390,14 @@ class BwrapExecutor:
                         extra={"agent_id": self.agent_id, "path": rel, "error": str(exc), "retry_error": str(retry_exc)},
                     )
         for rel in deleted:
-            # Only overlay-owned files can be removed (the current fsdantic
-            # overlay API has no tombstone mechanism for stable-only files).
+            # Tombstone both overlay-owned and stable-only deletions: the
+            # marker makes the delete survive into the accept merge (stable
+            # files can be removed even though the sandbox never had them).
             try:
-                await self.agent_fs.files.remove(rel)
+                await self.agent_fs.overlay.tombstone(rel)
             except Exception as exc:  # noqa: BLE001 — best-effort tombstone
                 logger.warning(
-                    "Failed to record sandbox deletion (stable-only files cannot be tombstoned)",
+                    "Failed to record sandbox deletion",
                     extra={"agent_id": self.agent_id, "path": rel, "error": str(exc)},
                 )
 

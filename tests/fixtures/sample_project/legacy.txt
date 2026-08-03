@@ -1,0 +1,3 @@
+This legacy file is present in the stable workspace only.  Agents that remove
+it from the materialized sandbox re-import a tombstone so the deletion
+survives the accept merge (fsdantic >= 0.7.0 overlay.tombstone).

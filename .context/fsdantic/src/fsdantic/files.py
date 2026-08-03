@@ -1,21 +1,20 @@
 """Primary public API for file operations and traversal."""
 
 import asyncio
-import logging
 import codecs
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
-from typing import Any, Literal, Optional, overload
+from typing import Any, Literal, overload
 
 from agentfs_sdk import AgentFS, ErrnoException
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from ._internal.errors import translate_agentfs_error
-from .exceptions import FileNotFoundError
 from ._internal.paths import join_normalized_path, normalize_glob_pattern, normalize_path
+from .exceptions import FileNotFoundError, WorkspaceError
 from .models import BatchItemResult, BatchResult, FileEntry, FileStats
-
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +31,23 @@ class FileQuery(BaseModel):
 
     path_pattern: str = Field(
         default="*",
-        description="Glob pattern for matching file paths (e.g., '*.py', '/data/**/*.json')",
+        description=(
+            "Glob pattern for matching file paths (e.g., '*.py', '/data/**/*.json'). "
+            "Semantics: '*' matches leading dots (this is a glob, not a shell glob); "
+            "'a/**' matches descendants of /a but not /a itself; an empty pattern "
+            "is equivalent to '*' and matches everything."
+        ),
     )
     recursive: bool = Field(default=True, description="Whether to search subdirectories")
     include_content: bool = Field(default=False, description="Whether to load file contents")
     include_stats: bool = Field(default=True, description="Whether to include file statistics")
-    regex_pattern: Optional[str] = Field(None, description="Optional regex path filter")
-    max_size: Optional[int] = Field(None, ge=0, description="Maximum file size in bytes")
-    min_size: Optional[int] = Field(None, ge=0, description="Minimum file size in bytes")
+    regex_pattern: str | None = Field(None, description="Optional regex path filter")
+    max_size: int | None = Field(None, ge=0, description="Maximum file size in bytes")
+    min_size: int | None = Field(None, ge=0, description="Minimum file size in bytes")
 
     _normalized_path_pattern: str = PrivateAttr(default="*")
     _path_matcher: re.Pattern[str] = PrivateAttr(default_factory=lambda: re.compile(".*"))
-    _regex_matcher: Optional[re.Pattern[str]] = PrivateAttr(default=None)
+    _regex_matcher: re.Pattern[str] | None = PrivateAttr(default=None)
 
     @staticmethod
     def _normalize_path_pattern(pattern: str) -> str:
@@ -84,7 +88,10 @@ class FileQuery(BaseModel):
 
         self._normalized_path_pattern = self._normalize_path_pattern(self.path_pattern)
         self._path_matcher = self._compile_glob_pattern(self._normalized_path_pattern)
-        self._regex_matcher = re.compile(self.regex_pattern) if self.regex_pattern else None
+        try:
+            self._regex_matcher = re.compile(self.regex_pattern) if self.regex_pattern else None
+        except re.error as exc:
+            raise ValueError(f"Invalid regex_pattern: {exc}") from exc
         return self
 
     def matches_path(self, path: str) -> bool:
@@ -114,9 +121,52 @@ class FileManager:
     _JSON_INDENT = 2
     _JSON_SEPARATORS = (",", ": ")
 
-    def __init__(self, agent_fs: AgentFS, base_fs: Optional[AgentFS] = None):
+    def __init__(
+        self,
+        agent_fs: AgentFS,
+        base_fs: AgentFS | None = None,
+        readonly: bool = False,
+        max_content_bytes: int | None = None,
+    ):
+        """Initialize the file manager.
+
+        Args:
+            agent_fs: Backing AgentFS instance (overlay).
+            base_fs: Optional stable/base AgentFS used as a read fallthrough.
+            readonly: When True, write methods (``write``/``write_many``/
+                ``remove``) raise ``WorkspaceError`` with
+                ``code="WORKSPACE_READONLY"`` before touching storage.
+            max_content_bytes: Optional cap on write payload sizes.  ``write``
+                payloads larger than this raise ``WorkspaceError`` with
+                ``code="CONTENT_TOO_LARGE"`` before touching storage.
+                ``None`` (default) is unbounded.
+        """
         self.agent_fs = agent_fs
         self.base_fs = base_fs
+        self.readonly = readonly
+        self.max_content_bytes = max_content_bytes
+
+    def _ensure_writable(self, context: str) -> None:
+        """Raise ``WorkspaceError(WORKSPACE_READONLY)`` on read-only managers.
+
+        The connection guard is the primary enforcement; this check provides
+        early, clear errors at the API boundary before any SDK work begins.
+        """
+        if self.readonly:
+            raise WorkspaceError(
+                f"{context}: workspace is read-only",
+                code="WORKSPACE_READONLY",
+            )
+
+    def _ensure_within_size_cap(self, context: str, payload_size: int) -> None:
+        """Raise ``WorkspaceError(CONTENT_TOO_LARGE)`` when ``payload_size``
+        exceeds the configured ``max_content_bytes`` cap."""
+        if self.max_content_bytes is not None and payload_size > self.max_content_bytes:
+            raise WorkspaceError(
+                f"{context}: content of {payload_size} bytes exceeds the configured "
+                f"max_content_bytes={self.max_content_bytes}",
+                code="CONTENT_TOO_LARGE",
+            )
 
     @overload
     async def read(
@@ -152,13 +202,14 @@ class FileManager:
         * ``mode='text'`` returns ``str`` and requires a valid text ``encoding``.
         * ``mode='binary'`` returns ``bytes`` and requires ``encoding=None``.
 
-        Use :meth:`read_stream` when handling large binary files to avoid keeping
-        the full content in memory at once. Use ``read()`` for convenience when
-        full in-memory content is acceptable.
+        Use :meth:`read_stream` when callers prefer chunked yields for
+        incremental processing.  Note: until the SDK exposes a true streaming
+        read, ``read_stream`` buffers the full payload in memory and slices it.
+        Use ``read()`` for convenience when full in-memory content is acceptable.
         """
         path = normalize_path(path)
         context = f"FileManager.read(path={path!r})"
-        resolved_encoding: Optional[str]
+        resolved_encoding: str | None
 
         if mode == "text":
             if encoding is _UNSET:
@@ -245,11 +296,19 @@ class FileManager:
         ``content`` may be ``str``, ``bytes``, ``dict``, or ``list``.
         ``mode`` may be specified explicitly (``text``/``binary``/``json``) or inferred
         from content type.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace, or
+                ``code="CONTENT_TOO_LARGE"`` when the payload exceeds the
+                configured ``max_content_bytes`` cap.
         """
         path = normalize_path(path)
-        payload = self._prepare_write_payload(content, mode=mode, encoding=encoding)
-
         context = f"FileManager.write(path={path!r})"
+        self._ensure_writable(context)
+        payload = self._prepare_write_payload(content, mode=mode, encoding=encoding)
+        self._ensure_within_size_cap(context, len(payload))
+
         try:
             await self.agent_fs.fs.write_file(path, payload)
         except ErrnoException as e:
@@ -261,23 +320,32 @@ class FileManager:
         *,
         mode: Literal["text", "binary"] = "text",
         encoding: str | None | _UnsetEncoding = _UNSET,
+        concurrency_limit: int = 10,
     ) -> BatchResult:
         """Read multiple files with deterministic ordering and per-item outcomes.
 
         This API always returns a ``BatchResult`` containing one ``BatchItemResult``
         per input path in the same order as ``paths``. Partial failures do not abort
         the batch; failed items include ``error`` and can be retried individually.
+
+        ``concurrency_limit`` bounds fan-out using ``asyncio.Semaphore`` (matching
+        the write paths); results preserve the original ``paths`` ordering.
         """
+        if concurrency_limit <= 0:
+            raise ValueError("concurrency_limit must be greater than 0")
         if not paths:
             return BatchResult()
 
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
         async def _read_one(index: int, raw_path: str) -> BatchItemResult:
             path = normalize_path(raw_path)
-            try:
-                value = await self.read(path, mode=mode, encoding=encoding)
-                return BatchItemResult(index=index, key_or_path=path, ok=True, value=value)
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                return BatchItemResult(index=index, key_or_path=path, ok=False, error=str(exc))
+            async with semaphore:
+                try:
+                    value = await self.read(path, mode=mode, encoding=encoding)
+                    return BatchItemResult(index=index, key_or_path=path, ok=True, value=value)
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    return BatchItemResult(index=index, key_or_path=path, ok=False, error=str(exc))
 
         gathered = await asyncio.gather(
             *(_read_one(index, path) for index, path in enumerate(paths)),
@@ -319,6 +387,8 @@ class FileManager:
             raise ValueError("concurrency_limit must be greater than 0")
         if not items:
             return BatchResult()
+
+        self._ensure_writable("FileManager.write_many")
 
         semaphore = asyncio.Semaphore(concurrency_limit)
 
@@ -457,6 +527,13 @@ class FileManager:
     ) -> list[str]:
         """List directory entries at path in deterministic sorted order.
 
+        Reads from the overlay first; if the path is absent from the overlay
+        (``ENOENT``) and a ``base_fs`` is configured, falls back to listing
+        the base layer.  An empty overlay listing also falls through to base
+        (an empty overlay directory does not shadow base content — consistent
+        with ``read``, ``stat``, and ``exists`` union semantics).  When the
+        overlay has entries, only overlay entries are returned (overlay wins).
+
         Args:
             path: Directory path to list.
             output: Output path style for each entry:
@@ -469,10 +546,26 @@ class FileManager:
         if output not in {"name", "relative", "full"}:
             raise ValueError("output must be 'name', 'relative', or 'full'")
 
+        entries = None
         try:
             entries = await self.agent_fs.fs.readdir(path)
         except ErrnoException as e:
-            raise translate_agentfs_error(e, context) from e
+            if e.code != "ENOENT":
+                raise translate_agentfs_error(e, context) from e
+            if self.base_fs is None:
+                raise translate_agentfs_error(e, context) from e
+            try:
+                entries = await self.base_fs.fs.readdir(path)
+            except ErrnoException as base_error:
+                raise translate_agentfs_error(base_error, context) from base_error
+        else:
+            if not entries and self.base_fs is not None:
+                try:
+                    base_entries = await self.base_fs.fs.readdir(path)
+                except ErrnoException:
+                    base_entries = []
+                if base_entries:
+                    entries = base_entries
 
         sorted_entries = sorted(entries)
         if output == "name" or output == "relative":
@@ -488,9 +581,14 @@ class FileManager:
                 fails predictably (non-empty directories raise ``DirectoryNotEmptyError``;
                 empty directories are removed). If ``True``, directories are removed
                 recursively.
+
+        Raises:
+            WorkspaceError: with ``code="WORKSPACE_READONLY"`` when this
+                manager belongs to a read-only workspace.
         """
         path = normalize_path(path)
         context = f"FileManager.remove(path={path!r}, recursive={recursive!r})"
+        self._ensure_writable(context)
         try:
             stats = await self.agent_fs.fs.stat(path)
             if stats.is_directory():
@@ -504,8 +602,21 @@ class FileManager:
         except ErrnoException as e:
             raise translate_agentfs_error(e, context) from e
 
-    async def search(self, pattern: str, recursive: bool = True) -> list[str]:
-        """Search for files matching a glob pattern."""
+    async def search(
+        self,
+        pattern: str,
+        recursive: bool = True,
+        include_base: bool = False,
+    ) -> list[str]:
+        """Search for files matching a glob pattern.
+
+        Args:
+            pattern: Glob pattern (see :class:`FileQuery`).
+            recursive: Whether to search subdirectories.
+            include_base: When True and a ``base_fs`` is configured, also
+                include base-layer files whose paths are absent from the
+                overlay (overlay wins on collisions).
+        """
         from .view import ViewQuery
 
         entries = await self.query(
@@ -514,16 +625,58 @@ class FileManager:
                 recursive=recursive,
                 include_stats=False,
                 include_content=False,
-            )
+            ),
+            include_base=include_base,
         )
         return [entry.path for entry in entries]
 
-    async def query(self, query: FileQuery) -> list[FileEntry]:
-        """Run a query contract and return matching FileEntry records."""
+    async def query(self, query: FileQuery, *, include_base: bool = False) -> list[FileEntry]:
+        """Run a query contract and return matching FileEntry records.
+
+        Args:
+            query: The query contract to run.
+            include_base: When True and a ``base_fs`` is configured, also
+                query the base layer and return an overlay-wins union: base
+                entries whose paths are absent from the overlay results are
+                appended after the overlay entries.  Directory shadowing
+                follows :meth:`list_dir` (an empty overlay directory does
+                not shadow base content).  Default False preserves the
+                overlay-only behavior.
+        """
+        overlay_entries = await self._query_layer(
+            self.agent_fs,
+            query,
+            context_prefix="FileManager.query",
+        )
+        if not include_base or self.base_fs is None:
+            return overlay_entries
+
+        overlay_paths = {entry.path for entry in overlay_entries}
+        base_entries = await self._query_layer(
+            self.base_fs,
+            query,
+            context_prefix="FileManager.query(base)",
+            exclude_paths=overlay_paths,
+        )
+        return overlay_entries + base_entries
+
+    async def _query_layer(
+        self,
+        fs: AgentFS,
+        query: FileQuery,
+        *,
+        context_prefix: str,
+        exclude_paths: set[str] | None = None,
+    ) -> list[FileEntry]:
+        """Run ``query`` against a single filesystem layer (overlay or base)."""
         entries: list[FileEntry] = []
         include_stats = query.needs_file_stats()
 
-        async for item_path, stats in self.traverse_files("/", recursive=query.recursive, include_stats=include_stats):
+        async for item_path, stats in self._traverse_fs(
+            fs, "/", recursive=query.recursive, include_stats=include_stats
+        ):
+            if exclude_paths is not None and item_path in exclude_paths:
+                continue
             if not query.matches_path(item_path):
                 continue
             if not query.matches_regex(item_path):
@@ -534,21 +687,21 @@ class FileManager:
             content = None
             if query.include_content:
                 try:
-                    content = await self.agent_fs.fs.read_file(item_path)
+                    content = await fs.fs.read_file(item_path)
                 except UnicodeDecodeError:
                     try:
-                        content = await self.agent_fs.fs.read_file(item_path, encoding=None)
+                        content = await fs.fs.read_file(item_path, encoding=None)
                     except ErrnoException as e:
                         if e.code == "ENOENT":
                             logger.debug("Path disappeared before binary read: %s", item_path)
                             continue
-                        context = f"FileManager.query(path={item_path!r})"
+                        context = f"{context_prefix}(path={item_path!r})"
                         raise translate_agentfs_error(e, context) from e
                 except ErrnoException as e:
                     if e.code == "ENOENT":
                         logger.debug("Path disappeared before read: %s", item_path)
                         continue
-                    context = f"FileManager.query(path={item_path!r})"
+                    context = f"{context_prefix}(path={item_path!r})"
                     raise translate_agentfs_error(e, context) from e
 
             entries.append(
@@ -575,7 +728,7 @@ class FileManager:
             count += 1
         return count
 
-    async def tree(self, path: str = "/", max_depth: Optional[int] = None) -> dict[str, Any]:
+    async def tree(self, path: str = "/", max_depth: int | None = None) -> dict[str, Any]:
         """Return a stable tree schema rooted at path.
 
         Returns a node dictionary with the shape:
@@ -639,14 +792,30 @@ class FileManager:
     async def traverse_files(
         self, root: str = "/", *, recursive: bool = True, include_stats: bool = False
     ) -> AsyncIterator[tuple[str, Any | None]]:
-        """Traverse filesystem and yield file paths with optional raw stats."""
+        """Traverse the overlay filesystem and yield file paths with optional
+        raw stats."""
+        async for item in self._traverse_fs(
+            self.agent_fs, root, recursive=recursive, include_stats=include_stats
+        ):
+            yield item
+
+    async def _traverse_fs(
+        self,
+        fs: AgentFS,
+        root: str = "/",
+        *,
+        recursive: bool = True,
+        include_stats: bool = False,
+    ) -> AsyncIterator[tuple[str, Any | None]]:
+        """Traverse a specific filesystem layer and yield file paths with
+        optional raw stats."""
         root = normalize_path(root)
         pending = [root]
 
         while pending:
             path = pending.pop()
             try:
-                items = await self.agent_fs.fs.readdir(path)
+                items = await fs.fs.readdir(path)
             except ErrnoException as error:
                 if error.code == "ENOENT":
                     continue
@@ -656,7 +825,7 @@ class FileManager:
             for item in items:
                 item_path = join_normalized_path(path, item)
                 try:
-                    stats = await self.agent_fs.fs.stat(item_path)
+                    stats = await fs.fs.stat(item_path)
                 except ErrnoException as error:
                     if error.code == "ENOENT":
                         continue

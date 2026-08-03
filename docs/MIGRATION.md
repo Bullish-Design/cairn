@@ -4,7 +4,12 @@ Cairn V2 shifts from AI-specific orchestration to a general-purpose sandboxed co
 
 ## 1. Update Dependencies
 
-- Require `fsdantic>=0.3.0`, `pydantic>=2.0.0`.
+- Require `fsdantic>=0.7.0` (overlay tombstones, read-only mode, busy
+  timeout / content-size caps), `pydantic>=2.0.0`.
+- `fsdantic>=0.6.0` consumes the Bullish-Design/agentfs SDK fork
+  (`v0.6.4-pyturso-0.7.2`, pyturso 0.7.2); cairn no longer declares
+  `agentfs-sdk` directly — it resolves through fsdantic's fork so the
+  lockfile carries pyturso 0.7.2.
 - Remove any LLM-specific dependencies from the core `cairn` package.
 - Grail/Monty dependencies (`grail`, `pydantic-monty`) are no longer required — execution uses stock CPython inside a bubblewrap sandbox.
 
@@ -35,7 +40,10 @@ orchestrator = CairnOrchestrator(code_provider=FileCodeProvider())
 ## 5. Sandbox API
 
 - Task scripts call the sandbox API directly (no declarations): `read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`, `search_content`, `submit_result`, `log`.
-- Scripts may also use `delete_file(path)` to remove overlay-owned files.
+- Scripts may also use `delete_file(path)`.  Deletions are re-imported as
+  overlay tombstones (`overlay.tombstone`, fsdantic >= 0.7.0), so files that
+  exist only in stable can be deleted too; the accept merge applies the
+  markers to stable (`MergeResult.tombstones_applied`).
 Scripts must call `submit_result(summary, changed_files)` to record a submission for review.
 
 ## 6. Review/Accept Flow

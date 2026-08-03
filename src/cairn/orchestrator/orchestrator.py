@@ -356,6 +356,17 @@ class CairnOrchestrator:
                 },
             )
 
+        tombstones_applied = getattr(merge_result, "tombstones_applied", 0)
+        if tombstones_applied:
+            logger.info(
+                "Accept merge applied tombstones",
+                extra={
+                    "agent_id": agent_id,
+                    "tombstones_applied": tombstones_applied,
+                    "files_merged": getattr(merge_result, "files_merged", 0),
+                },
+            )
+
         ctx.transition(AgentState.ACCEPTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)

@@ -205,9 +205,12 @@ variables (``ExecutorSettings`` uses the ``CAIRN_EXECUTOR_`` prefix):
 - `submit_result(summary, changed_files) -> bool`
 - `log(message) -> bool`
 
-Deletions re-import into the agent overlay for overlay-owned files; stable-only
-files cannot be tombstoned with the current fsdantic overlay API (the sandbox
-cannot delete files that exist only in stable).
+Deletions re-import into the agent overlay as **tombstones** (fsdantic >= 0.7.0
+``overlay.tombstone``): the path is removed from the overlay and a
+``fsdantic:tombstone:<path>`` KV marker is recorded, so stable-only files can
+be deleted too — the accept merge replays the markers against stable
+(``MergeResult.tombstones_applied``).  A file re-created in the overlay after
+deletion makes its marker inert (the file phase wins).
 
 ### Pre-flight validation
 

@@ -14,9 +14,13 @@ beyond vanilla SQLite:
 
 * **MVCC + BEGIN CONCURRENT** can be enabled via ``enable_mvcc=True``.  This
   uses libSQL's optimistic multi-version concurrency control to allow multiple
-  connections to write concurrently to the same database.  Non-conflicting
-  writes (different rows/pages) succeed; conflicting writes raise
-  ``DatabaseError`` at execute time, not commit time.
+  connections to write concurrently to the same database.  Caveat (verified on
+  pyturso 0.7.2): the driver does **not** reliably surface write-write
+  conflicts — each ``connect()`` opens an independent MVCC store, so
+  concurrent same-row writes are effectively last-write-wins with no error to
+  catch and retry on.  For atomic read-modify-write sequences use
+  ``Workspace.serialized()`` (a same-process per-workspace lock) or the
+  repository's SQL compare-and-set (``compare_and_set``, versioned ``save()``).
 
 * Each ``turso.aio.Connection`` serializes its own operations via a dedicated
   worker thread and ``SimpleQueue``.  This means that a single workspace
@@ -24,7 +28,8 @@ beyond vanilla SQLite:
   do **not** need ``asyncio.Lock`` for operations on a single workspace.
 
 For concurrent write access to the same database file, open multiple
-workspaces with ``enable_mvcc=True`` pointing to the same path.
+workspaces with ``enable_mvcc=True`` pointing to the same path, or serialize
+read-modify-write sequences with ``Workspace.serialized()``.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fsdantic import Fsdantic, Workspace
+from fsdantic.exceptions import WorkspaceError as FsdanticWorkspaceError
 
 from cairn.core.exceptions import WorkspaceError
 
@@ -45,18 +51,25 @@ logger = logging.getLogger(__name__)
 async def _open_workspace(
     path: Path | str,
     *,
-    readonly: bool,
+    readonly: bool = False,
     enable_wal: bool = True,
     enable_mvcc: bool = False,
+    busy_timeout_ms: int = 5000,
+    max_content_bytes: int | None = None,
 ) -> Workspace:
-    """Open a workspace via fsdantic with optional WAL and MVCC.
+    """Open a workspace via fsdantic with optional concurrency/read-only config.
 
-    All concurrency configuration is delegated to ``Fsdantic.open()``.
+    All configuration is delegated to ``Fsdantic.open()`` (fsdantic >= 0.5.0):
+    WAL/MVCC journal modes, read-only mode, write-lock busy timeout, and an
+    optional cap on write payload sizes.
     """
     return await Fsdantic.open(
         path=str(path),
         enable_wal=enable_wal,
         enable_mvcc=enable_mvcc,
+        readonly=readonly,
+        busy_timeout_ms=busy_timeout_ms,
+        max_content_bytes=max_content_bytes,
     )
 
 
@@ -66,6 +79,8 @@ async def open_workspace(
     readonly: bool = False,
     enable_wal: bool = True,
     enable_mvcc: bool = False,
+    busy_timeout_ms: int = 5000,
+    max_content_bytes: int | None = None,
 ) -> Workspace:
     """Open a Cairn workspace with Turso-optimized concurrency.
 
@@ -79,11 +94,23 @@ async def open_workspace(
     Args:
         path: Path to the workspace database file.
         readonly: If True, open in read-only mode (default: False).
+            Write operations raise ``WorkspaceError``
+            (``WORKSPACE_READONLY``); the database file must already exist
+            (``WORKSPACE_NOT_FOUND`` otherwise).  Reads never write: the
+            SDK's access-time maintenance write is neutralized.
         enable_wal: If True (default), enable WAL journal mode for
             concurrent read access alongside writes.
         enable_mvcc: If True, enable MVCC with ``BEGIN CONCURRENT``
             support for optimistic concurrent writes from multiple
             connections.  Requires WAL mode (enabled automatically).
+        busy_timeout_ms: Maximum milliseconds a write waits on a contended
+            write lock before failing with "database is locked" (default
+            5000; ``0`` disables the wait).
+        max_content_bytes: Optional cap on write payload sizes
+            (``files.write``/``write_many`` payloads and ``kv.set``/
+            ``set_many`` JSON payloads).  Oversized payloads raise
+            ``WorkspaceError`` (``CONTENT_TOO_LARGE``).  ``None`` (default)
+            is unbounded.
 
     Returns:
         An open Workspace instance.
@@ -96,8 +123,9 @@ async def open_workspace(
           thread.  No application-level locking needed.
         * WAL mode (default): unlimited concurrent readers, single writer.
         * MVCC mode: multiple connections can write concurrently.
-          Non-conflicting writes succeed; conflicting writes raise
-          ``DatabaseError`` at execute time.
+          Write-write conflicts are NOT reliably surfaced by the driver
+          (last-write-wins) — use ``Workspace.serialized()`` or the
+          repository CAS for atomic read-modify-write sequences.
 
     Example:
         workspace = await open_workspace("/path/to/workspace.db")
@@ -115,7 +143,26 @@ async def open_workspace(
             readonly=readonly,
             enable_wal=enable_wal,
             enable_mvcc=enable_mvcc,
+            busy_timeout_ms=busy_timeout_ms,
+            max_content_bytes=max_content_bytes,
         )
+    except FsdanticWorkspaceError as exc:
+        # Translate fsdantic workspace errors, preserving the meaningful
+        # codes (WORKSPACE_NOT_FOUND, WORKSPACE_READONLY, CONTENT_TOO_LARGE)
+        # instead of collapsing them into a generic open failure.
+        raise WorkspaceError(
+            str(exc),
+            error_code=getattr(exc, "code", None) or "WORKSPACE_ERROR",
+            context={
+                "path": str(path),
+                "readonly": readonly,
+                "enable_wal": enable_wal,
+                "enable_mvcc": enable_mvcc,
+                "busy_timeout_ms": busy_timeout_ms,
+                "max_content_bytes": max_content_bytes,
+                "fsdantic_code": getattr(exc, "code", None),
+            },
+        ) from exc
     except WorkspaceError:
         raise
     except Exception as exc:
@@ -127,6 +174,8 @@ async def open_workspace(
                 "readonly": readonly,
                 "enable_wal": enable_wal,
                 "enable_mvcc": enable_mvcc,
+                "busy_timeout_ms": busy_timeout_ms,
+                "max_content_bytes": max_content_bytes,
             },
         ) from exc
 
@@ -153,6 +202,8 @@ class WorkspaceManager:
         readonly: bool = False,
         enable_wal: bool = True,
         enable_mvcc: bool = False,
+        busy_timeout_ms: int = 5000,
+        max_content_bytes: int | None = None,
     ) -> Workspace:
         """Open a workspace, track it, and return it.
 
@@ -167,7 +218,15 @@ class WorkspaceManager:
                 readonly=readonly,
                 enable_wal=enable_wal,
                 enable_mvcc=enable_mvcc,
+                busy_timeout_ms=busy_timeout_ms,
+                max_content_bytes=max_content_bytes,
             )
+        except FsdanticWorkspaceError as exc:
+            raise WorkspaceError(
+                str(exc),
+                error_code=getattr(exc, "code", None) or "WORKSPACE_ERROR",
+                context={"path": str(path), "readonly": readonly, "fsdantic_code": getattr(exc, "code", None)},
+            ) from exc
         except WorkspaceError:
             raise
         except Exception as exc:  # pragma: no cover - defensive
@@ -188,6 +247,8 @@ class WorkspaceManager:
         readonly: bool = False,
         enable_wal: bool = True,
         enable_mvcc: bool = False,
+        busy_timeout_ms: int = 5000,
+        max_content_bytes: int | None = None,
     ) -> AsyncIterator[Workspace]:
         """Open a workspace with automatic cleanup on exit."""
         workspace = await self.create_workspace(
@@ -195,6 +256,8 @@ class WorkspaceManager:
             readonly=readonly,
             enable_wal=enable_wal,
             enable_mvcc=enable_mvcc,
+            busy_timeout_ms=busy_timeout_ms,
+            max_content_bytes=max_content_bytes,
         )
         try:
             yield workspace

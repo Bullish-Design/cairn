@@ -45,14 +45,23 @@ class FsdanticError(Exception):
         }
         if self.context:
             payload["context"] = _safe_context_value(self.context)
+        if self.cause is not None:
+            payload["cause"] = {
+                "type": self.cause.__class__.__name__,
+                "message": str(self.cause),
+            }
         return payload
 
     def __str__(self) -> str:
         message = str(self.args[0]) if self.args else self.__class__.__name__
-        if not self.context:
+        details = []
+        if self.context:
+            details.append(f"context={_safe_context_value(self.context)}")
+        if self.cause is not None:
+            details.append(f"cause={self.cause.__class__.__name__}: {self.cause}")
+        if not details:
             return message
-        safe_context = _safe_context_value(self.context)
-        return f"{message} | context={safe_context}"
+        return f"{message} | {'; '.join(details)}"
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.to_dict()!r})"
@@ -132,7 +141,13 @@ class PermissionError(FileSystemError):
 
 
 class InvalidPathError(FileSystemError):
-    """Raised when a provided filesystem path is invalid."""
+    """Raised when a provided filesystem path is invalid.
+
+    May also be raised for invalid-argument conditions (``EINVAL``), which
+    the AgentFS SDK reports for semantic errors (e.g. renaming a directory
+    into its own subtree) as well as malformed paths.  The translated error
+    ``context`` includes the syscall and agentfs code for disambiguation.
+    """
 
     default_code = "FS_INVALID_PATH"
 
@@ -164,8 +179,7 @@ class KVConflictError(KVStoreError):
         cause: Any | None = None,
     ) -> None:
         super().__init__(
-            "KV version conflict for key "
-            f"'{key}' (expected={expected_version}, actual={actual_version})",
+            f"KV version conflict for key '{key}' (expected={expected_version}, actual={actual_version})",
             context={
                 "key": key,
                 "expected_version": expected_version,
@@ -235,3 +249,21 @@ class ContentSearchError(FsdanticError):
     """Raised when content search operations fail."""
 
     default_code = "CONTENT_SEARCH_ERROR"
+
+
+class WorkspaceError(FsdanticError):
+    """Raised for workspace-level failures (e.g. read-only violations).
+
+    Error codes (passed via ``code=``):
+
+    - ``WORKSPACE_READONLY``: a write was attempted on a read-only workspace
+      (either through the manager APIs or the raw connection guard).
+    - ``WORKSPACE_NOT_FOUND``: a read-only open targeted a database file that
+      does not exist.
+    - ``CONTENT_TOO_LARGE``: a write payload exceeded the workspace's
+      configured ``max_content_bytes`` cap.
+
+    ``WORKSPACE_ERROR`` is the default code when none is supplied.
+    """
+
+    default_code = "WORKSPACE_ERROR"

@@ -68,10 +68,18 @@ async def test_workspace_open_failure_does_not_retry(monkeypatch: pytest.MonkeyP
     calls = {"count": 0}
 
     async def _fail_once(
-        path: Path | str, *, readonly: bool, enable_wal: bool = True, enable_mvcc: bool = False
+        path: Path | str,
+        *,
+        readonly: bool = False,
+        enable_wal: bool = True,
+        enable_mvcc: bool = False,
+        busy_timeout_ms: int = 5000,
+        max_content_bytes: int | None = None,
     ) -> object:
         _ = path
         _ = readonly
+        _ = busy_timeout_ms
+        _ = max_content_bytes
         calls["count"] += 1
         raise ConnectionError("transient")
 

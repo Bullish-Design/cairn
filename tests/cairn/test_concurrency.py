@@ -79,27 +79,40 @@ class TestWALMode:
 
 @pytest.mark.asyncio
 class TestMVCCMode:
-    """Verify MVCC (BEGIN CONCURRENT) support via enable_mvcc."""
+    """Verify MVCC (BEGIN CONCURRENT) support via enable_mvcc.
+
+    fsdantic >= 0.6.0 (pyturso 0.7.2) enables *real* libSQL MVCC
+    journaling (``PRAGMA journal_mode = "mvcc"``) — earlier versions
+    silently fell back to WAL.  Conflicting writes are NOT reliably
+    surfaced by the driver (each connection opens an independent MVCC
+    store): concurrent same-row writes are last-write-wins, so these
+    tests only assert non-conflicting writes succeed and that
+    ``BEGIN CONCURRENT`` is accepted.
+    """
 
     async def test_open_workspace_with_mvcc(self, tmp_path: Path) -> None:
-        """open_workspace(enable_mvcc=True) should open with MVCC + WAL."""
+        """open_workspace(enable_mvcc=True) should open in MVCC journal mode."""
         workspace = await open_workspace(tmp_path / "mvcc.db", enable_mvcc=True)
         try:
-            # WAL should be forced on
             conn = workspace.connection
             cursor = await conn.execute("PRAGMA journal_mode")
             result = await cursor.fetchone()
-            assert result[0] == "wal"
+            assert result[0] == "mvcc"
 
             # Basic operations work
             await workspace.files.write("/mvcc_test.txt", "mvcc content")
             content = await workspace.files.read("/mvcc_test.txt")
             assert content == "mvcc content"
+
+            # BEGIN CONCURRENT is accepted under the mvcc journal
+            tx_cursor = await conn.execute("BEGIN CONCURRENT")
+            await tx_cursor.close()
+            await conn.execute("COMMIT")
         finally:
             await workspace.close()
 
     async def test_mvcc_forces_wal_even_when_disabled(self, tmp_path: Path) -> None:
-        """enable_mvcc=True should force WAL on even if enable_wal=False."""
+        """enable_mvcc=True should force a journal mode even if enable_wal=False."""
         workspace = await open_workspace(
             tmp_path / "mvcc_wal.db",
             enable_wal=False,
@@ -109,7 +122,7 @@ class TestMVCCMode:
             conn = workspace.connection
             cursor = await conn.execute("PRAGMA journal_mode")
             result = await cursor.fetchone()
-            assert result[0] == "wal"
+            assert result[0] == "mvcc"
         finally:
             await workspace.close()
 
@@ -190,7 +203,7 @@ class TestCreateWorkspace:
             conn = workspace.connection
             cursor = await conn.execute("PRAGMA journal_mode")
             result = await cursor.fetchone()
-            assert result[0] == "wal"
+            assert result[0] == "mvcc"
 
             await workspace.files.write("/test.txt", "mvcc via manager")
             assert await workspace.files.read("/test.txt") == "mvcc via manager"
@@ -226,7 +239,7 @@ class TestManagerOpenWorkspace:
             conn = workspace.connection
             cursor = await conn.execute("PRAGMA journal_mode")
             result = await cursor.fetchone()
-            assert result[0] == "wal"
+            assert result[0] == "mvcc"
 
             await workspace.files.write("/managed.txt", "managed mvcc")
             assert await workspace.files.read("/managed.txt") == "managed mvcc"
