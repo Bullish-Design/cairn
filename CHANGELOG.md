@@ -62,6 +62,18 @@ All notable changes to cairn are documented in this file.
   stable-only deletions through the real bwrap sandbox and verifies the
   accept merge applies both tombstones.
 
+### CI (act / GitHub Actions)
+
+- `.github/workflows/ci.yml` runs the project's own gate (`devenv ci`:
+  `ty check` + full pytest including the real bubblewrap sandbox tests) on
+  push/PR.  Runs identically on GitHub hosted runners (Determinate Nix
+  installer) and locally with `act` (`.actrc` maps `ubuntu-latest` to a
+  Nix-enabled image and skips the GitHub-only installers).
+- `.actrc` persists the container `/nix` in the `cairn-act-nix` Docker volume
+  so devenv's one-time CPython source build (its pinned nixpkgs rev is not
+  cached upstream) sticks across local runs — steady-state `act` runs take
+  ~1.5 minutes.
+
 ## [0.2.1] - 2026-08-01
 
 - Baseline release (bwrap executor, orchestrator lifecycle, CLI).

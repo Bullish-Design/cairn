@@ -1,0 +1,16 @@
+# act defaults for running the GitHub Actions workflow locally.
+#
+#   act   # runs .github/workflows/ci.yml with these defaults
+#
+# - ubuntu-latest maps to a Nix-enabled image so the `devenv ci` gate (and its
+#   real bubblewrap sandbox tests) can run inside the container; the workflow
+#   skips the GitHub-only Nix installers when it detects act (ACT=true).
+# - --privileged is required for bubblewrap (bwrap --unshare-all needs user
+#   namespaces / SYS_ADMIN, which Docker drops by default).
+# - cairn-act-nix persists the container's /nix (store + database + profiles)
+#   across runs: devenv's pinned nixpkgs builds CPython from source (not
+#   cached upstream), so persisting the full /nix makes that one-time compile
+#   stick — subsequent runs reuse it and skip the rebuild (and its flaky
+#   memory-hungry LTO link).  The volume is seeded from the image's /nix.
+--platform ubuntu-latest=nixos/nix:2.34.7
+--container-options --privileged -v cairn-act-nix:/nix
