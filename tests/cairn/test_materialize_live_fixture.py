@@ -257,7 +257,10 @@ class TestOrchestratorAcceptLiveFixture:
             await agent_ws.files.write("src/new_feature.py", "added\n")
             await agent_ws.overlay.tombstone("legacy.txt")
 
-            await orch.accept_agent(agent_id)
+            stats = await orch.accept_agent(agent_id)
+
+            # accept_agent reports the merge statistics.
+            assert stats == {"files_merged": 2, "tombstones_applied": 1}
 
             # Stable reflects every change, including the tombstone.
             assert await stable.files.read("src/main.py") == "agent main\n"

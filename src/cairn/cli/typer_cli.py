@@ -184,7 +184,7 @@ def workspace_info(
             console.print(f"[red]Workspace '{name}' not found[/red]")
             raise typer.Exit(1)
 
-        workspace = await Fsdantic.open(path=str(workspace_path))
+        workspace = await Fsdantic.open(path=str(workspace_path), readonly=True)
 
         # Get file count and total size
         try:
@@ -277,7 +277,7 @@ def files_list(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open(path=str(workspace_path))
+        ws = await Fsdantic.open(path=str(workspace_path), readonly=True)
 
         try:
             if recursive:
@@ -332,7 +332,7 @@ def files_read(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open(path=str(workspace_path))
+        ws = await Fsdantic.open(path=str(workspace_path), readonly=True)
 
         try:
             mode = "binary" if binary else "text"
@@ -409,7 +409,7 @@ def files_search(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open(path=str(workspace_path))
+        ws = await Fsdantic.open(path=str(workspace_path), readonly=True)
 
         try:
             files = await ws.files.search(pattern)
@@ -447,7 +447,7 @@ def files_tree(
             console.print(f"[red]Workspace '{workspace}' not found[/red]")
             raise typer.Exit(1)
 
-        ws = await Fsdantic.open(path=str(workspace_path))
+        ws = await Fsdantic.open(path=str(workspace_path), readonly=True)
 
         try:
             tree_data = await ws.files.tree(path, max_depth=max_depth)
@@ -568,8 +568,14 @@ def agent_accept(
 
         try:
             command = parse_command_payload("accept", {"agent_id": agent_id})
-            await orchestrator.submit_command(command)
-            console.print(f"[green]✓[/green] Queued accept for {agent_id}")
+            result = await orchestrator.submit_command(command)
+
+            files_merged = result.payload.get("files_merged", 0)
+            tombstones_applied = result.payload.get("tombstones_applied", 0)
+            console.print(f"[green]✓[/green] Accepted {agent_id}")
+            console.print(f"  Merged {files_merged} file(s) into stable")
+            if tombstones_applied:
+                console.print(f"  [yellow]Applied {tombstones_applied} deletion(s) to stable[/yellow]")
 
         finally:
             if orchestrator.stable:
@@ -686,15 +692,18 @@ def preview_changes(
         path_settings = get_paths_settings(project_root, cairn_home)
         agentfs_dir = (path_settings.project_root or Path(".")).resolve() / ".agentfs"
 
-        agent_db_path = agentfs_dir / f"agent-{agent_id}.db"
+        agent_db_path = agentfs_dir / f"{agent_id}.db"
         stable_db_path = agentfs_dir / "stable.db"
 
         if not agent_db_path.exists():
             console.print(f"[red]Agent workspace not found: {agent_id}[/red]")
             raise typer.Exit(1)
+        if not stable_db_path.exists():
+            console.print("[red]Stable workspace not found (stable.db missing)[/red]")
+            raise typer.Exit(1)
 
-        agent_ws = await Fsdantic.open(path=str(agent_db_path))
-        stable_ws = await Fsdantic.open(path=str(stable_db_path))
+        agent_ws = await Fsdantic.open(path=str(agent_db_path), readonly=True)
+        stable_ws = await Fsdantic.open(path=str(stable_db_path), readonly=True)
 
         try:
             changes = await agent_ws.materialize.diff(stable_ws)
@@ -737,13 +746,13 @@ def preview_file(
         path_settings = get_paths_settings(project_root, cairn_home)
         agentfs_dir = (path_settings.project_root or Path(".")).resolve() / ".agentfs"
 
-        agent_db_path = agentfs_dir / f"agent-{agent_id}.db"
+        agent_db_path = agentfs_dir / f"{agent_id}.db"
 
         if not agent_db_path.exists():
             console.print(f"[red]Agent workspace not found: {agent_id}[/red]")
             raise typer.Exit(1)
 
-        agent_ws = await Fsdantic.open(path=str(agent_db_path))
+        agent_ws = await Fsdantic.open(path=str(agent_db_path), readonly=True)
 
         try:
             content = await agent_ws.files.read(file_path, mode="text")

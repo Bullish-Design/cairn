@@ -78,9 +78,17 @@ class SubmissionRecord(VersionedKVRecord):
 
 
 class LifecycleStore:
-    """Manages agent lifecycle metadata in workspace KV storage."""
+    """Manages agent lifecycle metadata in workspace KV storage.
+
+    Same-process read-modify-write sequences (``update_atomic``) are
+    serialized with ``Workspace.serialized()`` so concurrent updates within
+    one process do not trip version conflicts against each other; conflicts
+    from other connections/processes are still detected by the repository's
+    SQL compare-and-set and retried.
+    """
 
     def __init__(self, workspace: Workspace):
+        self.workspace = workspace
         self.repo = workspace.kv.repository(prefix=AGENT_KEY_PREFIX, model_type=LifecycleRecord)
 
     async def save(self, record: LifecycleRecord) -> None:
@@ -152,34 +160,40 @@ class LifecycleStore:
         update_fn: Callable[[LifecycleRecord], Any],
         max_retries: int = LIFECYCLE_MAX_RETRY_ATTEMPTS,
     ) -> LifecycleRecord:
-        for attempt in range(1, max_retries + 1):
-            record = await self.load(agent_id)
-            if record is None:
-                raise LifecycleError(
-                    f"Cannot update non-existent record: {agent_id}",
-                    error_code="LIFECYCLE_NOT_FOUND",
-                    context={"agent_id": agent_id},
-                )
-
-            update_fn(record)
-
-            try:
-                await self.save(record)
-                return record
-            except VersionConflictError:
-                if attempt >= max_retries:
-                    logger.error(
-                        "Failed to update lifecycle after retries",
-                        extra={"agent_id": agent_id, "attempts": max_retries},
+        # Same-process serialization: concurrent update_atomic calls on this
+        # workspace (multiple agents transitioning in parallel) are serialized
+        # by the per-workspace lock, so the load->update->save cycle below does
+        # not fight itself.  Conflicts from other connections or processes are
+        # still detected by the repository CAS (KVConflictError) and retried.
+        async with self.workspace.serialized():
+            for attempt in range(1, max_retries + 1):
+                record = await self.load(agent_id)
+                if record is None:
+                    raise LifecycleError(
+                        f"Cannot update non-existent record: {agent_id}",
+                        error_code="LIFECYCLE_NOT_FOUND",
+                        context={"agent_id": agent_id},
                     )
-                    raise
 
-                delay = LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS * (LIFECYCLE_RETRY_BACKOFF_FACTOR ** (attempt - 1))
-                logger.debug(
-                    "Version conflict on lifecycle update; retrying",
-                    extra={"agent_id": agent_id, "attempt": attempt, "delay": delay},
-                )
-                await asyncio.sleep(delay)
+                update_fn(record)
+
+                try:
+                    await self.save(record)
+                    return record
+                except VersionConflictError:
+                    if attempt >= max_retries:
+                        logger.error(
+                            "Failed to update lifecycle after retries",
+                            extra={"agent_id": agent_id, "attempts": max_retries},
+                        )
+                        raise
+
+                    delay = LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS * (LIFECYCLE_RETRY_BACKOFF_FACTOR ** (attempt - 1))
+                    logger.debug(
+                        "Version conflict on lifecycle update; retrying",
+                        extra={"agent_id": agent_id, "attempt": attempt, "delay": delay},
+                    )
+                    await asyncio.sleep(delay)
 
         raise VersionConflictError("Unexpected retry exhaustion")
 

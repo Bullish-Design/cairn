@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 
@@ -74,5 +75,45 @@ async def test_atomic_update_retries(tmp_path: Path) -> None:
 
         assert updated.state is AgentState.EXECUTING
         assert updated.version > 1
+    finally:
+        await workspace.close()
+
+
+@pytest.mark.asyncio
+async def test_update_atomic_serialized_concurrent_updates(tmp_path: Path) -> None:
+    """Concurrent same-process update_atomic calls are serialized by
+    Workspace.serialized(): every update lands, none is lost, and no
+    version conflicts are raised between in-process callers."""
+    workspace = await Fsdantic.open(path=str(tmp_path / "lifecycle-serialized.db"))
+
+    try:
+        store = LifecycleStore(workspace)
+        now = time.time()
+        record = LifecycleRecord(
+            agent_id="agent-serialized",
+            task="start",
+            priority=1,
+            state=AgentState.QUEUED,
+            created_at=now,
+            state_changed_at=now,
+            db_path=str(tmp_path / "agent-serialized.db"),
+        )
+        await store.save(record)
+
+        async def bump() -> None:
+            await store.update_atomic(
+                "agent-serialized",
+                lambda rec: (setattr(rec, "priority", rec.priority + 1)),
+            )
+
+        # All 10 concurrent increments must land (no lost updates, no
+        # VersionConflictError surfacing from the in-process contention).
+        await asyncio.gather(*(bump() for _ in range(10)))
+
+        final = await store.load("agent-serialized")
+        assert final is not None
+        assert final.priority == 11
+        # Each successful update bumped the version.
+        assert final.version >= 11
     finally:
         await workspace.close()

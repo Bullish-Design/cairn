@@ -218,8 +218,12 @@ class CairnOrchestrator:
         return CommandResult(command_type=command.type, agent_id=agent_id)
 
     async def _handle_accept(self, command: AcceptCommand) -> CommandResult:
-        await self.accept_agent(command.agent_id)
-        return CommandResult(command_type=command.type, agent_id=command.agent_id)
+        accept_stats = await self.accept_agent(command.agent_id)
+        return CommandResult(
+            command_type=command.type,
+            agent_id=command.agent_id,
+            payload=accept_stats,
+        )
 
     async def _handle_reject(self, command: RejectCommand) -> CommandResult:
         await self.reject_agent(command.agent_id)
@@ -325,7 +329,13 @@ class CairnOrchestrator:
         await self.persist_state()
         return agent_id
 
-    async def accept_agent(self, agent_id: str) -> None:
+    async def accept_agent(self, agent_id: str) -> dict[str, int]:
+        """Accept an agent's overlay changes into stable.
+
+        Returns merge statistics: ``files_merged`` (overlay files written to
+        stable) and ``tombstones_applied`` (deletions recorded by the sandbox
+        re-import that were applied to stable).
+        """
         ctx = self._get_agent(agent_id)
         if ctx.state is not AgentState.REVIEWING:
             raise ValueError(f"Agent {agent_id} not in reviewing state")
@@ -357,19 +367,21 @@ class CairnOrchestrator:
             )
 
         tombstones_applied = getattr(merge_result, "tombstones_applied", 0)
+        files_merged = getattr(merge_result, "files_merged", 0)
         if tombstones_applied:
             logger.info(
                 "Accept merge applied tombstones",
                 extra={
                     "agent_id": agent_id,
                     "tombstones_applied": tombstones_applied,
-                    "files_merged": getattr(merge_result, "files_merged", 0),
+                    "files_merged": files_merged,
                 },
             )
 
         ctx.transition(AgentState.ACCEPTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
+        return {"files_merged": files_merged, "tombstones_applied": tombstones_applied}
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
