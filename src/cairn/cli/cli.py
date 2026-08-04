@@ -229,6 +229,15 @@ async def _run_accept(args: argparse.Namespace) -> int:
     if record.state is AgentState.ERRORED:
         print(f"accept failed: {record.error}", file=sys.stderr)
         return 1
+    # accept_stats land in the mirror a moment after the state flips (the
+    # daemon writes the record, then the stats, then the mirror); give the
+    # stats a short grace window before reporting.
+    cairn_home = _resolve_cairn_home(args)
+    grace_deadline = time.monotonic() + 2.0
+    while record.accept_stats is None and time.monotonic() < grace_deadline:
+        await asyncio.sleep(0.1)
+        async with open_lifecycle_readonly(cairn_home) as store:
+            record = await store.load(args.agent_id) or record
     stats = record.accept_stats or {}
     print(
         f"accepted {args.agent_id}: "
