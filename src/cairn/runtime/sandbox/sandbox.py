@@ -75,6 +75,8 @@ class SandboxResult:
     log: str = ""
     base_hashes: dict[str, str] = field(default_factory=dict)   # for the accept staleness check
     exit_code: int = 0
+    executable: list[str] = field(default_factory=list)
+    directories: list[str] = field(default_factory=list)
 
 
 class BwrapExecutor:
@@ -119,6 +121,7 @@ class BwrapExecutor:
             clean=True,
             allow_root=self.allow_root,
         )
+        await self._apply_persisted_metadata()
 
         cairn_dir = workdir / SANDBOX_DIR_NAME
         cairn_dir.mkdir(parents=True, exist_ok=True)
@@ -130,7 +133,7 @@ class BwrapExecutor:
         boot_source = Path(_boot_module.__file__).read_text(encoding="utf-8")
         (cairn_dir / "boot.py").write_text(boot_source, encoding="utf-8")
 
-        baseline = self._snapshot(workdir)
+        baseline = await asyncio.to_thread(self._snapshot, workdir)
         argv = self._build_argv()
 
         proc = await self._spawn(argv)
@@ -141,8 +144,14 @@ class BwrapExecutor:
             )
         except TimeoutError:
             proc.kill()
+            stdout, stderr = b"", b""
             with _suppress_timeout():
-                await proc.communicate()
+                stdout, stderr = await proc.communicate()
+            partial = f"{stdout.decode('utf-8', 'replace')}\n{stderr.decode('utf-8', 'replace')}".strip()
+            (cairn_dir / "run.log").write_text(
+                partial + f"\n\n[cairn] killed after {self.settings.max_execution_time}s\n",
+                encoding="utf-8",
+            )
             raise CairnTimeoutError(
                 f"Operation exceeded timeout of {self.settings.max_execution_time}s",
                 error_code="EXECUTION_TIMEOUT",
@@ -165,7 +174,7 @@ class BwrapExecutor:
                 },
             )
 
-        written, deleted = self._diff_snapshot(workdir, baseline)
+        written, deleted = await asyncio.to_thread(self._diff_snapshot, workdir, baseline)
         total = sum(len(content) for _, content in written)
         if total > self.settings.max_workspace_bytes:
             raise ResourceLimitError(
@@ -176,6 +185,10 @@ class BwrapExecutor:
             )
         touched = [rel for rel, _ in written] + deleted
         base_hashes = {rel: baseline[rel] for rel in touched if rel in baseline}
+        executable = await asyncio.to_thread(
+            self._collect_executable, workdir, [rel for rel, _ in written]
+        )
+        directories = await asyncio.to_thread(self._collect_empty_dirs, workdir)
         await self._reimport(written, deleted)
 
         submission = self._read_submission(workdir / SUBMISSION_RELPATH, default_summary=task)
@@ -185,11 +198,43 @@ class BwrapExecutor:
             log=run_log,
             base_hashes=base_hashes,
             exit_code=proc.returncode or 0,
+            executable=executable,
+            directories=directories,
         )
 
     # ------------------------------------------------------------------
     # Sandbox invocation
     # ------------------------------------------------------------------
+
+    async def _apply_persisted_metadata(self) -> None:
+        """Re-apply executable bits / empty dirs recorded by a previous run.
+
+        fsdantic stores content only, so a ``chmod +x`` inside the sandbox
+        would otherwise be lost on the next materialization.  The run record
+        keeps the executable set and the empty-directory set; apply them after
+        ``to_disk`` so the review surface matches what the agent produced.
+        """
+        try:
+            from cairn.orchestrator.lifecycle import RUN_KEY, RunRecord
+
+            repo = self.agent_fs.kv.repository(prefix="", model_type=RunRecord)
+            run = await repo.load(RUN_KEY)
+        except Exception:
+            return
+        if run is None:
+            return
+        for rel in run.executable:
+            target = self.workdir / rel
+            try:
+                if target.is_file() and not target.is_symlink():
+                    target.chmod(target.stat().st_mode | 0o111)
+            except OSError:
+                continue
+        for rel in run.directories:
+            try:
+                (self.workdir / rel).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
 
     def _bwrap_path(self) -> str:
         configured = self.settings.bwrap_path
@@ -353,7 +398,14 @@ class BwrapExecutor:
         The sandbox scaffolding directory (``.cairn``) is excluded: it is owned
         by the host and must never be re-imported into the overlay.
         """
+        manifest, _ = cls._snapshot_with_modes(root)
+        return manifest
+
+    @classmethod
+    def _snapshot_with_modes(cls, root: Path) -> tuple[dict[str, str], dict[str, int]]:
+        """{rel: sha256} plus {rel: st_mode & 0o777} for regular files."""
         manifest: dict[str, str] = {}
+        modes: dict[str, int] = {}
         for path in sorted(root.rglob("*")):
             if path.is_symlink() or not path.is_file():
                 continue
@@ -361,7 +413,44 @@ class BwrapExecutor:
             if rel == SANDBOX_DIR_NAME or rel.startswith(f"{SANDBOX_DIR_NAME}/"):
                 continue
             manifest[rel] = cls._sha256(path)
-        return manifest
+            modes[rel] = path.stat().st_mode & 0o777
+        return manifest, modes
+
+    @classmethod
+    def _diff_modes(cls, root: Path, baseline_modes: dict[str, int]) -> list[str]:
+        """Relative paths whose permission bits changed since the baseline."""
+        current = cls._snapshot_with_modes(root)[1]
+        return sorted(rel for rel, mode in current.items() if baseline_modes.get(rel) != mode)
+
+    @classmethod
+    def _collect_executable(cls, root: Path, rels: list[str]) -> list[str]:
+        """Relative paths (of ``rels``) that have any execute bit set."""
+        result: set[str] = set()
+        for rel in rels:
+            target = root / rel
+            try:
+                if target.is_file() and not target.is_symlink() and target.stat().st_mode & 0o111:
+                    result.add(rel)
+            except OSError:
+                continue
+        return sorted(result)
+
+    @classmethod
+    def _collect_empty_dirs(cls, root: Path) -> list[str]:
+        """Relative paths of empty directories (excluding the .cairn scaffolding)."""
+        result: list[str] = []
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink() or not path.is_dir():
+                continue
+            rel = path.relative_to(root).as_posix()
+            if rel == SANDBOX_DIR_NAME or rel.startswith(f"{SANDBOX_DIR_NAME}/"):
+                continue
+            try:
+                if not any(path.iterdir()):
+                    result.append(rel)
+            except OSError:
+                continue
+        return result
 
     @staticmethod
     def _sha256(path: Path) -> str:

@@ -15,6 +15,7 @@ from typing import Protocol
 
 from cairn.runtime.sandbox.sandbox import (
     BwrapExecutor,
+    SANDBOX_DIR_NAME,
     SandboxExecutionError,
     SandboxResult,
 )
@@ -30,6 +31,7 @@ class SandboxExecutor(Protocol):
 
 __all__ = [
     "BwrapExecutor",
+    "SANDBOX_DIR_NAME",
     "SandboxExecutionError",
     "SandboxExecutor",
     "SandboxResult",

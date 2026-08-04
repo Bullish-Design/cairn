@@ -10,6 +10,7 @@ from fsdantic import Workspace
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cairn.orchestrator.queue import TaskPriority
+from cairn.core.exceptions import AgentStateError
 from cairn.core.types import ExecutionResult, SubmissionData
 
 
@@ -24,6 +25,18 @@ class AgentState(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     ERRORED = "errored"
+
+
+VALID_TRANSITIONS: dict[AgentState, frozenset[AgentState]] = {
+    AgentState.QUEUED: frozenset({AgentState.GENERATING, AgentState.REJECTED, AgentState.ERRORED}),
+    AgentState.GENERATING: frozenset({AgentState.EXECUTING, AgentState.ERRORED}),
+    AgentState.EXECUTING: frozenset({AgentState.SUBMITTING, AgentState.ERRORED}),
+    AgentState.SUBMITTING: frozenset({AgentState.REVIEWING, AgentState.ERRORED}),
+    AgentState.REVIEWING: frozenset({AgentState.ACCEPTED, AgentState.REJECTED, AgentState.ERRORED}),
+    AgentState.ACCEPTED: frozenset(),
+    AgentState.REJECTED: frozenset(),
+    AgentState.ERRORED: frozenset({AgentState.REJECTED}),
+}
 
 
 class AgentContext(BaseModel):
@@ -62,5 +75,11 @@ class AgentContext(BaseModel):
 
     def transition(self, new_state: AgentState) -> None:
         """Transition state and update the lifecycle timestamp."""
+        if new_state not in VALID_TRANSITIONS[self.state]:
+            raise AgentStateError(
+                f"Invalid transition {self.state.value} -> {new_state.value}",
+                error_code="INVALID_STATE_TRANSITION",
+                context={"agent_id": self.agent_id, "from": self.state.value, "to": new_state.value},
+            )
         self.state = new_state
         self.state_changed_at = time.time()

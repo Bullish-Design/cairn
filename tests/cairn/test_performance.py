@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
@@ -257,3 +258,26 @@ async def test_queue_throughput_benchmark(record_property: pytest.RecordProperty
     queue_threshold = _threshold(0.5)
     assert enqueue_duration < queue_threshold
     assert dequeue_duration < queue_threshold
+
+
+@pytest.mark.benchmark
+@pytest.mark.asyncio
+async def test_long_snapshot_does_not_block_event_loop(tmp_path: Path) -> None:
+    """P4.4: a long _snapshot runs in a worker thread; a concurrently
+    scheduled sleep completes promptly instead of waiting for the walk."""
+    import time as time_mod
+
+    from cairn.runtime.sandbox import BwrapExecutor
+
+    for i in range(1500):
+        (tmp_path / f"f{i:04d}.txt").write_text("x" * 200, encoding="utf-8")
+
+    start = time_mod.monotonic()
+    snap_task = asyncio.create_task(asyncio.to_thread(BwrapExecutor._snapshot, tmp_path))
+    await asyncio.sleep(0.01)
+    elapsed = time_mod.monotonic() - start
+    await snap_task
+
+    # The sleep completed while the snapshot was still (or already) running;
+    # a synchronous snapshot would have delayed it by the full walk duration.
+    assert elapsed < 0.05, f"event loop blocked for {elapsed:.3f}s by snapshot"

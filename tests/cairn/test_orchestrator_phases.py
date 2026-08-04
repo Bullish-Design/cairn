@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -145,6 +147,7 @@ async def test_execute_code_phase(tmp_path: Path) -> None:
     orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
 
     try:
+        await orch._transition_agent_state(ctx, AgentState.GENERATING)
         await orch._transition_agent_state(ctx, AgentState.EXECUTING)
         result = await orch._execute_code(ctx, "x = 1")
 
@@ -166,6 +169,7 @@ async def test_execute_code_passes_code_and_task_to_executor(tmp_path: Path) -> 
     orch.executor_factory = lambda **kwargs: executor
 
     try:
+        await orch._transition_agent_state(ctx, AgentState.GENERATING)
         await orch._transition_agent_state(ctx, AgentState.EXECUTING)
         await orch._execute_code(ctx, "x = 2")
 
@@ -249,6 +253,71 @@ async def test_run_record_no_mismatch_when_report_matches(tmp_path: Path) -> Non
         record = await orch.lifecycle.load(ctx.agent_id)
         assert record is not None
         assert record.claim_mismatch is True
+    finally:
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
+
+
+@pytest.mark.asyncio
+async def test_worker_loop_survives_dequeue_error(tmp_path: Path) -> None:
+    """P4.2: an exception in the scheduling path is logged and recovered from,
+    not silently fatal."""
+    orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    orch.executor_factory = lambda **kwargs: PhaseExecutor(**kwargs)
+
+    real_dequeue_wait = orch.queue.dequeue_wait
+    calls = {"n": 0}
+
+    async def flaky_dequeue_wait():
+        if calls["n"] == 0:
+            calls["n"] += 1
+            raise RuntimeError("boom")
+        return await real_dequeue_wait()
+
+    orch.queue.dequeue_wait = flaky_dequeue_wait  # type: ignore[method-assign]
+
+    worker = asyncio.create_task(orch._worker_loop())
+    try:
+        await orch.queue.enqueue(ctx.agent_id, ctx.priority)
+        await orch.wait_for_agent(ctx.agent_id, timeout=5.0)
+        assert ctx.state is AgentState.REVIEWING
+        assert calls["n"] >= 1
+    finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
+
+
+@pytest.mark.asyncio
+async def test_handle_agent_error_keeps_workdir_and_log(tmp_path: Path) -> None:
+    """P4.3: a failed run keeps its workdir and persists the partial run log
+    instead of deleting the evidence."""
+    orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+
+    workdir = orch.cairn_home / "workspaces" / ctx.agent_id
+    log_dir = workdir / ".cairn"
+    log_dir.mkdir(parents=True)
+    (log_dir / "run.log").write_text("agent printed this before dying\n", encoding="utf-8")
+
+    try:
+        await orch._handle_agent_error(ctx, RuntimeError("boom"))
+
+        assert ctx.state is AgentState.ERRORED
+        assert "boom" in (ctx.error or "")
+        # The workdir (with run.log and partial changeset) survives.
+        assert workdir.exists()
+        assert (log_dir / "run.log").exists()
+
+        # The run record captured the log.
+        run_repo = agent_ws.kv.repository(prefix="", model_type=RunRecord)
+        run = await run_repo.load(RUN_KEY)
+        assert run is not None
+        assert "agent printed this before dying" in run.log
+        assert run.exit_code == 1
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)

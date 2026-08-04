@@ -32,6 +32,8 @@ from cairn.core.constants import (
     LIFECYCLE_RETRY_BACKOFF_FACTOR,
     LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
     MAX_STORED_LOG_BYTES,
+    STATE_PERSIST_MIN_INTERVAL_SECONDS,
+    WORKER_ERROR_BACKOFF_SECONDS,
 )
 from cairn.core.exceptions import (
     AgentNotFoundError,
@@ -61,7 +63,13 @@ from cairn.orchestrator.queue import TaskPriority, TaskQueue
 from cairn.orchestrator.signals import SignalHandler
 from cairn.providers.providers import CodeProvider, FileCodeProvider
 from cairn.runtime.agent import AgentContext, AgentState
-from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError, SandboxExecutor, SandboxResult
+from cairn.runtime.sandbox import (
+    BwrapExecutor,
+    SANDBOX_DIR_NAME,
+    SandboxExecutionError,
+    SandboxExecutor,
+    SandboxResult,
+)
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.runtime.workspace_cache import WorkspaceCache
 from cairn.runtime.workspace_manager import WorkspaceManager
@@ -77,6 +85,8 @@ TERMINAL_STATES = {
     AgentState.REJECTED,
     AgentState.ERRORED,
 }
+
+INTERRUPTED_STATES = {AgentState.GENERATING, AgentState.EXECUTING, AgentState.SUBMITTING}
 
 
 class CairnOrchestrator:
@@ -114,6 +124,7 @@ class CairnOrchestrator:
         self.signals: SignalHandler | None = None
         self.lifecycle: LifecycleStore | None = None
         self.state_file = self.cairn_home / "state" / "orchestrator.json"
+        self._last_persist = 0.0
         self.workspace_manager = WorkspaceManager()
         self.workspace_cache = WorkspaceCache(max_size=self.config.workspace_cache_size)
 
@@ -122,10 +133,14 @@ class CairnOrchestrator:
         for directory in ("workspaces", "signals", "state"):
             (self.cairn_home / directory).mkdir(parents=True, exist_ok=True)
 
-        self.stable = await Fsdantic.open(path=str(self.agentfs_dir / "stable.db"))
-        self.bin = await Fsdantic.open(path=str(self.agentfs_dir / "bin.db"))
-        self.workspace_manager.track_workspace(self.stable)
-        self.workspace_manager.track_workspace(self.bin)
+        self.stable = await self.workspace_manager.create_workspace(
+            self.agentfs_dir / "stable.db",
+            max_content_bytes=self.config.max_content_bytes,
+        )
+        self.bin = await self.workspace_manager.create_workspace(
+            self.agentfs_dir / "bin.db",
+            max_content_bytes=self.config.max_content_bytes,
+        )
 
         self.watcher = FileWatcher(
             self.project_root,
@@ -141,9 +156,8 @@ class CairnOrchestrator:
 
         await self.recover_from_lifecycle_store()
         await self._mirror_lifecycle()
-
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._worker_loop())
+        if self.config.start_worker_on_init:
+            self._ensure_worker()
         await self.persist_state()
 
     async def _mirror_lifecycle(self) -> None:
@@ -170,6 +184,13 @@ class CairnOrchestrator:
                 if run is not None:
                     data["run_written"] = run.written
                     data["run_deleted"] = run.deleted
+            if record.state is AgentState.ERRORED:
+                # Keep failed-run logs readable via `cairn logs` (P4.3); the
+                # mirror is the only lock-free path into a run record while the
+                # daemon owns the databases.
+                run = await self._load_run_record_for(record)
+                if run is not None and run.log:
+                    data["run_log"] = run.log
             payload[record.agent_id] = data
         await asyncio.to_thread(self._write_mirror_sync, payload)
 
@@ -252,6 +273,20 @@ class CairnOrchestrator:
 
             if ctx.state == AgentState.QUEUED:
                 await self.queue.enqueue(agent_id, ctx.priority)
+            elif ctx.state in INTERRUPTED_STATES:
+                # The process died mid-run.  The sandbox workdir and any partial
+                # re-import cannot be trusted, so fail the agent explicitly
+                # rather than leaving a record nothing can ever resolve.
+                ctx.error = format_agent_error(
+                    "Interrupted by orchestrator restart",
+                    agent_id=agent_id,
+                    state=ctx.state.value,
+                    task=record.task,
+                )
+                ctx.transition(AgentState.ERRORED)
+                await self._save_lifecycle_record(ctx)
+                if self.config.requeue_interrupted:
+                    await self.spawn_agent(record.task, TaskPriority(record.priority))
 
     async def run(self) -> None:
         assert self.watcher is not None
@@ -436,11 +471,14 @@ class CairnOrchestrator:
         try:
             await self._save_lifecycle_record(ctx)
             await self.queue.enqueue(agent_id, priority)
-        except ResourceLimitError:
+        except BaseException:
             self.active_agents.pop(agent_id, None)
-            if self.lifecycle is not None:
-                await self.lifecycle.delete(agent_id)
             await self.workspace_cache.remove(str(agent_db))
+            if self.lifecycle is not None:
+                with suppress(Exception):
+                    await self.lifecycle.delete(agent_id)
+            with suppress(OSError):
+                agent_db.unlink(missing_ok=True)
             raise
 
         await self.persist_state()
@@ -555,8 +593,14 @@ class CairnOrchestrator:
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
-        if ctx.state not in {AgentState.REVIEWING, AgentState.QUEUED}:
-            raise ValueError(f"Agent {agent_id} not in reviewing state")
+        if ctx.state not in {AgentState.REVIEWING, AgentState.QUEUED, AgentState.ERRORED}:
+            raise ValueError(
+                f"Agent {agent_id} cannot be rejected from state {ctx.state.value} "
+                f"(allowed: reviewing, queued, errored)"
+            )
+
+        # Drop any still-queued entry so the worker never dequeues a phantom.
+        await self.queue.remove(agent_id)
 
         ctx.transition(AgentState.REJECTED)
         await self._save_lifecycle_record(ctx)
@@ -620,12 +664,39 @@ class CairnOrchestrator:
 
     async def _worker_loop(self) -> None:
         while True:
-            queued = await self.queue.dequeue_wait()
-            agent_id = queued.task
-            await self._semaphore.acquire()
+            try:
+                queued = await self.queue.dequeue_wait()
+                agent_id = queued.task
+                await self._semaphore.acquire()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Worker loop iteration failed; continuing")
+                await asyncio.sleep(WORKER_ERROR_BACKOFF_SECONDS)
+                continue
+
             task = asyncio.create_task(self._run_agent(agent_id))
             self._running_tasks.add(task)
-            task.add_done_callback(self._running_tasks.discard)
+            task.add_done_callback(self._on_agent_task_done)
+
+    def _on_agent_task_done(self, task: asyncio.Task[None]) -> None:
+        self._running_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Agent task raised out of _run_agent", exc_info=exc)
+
+    def _ensure_worker(self) -> None:
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._worker_loop())
+            self._worker_task.add_done_callback(self._on_worker_done)
+
+    def _on_worker_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        logger.error("Worker loop exited unexpectedly; restarting", exc_info=task.exception())
+        self._ensure_worker()
 
     async def _run_agent(self, agent_id: str) -> None:
         ctx = self.active_agents.get(agent_id)
@@ -634,14 +705,11 @@ class CairnOrchestrator:
             if ctx is None:
                 return
 
-            await self._execute_agent_lifecycle(ctx)
+            async with self.workspace_cache.pinned(str(ctx.agent_db_path)):
+                await self._execute_agent_lifecycle(ctx)
         except (ResourceLimitError, CairnTimeoutError, SandboxExecutionError) as exc:
             await self._handle_agent_error(ctx, exc)
             return
-        except CairnError as exc:
-            await self._handle_agent_error(ctx, exc)
-            if isinstance(exc, RecoverableError):
-                return
         except Exception as exc:
             await self._handle_agent_error(ctx, exc)
         finally:
@@ -676,6 +744,8 @@ class CairnOrchestrator:
             base_hashes=result.base_hashes,
             log=result.log[-MAX_STORED_LOG_BYTES:],
             exit_code=result.exit_code,
+            executable=result.executable,
+            directories=result.directories,
             updated_at=time.time(),
         )
         repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
@@ -771,17 +841,35 @@ class CairnOrchestrator:
 
         ctx.error = str(exc)
         ctx.transition(AgentState.ERRORED)
+
+        # Keep the workdir: run.log and the partial changeset are the only
+        # record of what the agent did before it failed.  Cleanup happens on
+        # the normal retention schedule or immediately via `cairn reject`.
+        workdir = self.cairn_home / "workspaces" / ctx.agent_id
+        log_path = workdir / SANDBOX_DIR_NAME / "run.log"
+        if log_path.exists():
+            with suppress(Exception):
+                await self._record_partial_run(ctx, log_path.read_text(encoding="utf-8"))
+
         await self._save_lifecycle_record(ctx)
 
-        # Remove the sandbox workdir so failed runs leave no review surface.
-        workdir = self.cairn_home / "workspaces" / ctx.agent_id
-        if workdir.exists():
-            shutil.rmtree(workdir, ignore_errors=True)
+    async def _record_partial_run(self, ctx: AgentContext, log: str) -> None:
+        """Persist what the sandbox produced before it failed."""
+        agent_fs = ctx.agent_fs or await self._get_agent_workspace(ctx)
+        record = RunRecord(
+            agent_id=ctx.agent_id,
+            log=log[-MAX_STORED_LOG_BYTES:],
+            exit_code=1,
+            updated_at=time.time(),
+        )
+        repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
+        await repo.save(RUN_KEY, record)
 
     async def persist_state(self) -> None:
-        state_dir = self.state_file.parent
-        state_dir.mkdir(parents=True, exist_ok=True)
-
+        now = time.monotonic()
+        if now - self._last_persist < STATE_PERSIST_MIN_INTERVAL_SECONDS:
+            return
+        self._last_persist = now
         payload = {
             "project_root": str(self.project_root),
             "updated_at": time.time(),
@@ -794,7 +882,13 @@ class CairnOrchestrator:
                 ),
             },
         }
-        self.state_file.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        await asyncio.to_thread(self._write_state_atomic, payload)
+
+    def _write_state_atomic(self, payload: dict) -> None:
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(self.state_file)
 
     async def cleanup_completed_agents(
         self,
@@ -802,7 +896,12 @@ class CairnOrchestrator:
     ) -> int:
         if self.lifecycle is None:
             return 0
-        cleaned = await self.lifecycle.cleanup_old(max_age_seconds, self.agentfs_dir)
+        cleaned = await self.lifecycle.cleanup_old(
+            max_age_seconds,
+            self.agentfs_dir,
+            cache=self.workspace_cache,
+            cairn_home=self.cairn_home,
+        )
         await self._mirror_lifecycle()
         return cleaned
 

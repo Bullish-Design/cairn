@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -25,6 +26,7 @@ from cairn.utils.error_formatting import format_lifecycle_error
 from cairn.core.exceptions import AgentNotFoundError, LifecycleError, RecoverableError, VersionConflictError
 from cairn.utils.retry_utils import with_retry
 from cairn.core.types import SubmissionData
+from cairn.runtime.workspace_cache import WorkspaceCache
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,11 @@ class LifecycleRecord(VersionedKVRecord):
     files_written: int = 0
     files_deleted: int = 0
     claim_mismatch: bool = False
+    # Mirror-only enrichment (never written to bin.db): the ground-truth path
+    # lists and run log the CLI surfaces via the lifecycle mirror.
+    run_written: list[str] | None = None
+    run_deleted: list[str] | None = None
+    run_log: str | None = None
 
     @field_validator("agent_id")
     @classmethod
@@ -100,6 +107,8 @@ class RunRecord(VersionedKVRecord):
     base_hashes: dict[str, str] = {}
     log: str = ""
     exit_code: int = 0
+    executable: list[str] = []
+    directories: list[str] = []
 
 
 class UndoRecord(VersionedKVRecord):
@@ -246,6 +255,8 @@ class LifecycleStore:
         self,
         max_age_seconds: float = LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
         agentfs_dir: Path | None = None,
+        cache: WorkspaceCache | None = None,
+        cairn_home: Path | None = None,
     ) -> int:
         cutoff = time.time() - max_age_seconds
         cleaned = 0
@@ -275,8 +286,17 @@ class LifecycleStore:
 
             if agentfs_dir is not None:
                 db_path = Path(record.db_path)
+                # Drop the workspace cache entry first so the open handle is
+                # closed before the file is unlinked (P4.8).
+                if cache is not None:
+                    with suppress(Exception):
+                        await cache.remove(str(db_path))
                 if db_path.exists():
                     db_path.unlink()
+                if cairn_home is not None:
+                    workdir = Path(cairn_home) / "workspaces" / record.agent_id
+                    if workdir.exists():
+                        shutil.rmtree(workdir, ignore_errors=True)
 
         return cleaned
 

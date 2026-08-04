@@ -264,3 +264,57 @@ def _write_lifecycle_mirror(home: Path, records: list[LifecycleRecord]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {record.agent_id: record.model_dump(mode="json") for record in records}
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_logs_shows_run_log(tmp_path: Path, monkeypatch: Any) -> None:
+    """P4.3: `cairn logs <id>` prints the sandbox run log from the mirror."""
+    import io
+    import contextlib
+
+    from cairn.orchestrator.lifecycle import lifecycle_mirror_path
+
+    project = tmp_path / "project"
+    agentfs = project / ".agentfs"
+    agentfs.mkdir(parents=True)
+    home = tmp_path / "home"
+
+    monkeypatch.setenv("CAIRN_PATHS_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("CAIRN_PATHS_CAIRN_HOME", str(home))
+
+    record = LifecycleRecord(
+        agent_id="agent-logs",
+        task="t",
+        priority=3,
+        state=AgentState.ERRORED,
+        state_changed_at=1.0,
+        created_at=1.0,
+        db_path=str(agentfs / "bin-agent-logs.db"),
+        run_log="traceback here\n  File bad.py, line 1\nRuntimeError: boom\n",
+    )
+    _write_lifecycle_mirror(home, [record])
+
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        rc = cli.main(["logs", "agent-logs"])
+    assert rc == 0
+    assert "RuntimeError: boom" in stdout.getvalue()
+
+
+def test_logs_unknown_agent(tmp_path: Path, monkeypatch: Any) -> None:
+    project = tmp_path / "project"
+    agentfs = project / ".agentfs"
+    agentfs.mkdir(parents=True)
+    home = tmp_path / "home"
+    monkeypatch.setenv("CAIRN_PATHS_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("CAIRN_PATHS_CAIRN_HOME", str(home))
+
+    import io
+    import contextlib
+
+    _write_lifecycle_mirror(home, [])
+
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        rc = cli.main(["logs", "agent-nope"])
+    assert rc == 1
+    assert "Unknown agent: agent-nope" in stderr.getvalue()

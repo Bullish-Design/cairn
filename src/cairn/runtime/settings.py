@@ -39,6 +39,16 @@ class OrchestratorSettings(BaseSettings):
         default_factory=list, description="Additional directory names to exclude from the project sync"
     )
 
+    requeue_interrupted: bool = False
+    start_worker_on_init: bool = Field(
+        default=True,
+        description="Start the worker loop during initialize(); disable for tests/embedders that schedule manually",
+    )
+    max_content_bytes: int | None = Field(
+        default=None,
+        description="Optional cap on workspace write payload sizes (fsdantic CONTENT_TOO_LARGE)",
+    )
+
     @field_validator("max_concurrent_agents")
     @classmethod
     def validate_max_concurrent_agents(cls, value: int) -> int:

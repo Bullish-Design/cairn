@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import signal
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from cairn.cli.commands import (
@@ -95,9 +97,22 @@ async def _run_up(args: argparse.Namespace) -> int:
             code_provider=provider,
         )
         await orchestrator.initialize()
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+
+        runner = asyncio.create_task(orchestrator.run())
         try:
-            await orchestrator.run()
+            await asyncio.wait(
+                [runner, asyncio.create_task(stop.wait())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
         finally:
+            runner.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner
             await orchestrator.shutdown()
     return 0
 
@@ -223,6 +238,26 @@ async def _run_accept(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_logs(args: argparse.Namespace) -> int:
+    """Print an agent's sandbox run log (works for errored agents too)."""
+    cairn_home = _resolve_cairn_home(args)
+    try:
+        async with open_lifecycle_readonly(cairn_home) as store:
+            record = await store.load(args.agent_id)
+    except AgentNotFoundError:
+        print(f"Unknown agent: {args.agent_id}", file=sys.stderr)
+        return 1
+    if record is None:
+        print(f"Unknown agent: {args.agent_id}", file=sys.stderr)
+        return 1
+    run_log = record.run_log
+    if not run_log:
+        print(f"No run log for {args.agent_id}", file=sys.stderr)
+        return 1
+    print(run_log)
+    return 0
+
+
 async def _run_undo(args: argparse.Namespace) -> int:
     """Undo a previously accepted agent's changes to stable."""
     command = parse_command_payload("undo", {"agent_id": args.agent_id})
@@ -314,6 +349,10 @@ def build_parser() -> argparse.ArgumentParser:
     undo_parser = subparsers.add_parser("undo", help="Undo an accepted agent's changes to stable")
     undo_parser.add_argument("agent_id")
     undo_parser.set_defaults(handler=_run_undo, is_async=True)
+
+    logs_parser = subparsers.add_parser("logs", help="Show an agent's sandbox run log")
+    logs_parser.add_argument("agent_id")
+    logs_parser.set_defaults(handler=_run_logs, is_async=True)
 
     reject_parser = subparsers.add_parser("reject", help="Reject agent changes")
     reject_parser.add_argument("agent_id")

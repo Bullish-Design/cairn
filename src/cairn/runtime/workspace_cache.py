@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 from cairn.core.constants import MAX_WORKSPACE_CACHE_SIZE
 
@@ -24,6 +25,19 @@ class WorkspaceCache:
         self.max_size = max_size
         self._cache: OrderedDict[str, Any] = OrderedDict()
         self._lock = asyncio.Lock()
+        self._pinned: set[str] = set()
+
+    @asynccontextmanager
+    async def pinned(self, key: str) -> AsyncIterator[None]:
+        """Protect a cached workspace from eviction while it is in use."""
+        async with self._lock:
+            self._pinned.add(key)
+        try:
+            yield
+        finally:
+            async with self._lock:
+                self._pinned.discard(key)
+                await self._evict_if_needed()
 
     async def get(self, key: str) -> Any | None:
         """Get workspace from cache.
@@ -84,9 +98,20 @@ class WorkspaceCache:
         return len(self._cache)
 
     async def _evict_if_needed(self) -> None:
-        while self.max_size > 0 and len(self._cache) > self.max_size:
-            oldest_key, oldest_workspace = self._cache.popitem(last=False)
-            await self._close_workspace(oldest_workspace, key=oldest_key)
+        if self.max_size <= 0:
+            return
+        for key in list(self._cache):
+            if len(self._cache) <= self.max_size:
+                return
+            if key in self._pinned:
+                continue
+            workspace = self._cache.pop(key)
+            await self._close_workspace(workspace, key=key)
+        if len(self._cache) > self.max_size:
+            logger.warning(
+                "Workspace cache over capacity; all entries pinned",
+                extra={"size": len(self._cache), "max_size": self.max_size},
+            )
 
     async def _close_workspace(self, workspace: Any, *, key: str) -> None:
         close_method = getattr(workspace, "close", None)

@@ -288,19 +288,21 @@ agent:{agent_id} -> {
 
 ### Responsibilities
 
-- accept normalized `CairnCommand` ingress and dispatch to command handlers (`queue/accept/reject/status/list_agents`),
+- accept normalized `CairnCommand` ingress and dispatch to command handlers (`queue/accept/reject/status/list_agents/undo`),
 - treat CLI and signal files as transport adapters that both parse into the same command model before dispatch,
-- optionally monitor signal files (`spawn/queue/accept/reject`) when signal polling is enabled,
+- optionally monitor signal files (`spawn/queue/accept/reject/undo`) when signal polling is enabled,
 - enqueue tasks into a priority queue,
-- run a long-lived worker loop that acquires an `asyncio.Semaphore(max_concurrent_agents)` slot before starting each task,
+- run a long-lived worker loop that acquires an `asyncio.Semaphore(max_concurrent_agents)` slot before starting each task; the loop survives per-iteration failures (backoff) and is restarted by a supervisor if it exits unexpectedly,
 - release the semaphore slot in one completion `finally` path,
 - use `CodeProvider` to source executable code (from files, LLMs, git, etc.),
 - validate code via provider `validate_code()` before execution,
 - write code to `$CAIRN_HOME/workspaces/{agent_id}/.cairn/task.py`,
 - execute code via `BwrapExecutor` (materialize → sandbox run → re-import),
 - materialize the workspace via `workspace.materialize.to_disk()` (workdir doubles as preview),
-- persist lifecycle metadata to canonical KV store on every state transition,
-- persist queue stats snapshot under `$CAIRN_HOME/state/` (stats only, not agent metadata).
+- persist lifecycle metadata to canonical KV store on every state transition, plus a JSON mirror for CLI reads,
+- persist queue stats snapshot under `$CAIRN_HOME/state/` (stats only, not agent metadata),
+- fail agents that were mid-run when the daemon died (`GENERATING`/`EXECUTING`/`SUBMITTING` → `ERRORED` with an explanation; optionally re-queued with `requeue_interrupted`),
+- keep the workdir and partial run log when a run fails (debuggability; cleaned by retention or `cairn reject`).
 
 ### CLI contract (thin client, P1.4)
 

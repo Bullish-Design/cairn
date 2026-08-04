@@ -69,6 +69,14 @@ class TaskQueue:
 
             return heapq.heappop(self._queue)
 
+    async def remove(self, task: str) -> bool:
+        """Remove a queued task by id; returns True if it was present."""
+        async with self._condition:
+            before = len(self._queue)
+            self._queue = [entry for entry in self._queue if entry.task != task]
+            heapq.heapify(self._queue)
+            return len(self._queue) != before
+
     async def dequeue_wait(self) -> QueuedTask:
         """Wait until one task is available and return it."""
         async with self._condition:
