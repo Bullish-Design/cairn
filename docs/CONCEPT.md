@@ -28,7 +28,12 @@ This model prioritizes workspace isolation and explicit human control over autom
    Code executes in isolated overlays; integration is explicit accept/reject.
 
 2. **Isolation over implicit trust**
-   Execution is sandboxed with no direct system access; all operations go through external functions.
+   Code executes inside a bubblewrap sandbox with no network, an unprivileged
+   uid, and only the materialized workspace writable.  Bubblewrap is the
+   security boundary — task code is ordinary Python with the full standard
+   library, and the `read_file`/`write_file` helpers are ergonomics, not a
+   sandbox.  Anything that must not be reachable has to be excluded at the
+   mount layer.
 
 3. **Materialized preview over hidden state**
    Outputs are inspectable as real files/workspaces before integration.

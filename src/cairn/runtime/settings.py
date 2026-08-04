@@ -11,7 +11,12 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from cairn.core.constants import DEFAULT_MAX_QUEUE_SIZE, DEFAULT_MAX_SYNC_FILE_BYTES, MAX_WORKSPACE_CACHE_SIZE
+from cairn.core.constants import (
+    DEFAULT_MAX_QUEUE_SIZE,
+    DEFAULT_MAX_SYNC_FILE_BYTES,
+    DEFAULT_MAX_WORKSPACE_BYTES,
+    MAX_WORKSPACE_CACHE_SIZE,
+)
 
 _MIN_MEMORY_BYTES = 1 * 1024 * 1024
 _MAX_MEMORY_BYTES = 16 * 1024 * 1024 * 1024
@@ -64,6 +69,20 @@ class ExecutorSettings(BaseSettings):
     max_execution_time: float = Field(default=60.0, description="Seconds")
     max_memory_bytes: int = 100 * 1024 * 1024
     max_recursion_depth: int = 1000
+    max_output_file_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        description="RLIMIT_FSIZE: largest single file the sandbox may create",
+    )
+    max_processes: int = Field(
+        default=64, description="RLIMIT_NPROC: process/thread cap inside the sandbox"
+    )
+    max_open_files: int = Field(
+        default=1024, description="RLIMIT_NOFILE: open file descriptor cap"
+    )
+    max_workspace_bytes: int = Field(
+        default=DEFAULT_MAX_WORKSPACE_BYTES,
+        description="Post-run cap on total materialized workspace size",
+    )
     bwrap_path: str | None = Field(default=None, description="Path to the bubblewrap binary")
     python_path: str | None = Field(default=None, description="Python interpreter to run inside the sandbox")
     sandbox_closure_path: str | None = Field(

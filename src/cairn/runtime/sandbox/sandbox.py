@@ -31,7 +31,7 @@ from pathlib import Path
 
 from fsdantic import Workspace
 
-from cairn.core.exceptions import CairnError
+from cairn.core.exceptions import CairnError, ResourceLimitError
 from cairn.core.exceptions import TimeoutError as CairnTimeoutError
 from cairn.core.types import SubmissionData
 from cairn.runtime.sandbox import boot as _boot_module
@@ -166,6 +166,14 @@ class BwrapExecutor:
             )
 
         written, deleted = self._diff_snapshot(workdir, baseline)
+        total = sum(len(content) for _, content in written)
+        if total > self.settings.max_workspace_bytes:
+            raise ResourceLimitError(
+                f"Sandbox wrote {total} bytes, exceeding the "
+                f"{self.settings.max_workspace_bytes} byte workspace budget",
+                error_code="WORKSPACE_BUDGET_EXCEEDED",
+                context={"agent_id": self.agent_id, "bytes_written": total},
+            )
         touched = [rel for rel, _ in written] + deleted
         base_hashes = {rel: baseline[rel] for rel in touched if rel in baseline}
         await self._reimport(written, deleted)
@@ -211,6 +219,7 @@ class BwrapExecutor:
             bwrap,
             "--unshare-all",
             "--die-with-parent",
+            "--new-session",       # detach from the controlling terminal
             "--clearenv",
             "--uid",
             str(uid),
@@ -240,6 +249,15 @@ class BwrapExecutor:
             "--setenv",
             "CAIRN_MAX_RECURSION_DEPTH",
             str(self.settings.max_recursion_depth),
+            "--setenv",
+            "CAIRN_MAX_OUTPUT_FILE_BYTES",
+            str(self.settings.max_output_file_bytes),
+            "--setenv",
+            "CAIRN_MAX_PROCESSES",
+            str(self.settings.max_processes),
+            "--setenv",
+            "CAIRN_MAX_OPEN_FILES",
+            str(self.settings.max_open_files),
             "--setenv",
             "PYTHONUNBUFFERED",
             "1",
@@ -296,6 +314,7 @@ class BwrapExecutor:
         try:
             return await asyncio.create_subprocess_exec(
                 *argv,
+                stdin=asyncio.subprocess.DEVNULL,   # never inherit the user's tty
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

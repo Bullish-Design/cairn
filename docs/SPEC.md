@@ -48,9 +48,13 @@ Cairn runtime contracts are implemented by four concrete layers:
      (rlimits) and host-side subprocess timeout.
 
 4. **Sandbox API (`cairn.runtime.sandbox.boot`)**
-   - The bootstrap script shipped into the sandbox exposes the canonical capability surface
-     (`read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`, `search_content`,
-     `submit_result`, `log`) as plain functions over the workspace directory.
+   - The bootstrap script shipped into the sandbox exposes helper functions
+     (`read_file`, `write_file`, `list_dir`, `file_exists`, `search_files`,
+     `search_content`, `submit_result`, `log`) as plain functions over the
+     workspace directory.  These are **ergonomics, not a security boundary**
+     — task code is ordinary Python with the full standard library, so
+     anything that must not be reachable must be excluded at the mount layer
+     (see the sandbox policy below).
    - `submit_result(...)` writes `.cairn/submission.json`; the host persists it to the agent workspace
      KV submission record consumed by the orchestrator lifecycle flow.
 
@@ -186,10 +190,23 @@ submit_result(summary="Done", changed_files=["src/main.py"])
   is mounted read-only from a declarative Nix store closure manifest
   (``pkgs.writeClosure`` in ``devenv.nix``; falls back to the immutable
   ``/nix/store`` plus conventional system dirs when no manifest is configured).
-- No network, no host filesystem, no other processes, no environment variables
-  (``--clearenv``).
-- File access is additionally confined to the workspace root by the sandbox API
-  (absolute paths and ``..`` traversal are rejected).
+- No network, no other processes, no environment variables (``--clearenv``).
+  The host filesystem is **unwritable**; in fallback mode (no closure
+  manifest) a read-only view of the system runtime directories (``/usr``,
+  ``/bin``, ``/lib``, ``/nix/store``) is mounted so the interpreter can run.
+- The sandbox is detached from the controlling terminal (``--new-session``,
+  stdin is ``/dev/null``): ``sys.stdin.isatty()`` is False and ``/dev/tty``
+  cannot be opened.
+- Resource limits inside the sandbox: ``RLIMIT_DATA``/``RLIMIT_AS``
+  (memory), ``RLIMIT_CPU`` (CPU seconds), ``RLIMIT_FSIZE`` (largest single
+  file), ``RLIMIT_NPROC`` (process/thread count), ``RLIMIT_NOFILE`` (open
+  descriptors), plus a host-side workspace-size budget enforced after the
+  run.
+- Bubblewrap is the security boundary: task code is ordinary Python with the
+  full standard library.  The sandbox API's path confinement (absolute paths
+  and ``..`` traversal rejected) is an ergonomic convenience for code that
+  voluntarily uses the helpers — anything that must not be reachable must be
+  excluded at the mount layer.
 - Symlinks in the workspace are never followed by the host-side re-import.
 
 ### Sandbox runtime configuration (NixOS/devenv)

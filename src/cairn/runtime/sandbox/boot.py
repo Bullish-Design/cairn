@@ -41,6 +41,9 @@ MAX_FILE_SIZE_BYTES = int(os.environ.get("CAIRN_MAX_FILE_SIZE_BYTES", str(10 * 1
 MAX_MEMORY_BYTES = int(os.environ.get("CAIRN_MAX_MEMORY_BYTES", "0") or 0)
 MAX_CPU_SECONDS = float(os.environ.get("CAIRN_MAX_CPU_SECONDS", "0") or 0)
 MAX_RECURSION_DEPTH = int(os.environ.get("CAIRN_MAX_RECURSION_DEPTH", "1000"))
+MAX_OUTPUT_FILE_BYTES = int(os.environ.get("CAIRN_MAX_OUTPUT_FILE_BYTES", "0") or 0)
+MAX_PROCESSES = int(os.environ.get("CAIRN_MAX_PROCESSES", "0") or 0)
+MAX_OPEN_FILES = int(os.environ.get("CAIRN_MAX_OPEN_FILES", "0") or 0)
 
 CAIRN_DIR = WORKSPACE / ".cairn"
 TASK_FILE = CAIRN_DIR / "task.py"
@@ -53,12 +56,30 @@ SUBMISSION_FILE = CAIRN_DIR / "submission.json"
 # ---------------------------------------------------------------------------
 
 
+def _set_limit(which: int, value: int) -> None:
+    """Best-effort rlimit; never lets the limit rise above the inherited hard cap."""
+    if value <= 0:
+        return
+    try:
+        soft, hard = resource.getrlimit(which)
+    except (ValueError, OSError):
+        return
+    capped = value if hard == resource.RLIM_INFINITY else min(value, hard)
+    try:
+        resource.setrlimit(which, (capped, capped))
+    except (ValueError, OSError):
+        pass
+
+
 def _apply_resource_limits() -> None:
-    """Apply memory/CPU/recursion limits to the sandbox process.
+    """Apply memory/CPU/recursion/file/process limits to the sandbox process.
 
     Memory is enforced with ``RLIMIT_DATA`` (heap + anonymous mmap) and falls
-    back to ``RLIMIT_AS`` when unsupported. CPU time uses ``RLIMIT_CPU``; the
+    back to ``RLIMIT_AS`` when unsupported.  CPU time uses ``RLIMIT_CPU``; the
     host additionally enforces a wall-clock timeout on the subprocess.
+    ``RLIMIT_FSIZE`` caps the largest single file, ``RLIMIT_NPROC`` caps the
+    process/thread count (fork bombs), and ``RLIMIT_NOFILE`` caps open file
+    descriptors.
     """
     if MAX_MEMORY_BYTES > 0:
         for limit_attr in (resource.RLIMIT_DATA, resource.RLIMIT_AS):
@@ -73,6 +94,9 @@ def _apply_resource_limits() -> None:
             resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
         except (ValueError, OSError):
             pass
+    _set_limit(resource.RLIMIT_FSIZE, MAX_OUTPUT_FILE_BYTES)
+    _set_limit(resource.RLIMIT_NPROC, MAX_PROCESSES)
+    _set_limit(resource.RLIMIT_NOFILE, MAX_OPEN_FILES)
     sys.setrecursionlimit(MAX_RECURSION_DEPTH)
 
 
