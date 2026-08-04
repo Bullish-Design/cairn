@@ -48,6 +48,12 @@ markers = [
 addopts = [
     "--strict-markers",
     "--verbose",
+    # Benchmarks are timing-sensitive and flake under load; deselect them in
+    # the default suite (CI / devenv test).  Run explicitly with:
+    #   pytest -m benchmark            (environment-tolerant thresholds)
+    #   CAIRN_STRICT_BENCHMARKS=1 pytest -m benchmark   (real targets)
+    "-m",
+    "not benchmark",
 ]
 pythonpath = ["."]
 

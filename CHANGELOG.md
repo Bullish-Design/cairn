@@ -85,6 +85,24 @@ All notable changes to cairn are documented in this file.
 - `devenv.lock` is now tracked in git so CI resolves the exact same
   nixpkgs/devenv inputs as local development.
 
+### Runtime
+
+- `AgentStateManager.increment` (and `increment_turn`) now use the workspace
+  KV manager's atomic `increment` (fsdantic >= 0.5.0), so concurrent
+  increments cannot lose updates; a non-numeric stored value still resets to
+  0 first (legacy behavior preserved).
+- Removed dead `copy_workspace_to_submission` helper from
+  `orchestrator_helpers.py` (unused since the bwrap refactor).
+
+### Tests / benchmarks
+
+- Timing benchmarks are deselected in the default suite
+  (`-m "not benchmark"` in `pyproject.toml`) and enforce real targets only
+  under `CAIRN_STRICT_BENCHMARKS=1`; otherwise thresholds are
+  environment-tolerant (5x) so loaded machines do not fail them.
+- New `test_state.py`: namespacing, atomic increments, non-numeric reset,
+  and a 20-way concurrent increment race asserting zero lost updates.
+
 ## [0.2.1] - 2026-08-01
 
 - Baseline release (bwrap executor, orchestrator lifecycle, CLI).

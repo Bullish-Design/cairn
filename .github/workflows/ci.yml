@@ -11,9 +11,9 @@ jobs:
     env:
       # The nixos/nix runner image ships with experimental features disabled;
       # on GitHub runners (Determinate installer) these are already enabled,
-      # so this is a no-op there.  max-jobs/cores keep the CPython-from-source
-      # build (devenv's pinned nixpkgs rev is not cached upstream) from
-      # spawning too many memory-hungry parallel -flto gcc jobs.
+      # so this is a no-op there.  max-jobs/cores keep any local nix builds
+      # (the devenv shell graph) from spawning too many parallel jobs in the
+      # container; python and the rest substitute from cache.nixos.org.
       NIX_CONFIG: "experimental-features = nix-command flakes max-jobs = 2 cores = 2"
     steps:
       - uses: actions/checkout@v4

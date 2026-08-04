@@ -29,6 +29,7 @@ Cairn provides:
 4. **[PROVIDERS.md](docs/PROVIDERS.md)**: code provider reference.
 5. **[MIGRATION.md](docs/MIGRATION.md)**: V2 migration overview.
 6. **[TESTING.md](docs/TESTING.md)**: repository test commands.
+7. **[CHANGELOG.md](CHANGELOG.md)**: version history.
 
 > **Source-of-truth note:** `docs/SPEC.md` defines runtime contracts; when implementation changes in `src/cairn/*`, update `docs/SPEC.md` in the same PR.
 
@@ -78,6 +79,37 @@ uv run cairn accept agent-<id>
 # or
 uv run cairn reject agent-<id>
 ```
+
+Accept reports the merged file count and, when the sandbox deleted files in
+stable, how many deletions were applied (fsdantic overlay tombstones).
+
+## Sandbox deletions (tombstones)
+
+Deletions made inside the sandbox are re-imported into the agent overlay as
+**tombstones** (fsdantic >= 0.7.0 `overlay.tombstone`): files that exist only
+in stable can be deleted by an agent, and the accept merge replays the
+markers against stable (`MergeResult.tombstones_applied`).  A file
+re-created in the overlay after deletion overrides its tombstone.
+
+## Read-only inspection
+
+Inspection commands (`cairn-cli workspace info`, `files list|read|search|tree`,
+`preview changes|file`) open workspaces read-only (`readonly=True`), so they
+never modify the databases they inspect.
+
+## Development
+
+- **Environment**: `devenv` (Nix) manages the toolchain; `devenv test` runs
+the full gate (`ty check` + pytest including the real bubblewrap sandbox
+tests).  `devenv.lock` and `uv.lock` are tracked for reproducibility.
+- **CI**: `.github/workflows/ci.yml` runs the same gate on push/PR.  It runs
+identically on GitHub hosted runners and locally with
+[`act`](https://github.com/nektos/act) (see `.actrc` for the runner image,
+privileged mode, and the persisted `/nix` volume; steady-state local runs
+~2 minutes).
+- **Benchmarks**: timing benchmarks are deselected by default
+(`-m "not benchmark"`); run them with `pytest -m benchmark`, or strictly with
+`CAIRN_STRICT_BENCHMARKS=1 pytest -m benchmark`.
 
 ## Contributing
 

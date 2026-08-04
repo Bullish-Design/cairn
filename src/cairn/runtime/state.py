@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from fsdantic import SerializationError
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -181,6 +182,11 @@ class AgentStateManager:
     async def increment(self, key: str, amount: int = 1) -> int:
         """Increment numeric value and return new value.
 
+        Uses the workspace KV manager's atomic ``increment`` (fsdantic
+        >= 0.5.0): the read-modify-write is serialized per key, so concurrent
+        increments (e.g. parallel agents advancing a shared turn counter)
+        cannot lose updates.
+
         Args:
             key: The state key (created with value 0 if doesn't exist)
             amount: Amount to increment by (default: 1)
@@ -188,12 +194,15 @@ class AgentStateManager:
         Returns:
             The new value after incrementing
         """
-        current = await self.get(key, default=0)
-        if not isinstance(current, (int, float)):
-            current = 0
-        new_value = int(current) + amount
-        await self.set(key, new_value)
-        return new_value
+        full_key = self._full_key(key)
+        try:
+            return await self._kv.increment(full_key, amount)
+        except SerializationError:
+            # Non-numeric stored value: reset to 0 then increment, preserving
+            # the legacy reset-to-zero behavior while keeping the operation
+            # atomic per key.
+            await self._kv.set(full_key, 0)
+            return await self._kv.increment(full_key, amount)
 
     async def increment_turn(self) -> int:
         """Increment and return turn counter.
