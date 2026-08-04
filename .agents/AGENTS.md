@@ -8,23 +8,23 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 
 ### Key Components
 
-1. **Cairn Orchestrator** (`src/cairn/`) - Task orchestration, execution, and lifecycle management
-2. **Code Providers** (`src/cairn/providers.py`) - Pluggable code sourcing (file, inline, LLM, git, registry)
-3. **External Functions** (`src/cairn/external_functions.py`) - Capability surface for sandboxed code
-4. **Neovim Plugin** (`src/cairn/nvim/`) - UI for reviewing and accepting changes
-5. **Nix Modules** (`modules/`) - devenv.sh integration (optional)
-6. **Documentation** - README, CONCEPT, SPEC, SKILL guides
+1. **Cairn Orchestrator** (`src/cairn/orchestrator/`) - Task orchestration, execution, and lifecycle management
+2. **Code Providers** (`src/cairn/providers/providers.py`) - Pluggable code sourcing (file, inline, LLM, git, registry)
+3. **Sandbox Runtime** (`src/cairn/runtime/sandbox/`) - BwrapExecutor (materialize → sandbox run → re-import) and the sandbox API (`boot.py`)
+4. **Workspace APIs** (`src/cairn/runtime/`) - open_workspace, WorkspaceInspector, AgentStateManager, WorkspaceManager
+5. **CLI** (`src/cairn/cli/`) - Thin-client `cairn` (argparse) and `cairn-cli` (Typer); signals + lifecycle mirror
+6. **Documentation** - README, CONCEPT, SPEC, PROVIDERS, MIGRATION, and the agent skills in `.agents/skills/`
 
 ### Technology Stack
 
 - **Nix/devenv** - Development environment management
-- **Python 3.11+** - Orchestrator and libraries
-- **FSdantic** - Type-safe workspace management with overlay semantics
+- **Python 3.13+** - Orchestrator and libraries
+- **FSdantic 0.7+** - Type-safe workspace management with overlay semantics and tombstones
 - **bubblewrap** - Kernel-namespace sandbox for stock CPython execution
 - **BwrapExecutor** - Materialize → sandbox run → re-import changeset
-- **Neovim + Lua** - Editor integration
-- **TMUX** - Workspace management
-- **Jujutsu** - Version control integration
+- **Turso (libSQL/pyturso)** - WAL/MVCC-concurrent workspace storage
+- **pydantic / pydantic-settings / typer / rich / watchfiles** - models, config, CLIs, file watching
+- **Git** - version control (jj is no longer used; see Git Workflow)
 
 **Optional plugins:**
 - **cairn-llm** - LLM-based code generation via `LLMCodeProvider`
@@ -58,53 +58,62 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 
 ```
 cairn/
-├── src/cairn/               # Main orchestrator library
-│   ├── orchestrator.py      # Main orchestration runtime
-│   ├── providers.py         # CodeProvider protocol + built-in providers
-│   ├── external_functions.py # External function factory
-│   ├── agent.py             # Agent state models
-│   ├── queue.py             # Task queue
-│   ├── lifecycle.py         # Lifecycle storage
-│   ├── cli.py               # Command-line interface
-│   ├── commands.py          # Command models
-│   ├── settings.py          # Configuration
-│   ├── signals.py           # Signal file handling
-│   ├── watcher.py           # File system watching
-│   └── nvim/                # Neovim plugin
-│       ├── plugin/cairn.lua
-│       ├── lua/cairn/
-│       │   ├── init.lua
-│       │   ├── commands.lua
-│       │   ├── config.lua
-│       │   ├── watcher.lua
-│       │   ├── tmux.lua
-│       │   └── ghost.lua
-│       ├── doc/cairn.txt
-│       └── tests/
+├── src/cairn/               # Main orchestrator library (V2 layout)
+│   ├── cli/
+│   │   ├── cli.py           # argparse CLI (thin client: signals + mirror)
+│   │   ├── typer_cli.py     # Typer CLI (workspace/files/agent/preview groups)
+│   │   └── commands.py      # typed command models + parse/dispatch
+│   ├── core/
+│   │   ├── constants.py     # all magic numbers / limits
+│   │   ├── exceptions.py    # typed error hierarchy with error codes
+│   │   └── types.py         # TypedDicts (SubmissionData, ...)
+│   ├── orchestrator/
+│   │   ├── orchestrator.py  # CairnOrchestrator: lifecycle + accept/reject/undo
+│   │   ├── lifecycle.py     # LifecycleStore, records, mirror, retention
+│   │   ├── queue.py         # priority TaskQueue
+│   │   ├── signals.py       # SignalHandler + write_signal
+│   │   ├── daemon.py        # pidfile claim/liveness
+│   │   └── orchestrator_helpers.py
+│   ├── providers/
+│   │   └── providers.py     # CodeProvider protocol, file/inline, entry points
+│   ├── runtime/
+│   │   ├── agent.py         # AgentState, AgentContext, VALID_TRANSITIONS
+│   │   ├── settings.py      # Orchestrator/Executor/Paths settings (CAIRN_* env)
+│   │   ├── workspace_manager.py  # open_workspace, WorkspaceManager
+│   │   ├── inspection.py    # WorkspaceInspector, WorkspaceStats
+│   │   ├── state.py         # AgentStateManager (namespaced KV)
+│   │   ├── workspace_cache.py    # LRU workspace cache with pinning
+│   │   └── sandbox/
+│   │       ├── sandbox.py   # BwrapExecutor: materialize → run → re-import
+│   │       └── boot.py      # sandbox API + rlimits (shipped into the sandbox)
+│   ├── utils/
+│   │   ├── retry.py         # with_retry decorator, RetryStrategy
+│   │   └── error_formatting.py
+│   └── watcher/
+│       └── watcher.py       # FileWatcher: project → stable sync
 │
 ├── .agentfs/                # FSdantic databases
-│   ├── stable.db
-│   ├── bin.db
-│   └── agent-{id}.db
+│   ├── stable.db            # source of truth
+│   ├── bin.db               # lifecycle KV + undo snapshots
+│   └── agent-{id}.db        # per-agent overlays
 │
-├── modules/                 # Nix modules (optional)
-│   ├── agentfs.nix
-│   └── cairn.nix
+├── tests/
+│   ├── cairn/               # unit-ish tests (async)
+│   │   └── integration/     # end-to-end / real-sandbox tests
+│   └── fixtures/            # sample project trees
 │
-├── tests/                   # Test suite
-│   ├── unit/
-│   ├── integration/
-│   └── e2e/
+├── .agents/
+│   ├── AGENTS.md            # this file
+│   └── skills/              # agent skills (SKILL.md per directory)
 │
 ├── .context/                # Historical context (archived)
 │
+├── docs/                    # CONCEPT.md, SPEC.md, PROVIDERS.md, MIGRATION.md,
+│                            # TESTING.md, CLI_README.md, REFACTOR_PLAN.md
 ├── README.md
-├── CONCEPT.md
-├── SPEC.md
-├── AGENT.md
-├── TESTING.md
-├── devenv.nix
-└── pyproject.toml
+├── devenv.nix               # Nix/dev shell + sandbox runtime declaration
+├── pyproject.toml
+└── uv.lock
 ```
 
 ## Common Tasks
@@ -140,14 +149,14 @@ cairn/
 ```bash
 # 1. Clone repository
 git clone <repo-url>
-cd nixbox
+cd cairn
 
 # 2. Enter devenv shell
+#    (declares bubblewrap + the sandbox interpreter runtime, CAIRN_EXECUTOR_*)
 devenv shell
 
 # 3. Install Python dependencies
-cd agentfs-pydantic
-uv sync
+uv sync --all-extras
 
 # 4. Run tests
 uv run pytest
@@ -156,37 +165,31 @@ uv run pytest
 ### Running Tests
 
 ```bash
-# Python tests
-cd agentfs-pydantic
+# Python tests (from the repo root)
 uv run pytest
 
-# Neovim plugin tests (if available)
-nvim --headless -c "PlenaryBustedDirectory cairn/nvim/tests/"
+# Targeted: orchestrator + workspace flow
+uv run pytest tests/cairn/test_orchestrator.py tests/cairn/test_workspace.py
 
-# Integration tests
-cd tests/integration
-uv run pytest
+# Agent lifecycle + tools + watcher
+uv run pytest tests/cairn/test_lifecycle.py tests/cairn/test_agent_tools.py tests/cairn/test_watcher.py
 
-# E2E tests
-cd tests/e2e
-./run_tests.sh
+# Performance-marked tests (deselected by default)
+uv run pytest -m benchmark tests/cairn/test_performance.py
+
+# The full repository gate (lockfile, ruff, ty, pytest + coverage floor)
+devenv test
 ```
 
 ### Code Style
 
 **Python:**
-- Follow PEP 8
+- Follow PEP 8 (ruff, line length 120)
 - Use type hints everywhere
 - Prefer async/await for I/O
 - Use Pydantic for validation
-- Max line length: 100 characters
-
-**Lua:**
-- Follow Neovim style guide
-- Use `local` for all variables
-- Prefer functional style
-- Document exported functions
-- Max line length: 100 characters
+- Magic numbers live in `src/cairn/core/constants.py`; typed errors with
+  error codes in `src/cairn/core/exceptions.py`
 
 **Nix:**
 - Follow nixpkgs conventions
@@ -196,75 +199,40 @@ cd tests/e2e
 
 ### Git Workflow
 
-We use **Jujutsu** (jj), not git:
+The repository uses **git** (a `.git` directory is tracked):
 
 ```bash
-# Create a new change
-jj new -m "feat: add workspace materialization"
+# Create a branch / feature change
+git checkout -b feat/workspace-materialization
 
-# Edit files
-# ...
+# Stage and commit
+git add src tests
+git commit -m "feat: add on-demand workspace materialization for agent previews"
 
-# Describe change
-jj describe -m "Add on-demand workspace materialization for agent previews"
-
-# Squash into parent (if needed)
-jj squash
-
-# Create PR
-jj git push --branch my-feature
+# Push and open a PR
+git push -u origin feat/workspace-materialization
 ```
 
-## Subsystem Guides
+## Subsystem Guides (skills)
 
-For detailed information on specific subsystems, see:
+Agent skills live in `.agents/skills/<name>/SKILL.md` (Agent Skills format:
+`name` + `description` frontmatter; pi discovers directories containing
+`SKILL.md`, root-level `.md` files are ignored). Skills load on demand — the
+description tells an agent when to read the full file. See also the cross-links
+at the bottom of each skill.
 
-### [SKILL-AGENTFS.md](docs/skills/SKILL-AGENTFS.md)
-
-- AgentFS SDK usage
-- Overlay semantics
-- File operations
-- KV store operations
-- Performance considerations
-
-### [SKILL-SANDBOX.md](docs/skills/SKILL-SANDBOX.md)
-
-- bwrap sandbox constraints
-- Sandbox API (read_file, write_file, submit_result, ...)
-- Execution limits and error handling
-- Security model
-
-### [SKILL-TMUX.md](docs/skills/SKILL-TMUX.md)
-
-- TMUX session management
-- Pane layouts
-- Neovim integration
-- Programmatic control
-- .tmuxp.yaml configuration
-
-### [SKILL-NEOVIM.md](docs/skills/SKILL-NEOVIM.md)
-
-- Plugin architecture
-- Lua module structure
-- FS event watching
-- Ghost text rendering
-- User commands
-
-### [SKILL-JJ.md](docs/skills/SKILL-JJ.md)
-
-- Jujutsu concepts
-- Change management
-- Agent-to-change mapping
-- Squash/abandon operations
-- Working copy materialization
-
-### [SKILL-DEVENV.md](docs/skills/SKILL-DEVENV.md)
-
-- Nix module structure
-- Environment variables
-- Process management
-- Script helpers
-- Imports and composition
+- [cairn-architecture](skills/cairn-architecture/SKILL.md) — mental model,
+  layers, data layout, lifecycle, invariants. Read first when orienting.
+- [cairn-task-code](skills/cairn-task-code/SKILL.md) — writing sandbox task
+  scripts (the 9 sandbox helpers, limits, submission contract).
+- [cairn-code-providers](skills/cairn-code-providers/SKILL.md) — CodeProvider
+  protocol, built-ins, plugin entry points.
+- [cairn-library-api](skills/cairn-library-api/SKILL.md) — open_workspace,
+  WorkspaceInspector, AgentStateManager, TaskQueue, embedding the orchestrator.
+- [cairn-cli-operations](skills/cairn-cli-operations/SKILL.md) — daemon, CLI
+  commands, signals/mirror, accept/reject/undo, troubleshooting.
+- [cairn-contribution](skills/cairn-contribution/SKILL.md) — the dev gate,
+  tests, conventions, security model, pitfalls when modifying the repo.
 
 ## Common Pitfalls
 
@@ -299,52 +267,51 @@ executor = BwrapExecutor(agent_id=..., workdir=..., agent_fs=..., stable=..., se
 result = await executor.run(code=code, task=task)
 ```
 
-The sandbox runs stock CPython (stdlib available); the sandbox API
-(`read_file`, `write_file`, `list_dir`, `file_exists`, `delete_file`,
-`search_files`, `search_content`, `submit_result`, `log`) is injected as globals by the
-bootstrap script. Imports are allowed — what the code can import is limited
-by the read-only runtime mounts, not by a language subset.
+The sandbox runs stock CPython (stdlib only — no site-packages inside the
+sandbox); the sandbox API (`read_file`, `write_file`, `list_dir`,
+`file_exists`, `delete_file`, `search_files`, `search_content`,
+`submit_result`, `log`) is injected as globals by the bootstrap script.
+Imports are allowed — what the code can import is limited by the read-only
+runtime mounts, not by a language subset.
 
-### Neovim
+### Async/event loop
 
-❌ **Don't:** Block the event loop
-```lua
-while true do
-    check_previews()  -- Blocks forever
-end
+❌ **Don't:** Block the event loop with sync file/db I/O
+```python
+content = path.read_bytes()  # blocking in async context
 ```
 
-✅ **Do:** Use timers or FS events
-```lua
-local timer = vim.loop.new_timer()
-timer:start(0, 500, vim.schedule_wrap(check_previews))
+✅ **Do:** Delegate blocking I/O to a thread
+```python
+content = await asyncio.to_thread(path.read_bytes)
 ```
 
-### Jujutsu
+### Version control
 
-❌ **Don't:** Assume git commands work
+❌ **Don't:** Assume jj commands work
 ```bash
-git commit -m "message"  # Wrong VCS
+jj describe -m "message"  # jj is not used in this repo
 ```
 
-✅ **Do:** Use jj commands
+✅ **Do:** Use git commands
 ```bash
-jj describe -m "message"
+git commit -m "message"
 ```
 
 ## API Stability
 
 ### Stable APIs (Don't break without major version bump)
 
-- **AgentFS SDK** - File operations, KV operations
+- **Workspace APIs** - open_workspace, WorkspaceManager, WorkspaceInspector, AgentStateManager
 - **Sandbox API** - read_file/write_file/list_dir/file_exists/delete_file/search_files/search_content/submit_result/log
-- **Neovim commands** - `:Cairn*` commands
-- **Environment variables** - `CAIRN_*`, `AGENTFS_*`
+- **CLI commands** - `cairn up/run/spawn/queue/list-agents/status/accept/reject/undo/logs`; `cairn-cli` groups
+- **Environment variables** - `CAIRN_*` (including `CAIRN_ORCHESTRATOR_`, `CAIRN_EXECUTOR_`, `CAIRN_PATHS_` prefixes)
+- **CodeProvider protocol** - `get_code` / `validate_code`
 
 ### Unstable APIs (Can change)
 
 - Internal orchestrator functions
-- Lua helper functions (not exported)
+- Signal file payload format (transport is stable, payload may evolve)
 - Config file format (until 1.0)
 - CLI output format
 
@@ -420,47 +387,56 @@ async def test_enqueue_dequeue():
 ### Integration Tests
 
 ```python
-# tests/integration/test_agent_lifecycle.py
+# tests/cairn/integration/test_e2e_workflows.py
 
 @pytest.mark.asyncio
-async def test_full_agent_lifecycle():
+async def test_full_agent_lifecycle(tmp_path):
     """Test agent from spawn to accept"""
-    orch = CairnOrchestrator()
+    orch = CairnOrchestrator(
+        project_root=tmp_path / "project",
+        cairn_home=tmp_path / "cairn-home",
+        config=OrchestratorSettings(max_concurrent_agents=1),
+        code_provider=InlineCodeProvider(),
+        executor_factory=lambda **kw: StubExecutor("hello.py", "done", **kw),
+    )
     await orch.initialize()
 
     # Spawn
-    agent_id = await orch.spawn_agentlet("Add docstrings")
-    assert agent_id in orch.active_agents
+    agent_id = await orch.spawn_agent("Add docstrings")
 
-    # Wait for completion
-    await asyncio.sleep(10)
+    # Wait for REVIEWING
+    await _wait_for_state(orch, agent_id, {AgentState.REVIEWING})
 
     # Accept
     await orch.accept_agent(agent_id)
-    assert agent_id not in orch.active_agents
+    assert await orch.stable.files.exists("hello.py")
+
+    await orch.shutdown()
 ```
 
 ### E2E Tests
 
 ```bash
 #!/bin/bash
-# tests/e2e/test_workflow.sh
+# tests/cairn/integration/test_e2e_workflows.py is the in-suite equivalent.
+# For a manual end-to-end check against the CLI:
 
-# Start orchestrator
+# Start the daemon
 cairn up &
 ORCH_PID=$!
 
-# Queue task
-nvim --headless -c "CairnQueue 'Add docstrings'" -c "qa"
+# Queue a task (writes a signal file; daemon picks it up)
+cairn queue scripts/task.py
 
-# Wait for completion
+# Wait for it to reach REVIEWING
 sleep 5
 
-# Check preview exists
-test -d ~/.cairn/workspaces/agent-*
+# Inspect
+cairn list-agents
+cairn status agent-<id>
 
 # Accept
-nvim --headless -c "CairnAccept" -c "qa"
+cairn accept agent-<id>
 
 # Cleanup
 kill $ORCH_PID
@@ -532,12 +508,12 @@ We use semantic versioning: MAJOR.MINOR.PATCH
 
 Before releasing:
 
-- [ ] All tests pass
+- [ ] All tests pass (devenv test)
 - [ ] Documentation updated
 - [ ] CHANGELOG.md updated
 - [ ] Version bumped in pyproject.toml
-- [ ] Tagged in git/jj
-- [ ] Published to PyPI (agentfs-pydantic only)
+- [ ] Tagged in git
+- [ ] Published to PyPI (cairn only)
 
 ## Getting Help
 
@@ -608,8 +584,8 @@ Solution: Added file locking around workspace creation.
 Tested with 10 concurrent materializations.
 
 Files changed:
-- cairn/orchestrator.py: Added FileLock usage
-- tests/integration/test_concurrent.py: Added test
+- src/cairn/orchestrator/orchestrator.py: Added FileLock usage
+- tests/cairn/integration/test_concurrent.py: Added test
 ```
 
 ❌ **Bad:**
@@ -625,50 +601,50 @@ Fixed a bug in the orchestrator.
 # Enter devenv
 devenv shell
 
-# Run orchestrator
+# Run the daemon
 cairn up
 
-# Run in foreground with debug logging
-CAIRN_LOG_LEVEL=debug cairn up
+# Run a single task inline (no daemon)
+cairn run scripts/task.py
 
-# Check AgentFS status
-agentfs-info
-
-# Query files
-uv run agentfs-pydantic query "*.py"
+# Full gate (lockfile, lint, types, tests + coverage)
+devenv test
 ```
 
 ### Testing
 
 ```bash
 # Run all tests
-pytest
+uv run pytest
 
-# Run specific test
-pytest tests/unit/test_queue.py::test_priority
+# Run a specific test
+uv run pytest tests/cairn/test_orchestrator.py::test_accept_agent_flow
 
 # Run with coverage
-pytest --cov=cairn --cov-report=html
+uv run pytest --cov=cairn --cov-report=html
 
 # Type checking
-ty check
+uv run ty check
 ```
 
 ### Debugging
 
 ```bash
-# Watch orchestrator logs
-tail -f ~/.cairn/logs/orchestrator.log
+# Read an agent's sandbox run log
+cairn logs agent-<id>
 
-# Inspect agent database
-sqlite3 .agentfs/agent-abc123.db "SELECT * FROM tool_calls;"
+# The log file on disk (kept for errored agents)
+cat ~/.cairn/workspaces/agent-<id>/.cairn/run.log
 
-# Check tmux sessions
-tmux ls
-tmux attach -t cairn
+# Inspect an agent overlay read-only via the Typer CLI
+cairn-cli preview changes agent-<id>
+cairn-cli files list agent-<id>
 
-# LLM debugging
-llm logs
+# Inspect the lifecycle mirror (CLI query path)
+cat ~/.cairn/state/lifecycle.json
+
+# Daemon pidfile
+cat ~/.cairn/state/orchestrator.pid
 ```
 
 ---
