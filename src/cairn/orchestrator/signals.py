@@ -53,6 +53,7 @@ class SignalHandler:
         "queue": CommandType.QUEUE,
         "accept": CommandType.ACCEPT,
         "reject": CommandType.REJECT,
+        "undo": CommandType.UNDO,
     }
 
     def __init__(

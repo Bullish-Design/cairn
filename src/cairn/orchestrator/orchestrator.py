@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
@@ -22,6 +23,7 @@ from cairn.cli.commands import (
     QueueCommand,
     RejectCommand,
     StatusCommand,
+    UndoCommand,
 )
 from cairn.core.constants import (
     DEFAULT_EXECUTION_TIMEOUT_SECONDS,
@@ -29,6 +31,7 @@ from cairn.core.constants import (
     LIFECYCLE_MAX_RETRY_ATTEMPTS,
     LIFECYCLE_RETRY_BACKOFF_FACTOR,
     LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
+    MAX_STORED_LOG_BYTES,
 )
 from cairn.core.exceptions import (
     AgentNotFoundError,
@@ -45,11 +48,14 @@ from cairn.core.exceptions import (
 )
 from cairn.core.types import AgentSummary
 from cairn.orchestrator.lifecycle import (
+    RUN_KEY,
     SUBMISSION_KEY,
     LIFECYCLE_MIRROR_NAME,
     LifecycleRecord,
     LifecycleStore,
+    RunRecord,
     SubmissionRecord,
+    UndoRecord,
 )
 from cairn.orchestrator.queue import TaskPriority, TaskQueue
 from cairn.orchestrator.signals import SignalHandler
@@ -145,7 +151,9 @@ class CairnOrchestrator:
 
         pyturso locks ``bin.db`` exclusively even for read-only opens, so the
         CLI cannot open it while the daemon runs; the mirror under
-        ``$CAIRN_HOME/state/lifecycle.json`` is the CLI's query path.
+        ``$CAIRN_HOME/state/lifecycle.json`` is the CLI's query path.  Agents
+        whose self-report diverges from what they actually did also carry the
+        ground-truth path lists in the mirror so `cairn status` can show them.
         """
         if self.lifecycle is None:
             return
@@ -154,8 +162,33 @@ class CairnOrchestrator:
         except Exception:
             logger.exception("Failed to list lifecycle records for mirror")
             return
-        payload = {record.agent_id: record.model_dump(mode="json") for record in records}
+        payload: dict[str, dict] = {}
+        for record in records:
+            data = record.model_dump(mode="json")
+            if record.claim_mismatch:
+                run = await self._load_run_record_for(record)
+                if run is not None:
+                    data["run_written"] = run.written
+                    data["run_deleted"] = run.deleted
+            payload[record.agent_id] = data
         await asyncio.to_thread(self._write_mirror_sync, payload)
+
+    async def _load_run_record_for(self, record: LifecycleRecord) -> RunRecord | None:
+        """Load an agent's run record from its (possibly trashed) workspace db."""
+        try:
+            db_path = Path(record.db_path)
+            if not db_path.exists():
+                return None
+            agent_fs = await Fsdantic.open(path=str(db_path))
+        except Exception:
+            return None
+        try:
+            repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
+            return await repo.load(RUN_KEY)
+        except Exception:
+            return None
+        finally:
+            await agent_fs.close()
 
     def _write_mirror_sync(self, payload: dict) -> None:
         state_dir = self.cairn_home / "state"
@@ -258,6 +291,8 @@ class CairnOrchestrator:
                 return await self._handle_status(command)
             case ListAgentsCommand():
                 return await self._handle_list_agents(command)
+            case UndoCommand():
+                return await self._handle_undo(command)
         raise ValueError(f"Unsupported command type: {command.type.value}")
 
     async def wait_for_agent(
@@ -288,12 +323,16 @@ class CairnOrchestrator:
         return CommandResult(command_type=command.type, agent_id=agent_id)
 
     async def _handle_accept(self, command: AcceptCommand) -> CommandResult:
-        accept_stats = await self.accept_agent(command.agent_id)
+        accept_stats = await self.accept_agent(command.agent_id, force=command.force)
         return CommandResult(
             command_type=command.type,
             agent_id=command.agent_id,
             payload=accept_stats,
         )
+
+    async def _handle_undo(self, command: UndoCommand) -> CommandResult:
+        stats = await self.undo_accept(command.agent_id)
+        return CommandResult(command_type=command.type, agent_id=command.agent_id, payload=stats)
 
     async def _handle_reject(self, command: RejectCommand) -> CommandResult:
         await self.reject_agent(command.agent_id)
@@ -407,12 +446,13 @@ class CairnOrchestrator:
         await self.persist_state()
         return agent_id
 
-    async def accept_agent(self, agent_id: str) -> dict[str, int]:
+    async def accept_agent(self, agent_id: str, *, force: bool = False) -> dict[str, int]:
         """Accept an agent's overlay changes into stable.
 
-        Returns merge statistics: ``files_merged`` (overlay files written to
-        stable) and ``tombstones_applied`` (deletions recorded by the sandbox
-        re-import that were applied to stable).
+        Unless ``force``, refuses when stable changed for paths the agent
+        touched after the agent read them (the accept would silently discard
+        those edits).  Returns merge statistics: ``files_merged`` and
+        ``tombstones_applied``.
         """
         ctx = self._get_agent(agent_id)
         if ctx.state is not AgentState.REVIEWING:
@@ -422,6 +462,24 @@ class CairnOrchestrator:
             raise RuntimeError("Stable workspace not initialized")
 
         agent_fs = await self._get_agent_workspace(ctx)
+        run = await self._load_run_record(agent_fs)
+
+        if run is not None and not force:
+            stale = await self._detect_stale_paths(run)
+            if stale:
+                raise WorkspaceMergeError(
+                    format_agent_error(
+                        "Stable changed since this agent started; accepting would "
+                        "discard those changes",
+                        agent_id=agent_id,
+                        state=ctx.state.value,
+                        stale_paths=stale,
+                    ),
+                    error_code="ACCEPT_STALE_BASE",
+                    context={"agent_id": agent_id, "stale_paths": stale},
+                )
+
+        await self._snapshot_for_undo(ctx, run)
         merge_result = await self.stable.overlay.merge(agent_fs, strategy=MergeStrategy.OVERWRITE)
         merge_errors = getattr(merge_result, "errors", None)
         if merge_errors:
@@ -462,6 +520,38 @@ class CairnOrchestrator:
         stats = {"files_merged": files_merged, "tombstones_applied": tombstones_applied}
         await self._record_accept_stats(agent_id, stats)
         return stats
+
+    @staticmethod
+    def _sha256_bytes(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    async def _load_run_record(self, agent_fs: Workspace) -> RunRecord | None:
+        """Load the agent's run record from its workspace, if present."""
+        try:
+            repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
+            return await repo.load(RUN_KEY)
+        except Exception:
+            return None
+
+    async def _detect_stale_paths(self, run: RunRecord) -> list[str]:
+        """Paths whose content in stable changed after the agent read them.
+
+        base_hashes holds the digest each touched path had in the materialized
+        workspace at run start.  If stable's current content no longer matches,
+        something (you, the watcher, another agent) changed it in the meantime
+        and an OVERWRITE merge would silently discard that change.
+        """
+        if self.stable is None:
+            return []
+        stale: list[str] = []
+        for rel, base_digest in run.base_hashes.items():
+            try:
+                current = await self.stable.files.read(rel, mode="binary")
+            except Exception:
+                continue          # absent now: deletion is handled by tombstones
+            if self._sha256_bytes(current) != base_digest:
+                stale.append(rel)
+        return sorted(stale)
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
@@ -514,6 +604,9 @@ class CairnOrchestrator:
                         db_path=str(bin_db),
                         submission=ctx.submission,
                         error=ctx.error,
+                        files_written=ctx.files_written,
+                        files_deleted=ctx.files_deleted,
+                        claim_mismatch=ctx.claim_mismatch,
                     )
                     await self.lifecycle.save(record)
 
@@ -566,12 +659,33 @@ class CairnOrchestrator:
         await self._transition_agent_state(ctx, AgentState.EXECUTING)
 
         result = await self._execute_code(ctx, generated)
-        ctx.execution_result = {"status": "complete"}
         ctx.submission = result.submission
+        await self._record_run(ctx, result)
 
         await self._transition_agent_state(ctx, AgentState.SUBMITTING)
         await self._submit_results(ctx)
         await self._transition_agent_state(ctx, AgentState.REVIEWING)
+
+    async def _record_run(self, ctx: AgentContext, result: SandboxResult) -> None:
+        """Persist the sandbox's ground-truth changeset for human review."""
+        agent_fs = ctx.agent_fs or await self._get_agent_workspace(ctx)
+        record = RunRecord(
+            agent_id=ctx.agent_id,
+            written=result.changes["written"],
+            deleted=result.changes["deleted"],
+            base_hashes=result.base_hashes,
+            log=result.log[-MAX_STORED_LOG_BYTES:],
+            exit_code=result.exit_code,
+            updated_at=time.time(),
+        )
+        repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
+        await repo.save(RUN_KEY, record)
+
+        ctx.files_written = len(record.written)
+        ctx.files_deleted = len(record.deleted)
+        claimed = set((result.submission or {}).get("changed_files", []))
+        actual = set(record.written) | set(record.deleted)
+        ctx.claim_mismatch = bool(claimed) and claimed != actual
 
     async def _transition_agent_state(self, ctx: AgentContext, new_state: AgentState) -> None:
         """Persist an agent state transition."""
@@ -705,6 +819,9 @@ class CairnOrchestrator:
         record.db_path = str(db_path)
         record.submission = ctx.submission
         record.error = ctx.error
+        record.files_written = ctx.files_written
+        record.files_deleted = ctx.files_deleted
+        record.claim_mismatch = ctx.claim_mismatch
 
     async def _save_lifecycle_record(self, ctx: AgentContext) -> None:
         lifecycle = self.lifecycle
@@ -743,6 +860,9 @@ class CairnOrchestrator:
             db_path=str(db_path),
             submission=ctx.submission,
             error=ctx.error,
+            files_written=ctx.files_written,
+            files_deleted=ctx.files_deleted,
+            claim_mismatch=ctx.claim_mismatch,
         )
 
         @with_retry(
@@ -780,3 +900,49 @@ class CairnOrchestrator:
         except LifecycleError:
             logger.debug("Could not persist accept stats", extra={"agent_id": agent_id})
         await self._mirror_lifecycle()
+
+    async def _snapshot_for_undo(self, ctx: AgentContext, run: RunRecord | None) -> None:
+        """Save stable's pre-merge content for the paths this accept will touch."""
+        if run is None or self.bin is None or self.stable is None:
+            return
+        prefix = f"undo/{ctx.agent_id}/"
+        restored: list[str] = []
+        removed: list[str] = []
+        for rel in sorted(set(run.written) | set(run.deleted)):
+            try:
+                content = await self.stable.files.read(rel, mode="binary")
+            except Exception:
+                removed.append(rel)      # did not exist before: undo = delete
+                continue
+            await self.bin.files.write(prefix + rel, content, mode="binary")
+            restored.append(rel)
+
+        repo = self.bin.kv.repository(prefix="", model_type=UndoRecord)
+        await repo.save(f"undo:{ctx.agent_id}", UndoRecord(
+            agent_id=ctx.agent_id,
+            restore_paths=restored,
+            delete_paths=removed,
+            created_at=time.time(),
+            updated_at=time.time(),
+        ))
+
+    async def undo_accept(self, agent_id: str) -> dict[str, int]:
+        """Restore stable to its pre-accept state for one agent's changes."""
+        if self.bin is None or self.stable is None:
+            raise RuntimeError("Bin/stable workspace not initialized")
+        repo = self.bin.kv.repository(prefix="", model_type=UndoRecord)
+        undo = await repo.load(f"undo:{agent_id}")
+        if undo is None:
+            raise AgentNotFoundError(
+                f"No undo record for {agent_id} (already expired or never accepted)",
+                error_code="UNDO_NOT_FOUND",
+            )
+        prefix = f"undo/{agent_id}/"
+        for rel in undo.restore_paths:
+            content = await self.bin.files.read(prefix + rel, mode="binary")
+            await self.stable.files.write(rel, content, mode="binary")
+        for rel in undo.delete_paths:
+            with suppress(Exception):
+                await self.stable.files.remove(rel)
+        await repo.delete(f"undo:{agent_id}")
+        return {"restored": len(undo.restore_paths), "deleted": len(undo.delete_paths)}

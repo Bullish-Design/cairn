@@ -559,6 +559,7 @@ def agent_status(
 @agent_app.command("accept")
 def agent_accept(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
+    force: Annotated[bool, typer.Option("--force", help="Accept even if stable changed since the agent started")] = False,
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
 ):
@@ -568,7 +569,7 @@ def agent_accept(
         orchestrator = await get_orchestrator(project_root, cairn_home)
 
         try:
-            command = parse_command_payload("accept", {"agent_id": agent_id})
+            command = parse_command_payload("accept", {"agent_id": agent_id, "force": force})
             result = await orchestrator.submit_command(command)
 
             files_merged = result.payload.get("files_merged", 0)

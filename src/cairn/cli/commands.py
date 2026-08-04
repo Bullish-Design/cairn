@@ -32,6 +32,7 @@ class CommandType(str, Enum):
     REJECT = "reject"
     STATUS = "status"
     LIST_AGENTS = "list_agents"
+    UNDO = "undo"
 
 
 class _BaseCommandModel(BaseModel):
@@ -66,6 +67,12 @@ class QueueCommand(_BaseCommandModel):
 class AcceptCommand(_BaseCommandModel):
     type: Literal[CommandType.ACCEPT] = CommandType.ACCEPT
     agent_id: str = Field(min_length=1)
+    force: bool = False
+
+
+class UndoCommand(_BaseCommandModel):
+    type: Literal[CommandType.UNDO] = CommandType.UNDO
+    agent_id: str = Field(min_length=1)
 
 
 class RejectCommand(_BaseCommandModel):
@@ -83,7 +90,7 @@ class ListAgentsCommand(_BaseCommandModel):
 
 
 CommandEnvelope: TypeAlias = Annotated[
-    QueueCommand | AcceptCommand | RejectCommand | StatusCommand | ListAgentsCommand,
+    QueueCommand | AcceptCommand | RejectCommand | StatusCommand | ListAgentsCommand | UndoCommand,
     Field(discriminator="type"),
 ]
 

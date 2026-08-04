@@ -73,6 +73,8 @@ class SandboxResult:
     submission: SubmissionData | None
     changes: dict[str, list[str]] = field(default_factory=lambda: {"written": [], "deleted": []})
     log: str = ""
+    base_hashes: dict[str, str] = field(default_factory=dict)   # for the accept staleness check
+    exit_code: int = 0
 
 
 class BwrapExecutor:
@@ -164,6 +166,8 @@ class BwrapExecutor:
             )
 
         written, deleted = self._diff_snapshot(workdir, baseline)
+        touched = [rel for rel, _ in written] + deleted
+        base_hashes = {rel: baseline[rel] for rel in touched if rel in baseline}
         await self._reimport(written, deleted)
 
         submission = self._read_submission(workdir / SUBMISSION_RELPATH, default_summary=task)
@@ -171,6 +175,8 @@ class BwrapExecutor:
             submission=submission,
             changes={"written": [rel for rel, _ in written], "deleted": deleted},
             log=run_log,
+            base_hashes=base_hashes,
+            exit_code=proc.returncode or 0,
         )
 
     # ------------------------------------------------------------------

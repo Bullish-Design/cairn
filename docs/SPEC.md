@@ -302,10 +302,16 @@ opens, so the CLI cannot open `bin.db` while the daemon holds it.
 - `cairn list-agents` - Read the lifecycle mirror
 - `cairn status <agent-id>` - Read the lifecycle mirror; exit 1 + friendly
   message for unknown agents (no traceback)
-- `cairn accept <agent-id> [--timeout N]` - Write an `accept` signal, then poll
-  the mirror until the accept settles
+- `cairn accept <agent-id> [--timeout N] [--force]` - Write an `accept` signal, then poll
+  the mirror until the accept settles.  Without `--force`, accept is refused
+  (`ACCEPT_STALE_BASE`) if stable changed for any path the agent touched since
+  the agent read it.
 - `cairn reject <agent-id> [--timeout N]` - Write a `reject` signal, then poll
   the mirror until the reject settles
+- `cairn undo <agent-id>` - Write an `undo` signal; the daemon restores stable
+  to its pre-accept state for that agent (the snapshot lives in the bin
+  workspace under `undo/{agent_id}/` and is retained on the lifecycle cleanup
+  schedule)
 
 Mutating commands exit 2 with guidance when no daemon is running.
 

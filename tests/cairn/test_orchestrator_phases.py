@@ -6,7 +6,7 @@ import pytest
 from fsdantic import Fsdantic
 
 from cairn.core.exceptions import ProviderError
-from cairn.orchestrator.lifecycle import SUBMISSION_KEY, LifecycleStore, SubmissionRecord
+from cairn.orchestrator.lifecycle import RUN_KEY, SUBMISSION_KEY, LifecycleStore, RunRecord, SubmissionRecord
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
 from cairn.runtime.agent import AgentContext, AgentState
@@ -172,6 +172,83 @@ async def test_execute_code_passes_code_and_task_to_executor(tmp_path: Path) -> 
         assert executor.ran is True
         assert executor.code == "x = 2"
         assert executor.task == "phase test"
+    finally:
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
+
+
+class LyingExecutor:
+    """Fake executor that writes two files but reports only one."""
+
+    def __init__(self, **kwargs: object) -> None:
+        _ = kwargs
+
+    async def run(self, *, code: str, task: str) -> SandboxResult:
+        _ = code, task
+        return SandboxResult(
+            submission={"summary": "done", "changed_files": ["a.txt"], "submitted_at": 1.0},
+            changes={"written": ["a.txt", "b.txt"], "deleted": []},
+            log="agent did stuff\n",
+            base_hashes={"a.txt": "h1", "b.txt": "h2"},
+            exit_code=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_record_persists_ground_truth_and_flags_mismatch(tmp_path: Path) -> None:
+    """P2.1: the sandbox-observed changeset is persisted in a RunRecord and a
+    lying self-report is flagged on the lifecycle record."""
+    orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+    orch.executor_factory = lambda **kwargs: LyingExecutor(**kwargs)
+
+    try:
+        await orch._execute_agent_lifecycle(ctx)
+
+        # The run record lists both files actually written.
+        run_repo = agent_ws.kv.repository(prefix="", model_type=RunRecord)
+        run = await run_repo.load(RUN_KEY)
+        assert run is not None
+        assert run.written == ["a.txt", "b.txt"]
+        assert run.deleted == []
+        assert run.base_hashes == {"a.txt": "h1", "b.txt": "h2"}
+        assert run.log == "agent did stuff\n"
+        assert run.exit_code == 0
+
+        # The agent's self-report does not match what it did.
+        assert ctx.files_written == 2
+        assert ctx.claim_mismatch is True
+
+        # The lifecycle record mirrors the summary fields.
+        record = await orch.lifecycle.load(ctx.agent_id)
+        assert record is not None
+        assert record.claim_mismatch is True
+        assert record.files_written == 2
+        assert record.files_deleted == 0
+        assert record.state is AgentState.REVIEWING
+    finally:
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
+
+
+@pytest.mark.asyncio
+async def test_run_record_no_mismatch_when_report_matches(tmp_path: Path) -> None:
+    orch, ctx, stable, bin_ws, agent_ws = await _setup_orchestrator(tmp_path)
+
+    try:
+        await orch._execute_agent_lifecycle(ctx)
+
+        run_repo = agent_ws.kv.repository(prefix="", model_type=RunRecord)
+        run = await run_repo.load(RUN_KEY)
+        assert run is not None
+        # PhaseExecutor claims notes.txt but actually changed nothing: the
+        # claim is non-empty and does not match the empty ground truth, so the
+        # agent is flagged.
+        assert ctx.claim_mismatch is True
+        record = await orch.lifecycle.load(ctx.agent_id)
+        assert record is not None
+        assert record.claim_mismatch is True
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)

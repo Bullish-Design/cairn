@@ -163,8 +163,21 @@ async def _run_status(args: argparse.Namespace) -> int:
         "task": record.task,
         "error": record.error,
         "submission": record.submission,
+        "files_written": record.files_written,
+        "files_deleted": record.files_deleted,
+        "claim_mismatch": record.claim_mismatch,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+    # The mirror carries the ground-truth path lists for mismatch agents.
+    run_written = getattr(record, "run_written", None)
+    run_deleted = getattr(record, "run_deleted", None)
+    if record.claim_mismatch:
+        claimed = sorted(record.submission["changed_files"]) if record.submission else []
+        actual = sorted((run_written or []) + (run_deleted or []))
+        print(f"agent claims : {', '.join(claimed) if claimed else '(nothing)'}")
+        print(f"actually wrote: {', '.join(actual) if actual else '(nothing)'}")
+        print("! the agent's self-report does not match what it did", file=sys.stderr)
     return 0
 
 
@@ -193,7 +206,7 @@ async def _poll_until(
 
 
 async def _run_accept(args: argparse.Namespace) -> int:
-    command = parse_command_payload("accept", {"agent_id": args.agent_id})
+    command = parse_command_payload("accept", {"agent_id": args.agent_id, "force": args.force})
     rc = await _dispatch_mutation(args, command)
     if rc != 0:
         return rc
@@ -208,6 +221,12 @@ async def _run_accept(args: argparse.Namespace) -> int:
         f"{stats.get('tombstones_applied', 0)} deletion(s) applied"
     )
     return 0
+
+
+async def _run_undo(args: argparse.Namespace) -> int:
+    """Undo a previously accepted agent's changes to stable."""
+    command = parse_command_payload("undo", {"agent_id": args.agent_id})
+    return await _dispatch_mutation(args, command)
 
 
 async def _run_reject(args: argparse.Namespace) -> int:
@@ -288,8 +307,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     accept_parser = subparsers.add_parser("accept", help="Accept agent changes")
     accept_parser.add_argument("agent_id")
+    accept_parser.add_argument("--force", action="store_true", help="Accept even if stable changed since the agent started")
     accept_parser.add_argument("--timeout", type=float, default=300.0, help="Seconds to wait for the accept to settle")
     accept_parser.set_defaults(handler=_run_accept, is_async=True)
+
+    undo_parser = subparsers.add_parser("undo", help="Undo an accepted agent's changes to stable")
+    undo_parser.add_argument("agent_id")
+    undo_parser.set_defaults(handler=_run_undo, is_async=True)
 
     reject_parser = subparsers.add_parser("reject", help="Reject agent changes")
     reject_parser.add_argument("agent_id")

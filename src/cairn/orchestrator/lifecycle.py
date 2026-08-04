@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
+RUN_KEY = "run"
 
 LIFECYCLE_MIRROR_NAME = "lifecycle.json"
 
@@ -60,6 +61,9 @@ class LifecycleRecord(VersionedKVRecord):
     error: str | None = None
     version: int = 0
     accept_stats: dict[str, int] | None = None
+    files_written: int = 0
+    files_deleted: int = 0
+    claim_mismatch: bool = False
 
     @field_validator("agent_id")
     @classmethod
@@ -85,6 +89,26 @@ class SubmissionRecord(VersionedKVRecord):
 
     agent_id: str
     submission: SubmissionData
+
+
+class RunRecord(VersionedKVRecord):
+    """Ground truth about what the sandbox actually did."""
+
+    agent_id: str
+    written: list[str] = []
+    deleted: list[str] = []
+    base_hashes: dict[str, str] = {}
+    log: str = ""
+    exit_code: int = 0
+
+
+class UndoRecord(VersionedKVRecord):
+    """Pre-accept snapshot of stable for one agent, enabling `cairn undo`."""
+
+    agent_id: str
+    restore_paths: list[str] = []
+    delete_paths: list[str] = []
+    created_at: float = 0.0
 
 
 class LifecycleStore:
@@ -236,6 +260,18 @@ class LifecycleStore:
 
             await self.delete(record.agent_id)
             cleaned += 1
+
+            # Drop the accept-undo snapshot for the same agent (P2.3): the
+            # undo window is bounded by the same retention schedule.
+            undo_repo = self.workspace.kv.repository(prefix="", model_type=UndoRecord)
+            with suppress(Exception):
+                await undo_repo.delete(f"undo:{record.agent_id}")
+            undo_prefix = f"undo/{record.agent_id}/"
+            with suppress(Exception):
+                entries = await self.workspace.files.search(undo_prefix + "**/*")
+                for entry in entries:
+                    with suppress(Exception):
+                        await self.workspace.files.remove(entry)
 
             if agentfs_dir is not None:
                 db_path = Path(record.db_path)

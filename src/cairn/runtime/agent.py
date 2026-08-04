@@ -41,6 +41,9 @@ class AgentContext(BaseModel):
     execution_result: ExecutionResult | None = None
     submission: SubmissionData | None = None
     error: str | None = None
+    files_written: int = 0
+    files_deleted: int = 0
+    claim_mismatch: bool = False
     created_at: float = Field(default_factory=time.time)
     state_changed_at: float = Field(default_factory=time.time)
 
