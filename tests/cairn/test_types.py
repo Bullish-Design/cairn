@@ -1,7 +1,5 @@
 """Tests for type definitions and type safety."""
 
-import pytest
-
 from cairn.core.types import SearchContentMatchData, SubmissionData
 
 

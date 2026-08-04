@@ -9,9 +9,9 @@ from pathlib import Path
 from fsdantic import Workspace
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from cairn.orchestrator.queue import TaskPriority
 from cairn.core.exceptions import AgentStateError
 from cairn.core.types import SubmissionData
+from cairn.orchestrator.queue import TaskPriority
 
 
 class AgentState(str, Enum):

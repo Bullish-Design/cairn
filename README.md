@@ -107,16 +107,20 @@ never modify the databases they inspect.
 ## Development
 
 - **Environment**: `devenv` (Nix) manages the toolchain; `devenv test` runs
-the full gate (`ty check` + pytest including the real bubblewrap sandbox
-tests).  `devenv.lock` and `uv.lock` are tracked for reproducibility.
-- **CI**: `.github/workflows/ci.yml` runs the same gate on push/PR.  It runs
-identically on GitHub hosted runners and locally with
-[`act`](https://github.com/nektos/act) (see `.actrc` for the runner image,
-privileged mode, and the persisted `/nix` volume; steady-state local runs
-~2 minutes).
+the full gate: `uv lock --check`, `ruff check` + `ruff format --check`,
+`ty check`, and pytest including the real bubblewrap sandbox tests with a
+75% coverage floor.  `devenv.lock` and `uv.lock` are tracked for
+reproducibility.
+- **CI**: `.github/workflows/ci.yml` runs the same gate on push/PR, plus a
+separate non-blocking benchmark job.  It runs identically on GitHub hosted
+runners and locally with [`act`](https://github.com/nektos/act) (see
+`.actrc` for the runner image, privileged mode, and the persisted `/nix`
+volume; steady-state local runs ~2 minutes).
 - **Benchmarks**: timing benchmarks are deselected by default
 (`-m "not benchmark"`); run them with `pytest -m benchmark`, or strictly with
-`CAIRN_STRICT_BENCHMARKS=1 pytest -m benchmark`.
+`CAIRN_STRICT_BENCHMARKS=1 pytest -m benchmark`.  CI runs them in a separate
+`continue-on-error` job with relaxed thresholds so flakiness never blocks
+merges.
 
 ## Contributing
 

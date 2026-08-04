@@ -7,9 +7,10 @@ debugging, and diagnostic purposes.
 
 from __future__ import annotations
 
+import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
     from fsdantic import Workspace
@@ -46,7 +47,7 @@ class WorkspaceInspector:
         ```
     """
 
-    def __init__(self, workspace: "Workspace"):
+    def __init__(self, workspace: Workspace):
         """Create inspector from an existing workspace.
 
         Args:
@@ -57,7 +58,7 @@ class WorkspaceInspector:
         self._owned = False
 
     @classmethod
-    async def from_path(cls, path: Path | str) -> "WorkspaceInspector":
+    async def from_path(cls, path: Path | str) -> WorkspaceInspector:
         """Create inspector by opening workspace at path.
 
         The returned inspector owns the workspace and will close it
@@ -76,7 +77,7 @@ class WorkspaceInspector:
         inspector._owned = True
         return inspector
 
-    async def __aenter__(self) -> "WorkspaceInspector":
+    async def __aenter__(self) -> Self:
         """Enter async context."""
         return self
 
@@ -84,14 +85,14 @@ class WorkspaceInspector:
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
-        exc_tb: Any,
+        exc_tb: types.TracebackType | None,
     ) -> None:
         """Exit async context, closing workspace if owned."""
         if self._owned:
             await self._workspace.close()
 
     @property
-    def workspace(self) -> "Workspace":
+    def workspace(self) -> Workspace:
         """Access underlying workspace."""
         return self._workspace
 
@@ -145,7 +146,7 @@ class WorkspaceInspector:
                         "type": "file" if stat.is_file else "directory",
                     }
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - best-effort stats for the tree view
                 entries.append({"name": name, "size": 0, "type": "unknown"})
         return entries
 
@@ -202,7 +203,7 @@ class WorkspaceInspector:
         try:
             tree = await self._workspace.files.tree("/", max_depth=100)
             dir_count = self._count_dirs_in_tree(tree)
-        except Exception:
+        except Exception:  # noqa: BLE001 - dir count is an estimate; don't fail stats
             dir_count = 0
 
         return WorkspaceStats(

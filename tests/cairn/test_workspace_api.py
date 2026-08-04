@@ -8,11 +8,12 @@ Tests for:
 
 from __future__ import annotations
 
+from datetime import UTC
 from pathlib import Path
 
 import pytest
 
-from cairn import open_workspace, WorkspaceInspector, WorkspaceStats, AgentStateManager
+from cairn import AgentStateManager, WorkspaceInspector, WorkspaceStats, open_workspace
 from cairn.runtime.workspace_manager import WorkspaceManager
 
 
@@ -261,7 +262,7 @@ class TestAgentStateManager:
     @pytest.mark.asyncio
     async def test_state_touch_and_last_active(self, tmp_path: Path) -> None:
         """State manager should track last_active timestamp."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         manager = WorkspaceManager()
         async with manager.open_workspace(tmp_path / "test.db") as ws:
@@ -276,7 +277,7 @@ class TestAgentStateManager:
             assert last_active is not None
             assert isinstance(last_active, datetime)
             # Should be recent (within last minute)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             assert (now - last_active).total_seconds() < 60
 
     @pytest.mark.asyncio

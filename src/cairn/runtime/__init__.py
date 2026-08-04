@@ -6,14 +6,14 @@ This module provides public APIs for:
 - Managing agent state via KV store
 """
 
-from cairn.runtime.workspace_manager import open_workspace, WorkspaceManager
 from cairn.runtime.inspection import WorkspaceInspector, WorkspaceStats
 from cairn.runtime.state import AgentStateManager
+from cairn.runtime.workspace_manager import WorkspaceManager, open_workspace
 
 __all__ = [
-    "open_workspace",
-    "WorkspaceManager",
-    "WorkspaceInspector",
-    "WorkspaceStats",
     "AgentStateManager",
+    "WorkspaceInspector",
+    "WorkspaceManager",
+    "WorkspaceStats",
+    "open_workspace",
 ]

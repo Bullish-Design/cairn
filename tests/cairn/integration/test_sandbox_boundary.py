@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -77,7 +76,9 @@ async def _run_in_sandbox(tmp_path: Path, code: str) -> str:
 
 
 BOUNDARY_CASES = [
-    ("network", """
+    (
+        "network",
+        """
         import socket
         try:
             socket.create_connection(("1.1.1.1", 53), timeout=3)
@@ -85,28 +86,40 @@ BOUNDARY_CASES = [
         except OSError:
             result = "blocked"
         write_file("out.txt", result)
-    """, "blocked"),
-
-    ("host_home", """
+    """,
+        "blocked",
+    ),
+    (
+        "host_home",
+        """
         import os
         write_file("out.txt", "readable" if os.path.isdir(os.path.expanduser("~/.ssh")) else "blocked")
-    """, "blocked"),
-
-    ("escape_write", """
+    """,
+        "blocked",
+    ),
+    (
+        "escape_write",
+        """
         try:
             open("/etc/cairn-escape", "w").write("x")
             result = "WROTE"
         except OSError:
             result = "blocked"
         write_file("out.txt", result)
-    """, "blocked"),
-
-    ("tty", """
+    """,
+        "blocked",
+    ),
+    (
+        "tty",
+        """
         import sys
         write_file("out.txt", "TTY" if sys.stdin.isatty() else "blocked")
-    """, "blocked"),
-
-    ("fsize", """
+    """,
+        "blocked",
+    ),
+    (
+        "fsize",
+        """
         try:
             with open("big.bin", "wb") as fh:
                 for _ in range(4096):
@@ -115,7 +128,9 @@ BOUNDARY_CASES = [
         except OSError:
             result = "blocked"
         write_file("out.txt", result)
-    """, "blocked"),
+    """,
+        "blocked",
+    ),
 ]
 
 
@@ -192,7 +207,7 @@ async def test_fork_bomb_blocked_by_rlimit_nproc(tmp_path: Path) -> None:
                     except OSError:
                         pass
         """)
-        result = await executor.run(code=code, task="fork bomb")
+        await executor.run(code=code, task="fork bomb")
         out = (await agent.files.read("out.txt")).strip()
         assert out.startswith("blocked"), out
     finally:
@@ -205,8 +220,9 @@ async def test_fork_bomb_blocked_by_rlimit_nproc(tmp_path: Path) -> None:
 async def test_workspace_budget_exceeded(tmp_path: Path) -> None:
     """P3.2: total workspace growth beyond the budget fails the run before
     re-import instead of filling the host disk."""
-    from cairn.core.exceptions import ResourceLimitError
     from fsdantic import Fsdantic
+
+    from cairn.core.exceptions import ResourceLimitError
 
     stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
     agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
@@ -243,12 +259,10 @@ async def test_sandbox_tty_unopenable_under_pty(tmp_path: Path) -> None:
     unopenable."""
     import pty as pty_mod
 
-    from fsdantic import Fsdantic
-
     master_fd, slave_fd = pty_mod.openpty()
     helper = tmp_path / "pty_helper.py"
     helper.write_text(
-        textwrap.dedent('''
+        textwrap.dedent("""
             import asyncio, os
             from fsdantic import Fsdantic
             from cairn.runtime.sandbox import BwrapExecutor
@@ -278,7 +292,7 @@ async def test_sandbox_tty_unopenable_under_pty(tmp_path: Path) -> None:
                 await s.close()
 
             asyncio.run(main())
-        '''),
+        """),
         encoding="utf-8",
     )
 
@@ -312,7 +326,7 @@ async def test_sandbox_tty_unopenable_under_pty(tmp_path: Path) -> None:
         stderr=asyncio.subprocess.PIPE,
         pass_fds=(slave_fd,),
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
     assert proc.returncode == 0, stderr.decode()
     assert result_path.exists(), "sandbox never wrote out.txt"
     out = result_path.read_text(encoding="utf-8").strip()

@@ -22,8 +22,7 @@ from cairn.runtime import (
 from cairn.runtime.agent import AgentContext, AgentState
 from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError, SandboxResult
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
-from cairn.utils.retry import RetryStrategy
-from cairn.utils.retry import with_retry
+from cairn.utils.retry import RetryStrategy, with_retry
 from cairn.watcher.watcher import FileWatcher
 
 __all__ = [
@@ -58,5 +57,5 @@ __all__ = [
 
 try:
     __version__ = version("cairn")
-except PackageNotFoundError:      # editable/source checkout
+except PackageNotFoundError:  # editable/source checkout
     __version__ = "0.0.0.dev0"

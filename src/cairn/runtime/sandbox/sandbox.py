@@ -73,7 +73,7 @@ class SandboxResult:
     submission: SubmissionData | None
     changes: dict[str, list[str]] = field(default_factory=lambda: {"written": [], "deleted": []})
     log: str = ""
-    base_hashes: dict[str, str] = field(default_factory=dict)   # for the accept staleness check
+    base_hashes: dict[str, str] = field(default_factory=dict)  # for the accept staleness check
     exit_code: int = 0
     executable: list[str] = field(default_factory=list)
     directories: list[str] = field(default_factory=list)
@@ -178,16 +178,13 @@ class BwrapExecutor:
         total = sum(len(content) for _, content in written)
         if total > self.settings.max_workspace_bytes:
             raise ResourceLimitError(
-                f"Sandbox wrote {total} bytes, exceeding the "
-                f"{self.settings.max_workspace_bytes} byte workspace budget",
+                f"Sandbox wrote {total} bytes, exceeding the {self.settings.max_workspace_bytes} byte workspace budget",
                 error_code="WORKSPACE_BUDGET_EXCEEDED",
                 context={"agent_id": self.agent_id, "bytes_written": total},
             )
         touched = [rel for rel, _ in written] + deleted
         base_hashes = {rel: baseline[rel] for rel in touched if rel in baseline}
-        executable = await asyncio.to_thread(
-            self._collect_executable, workdir, [rel for rel, _ in written]
-        )
+        executable = await asyncio.to_thread(self._collect_executable, workdir, [rel for rel, _ in written])
         directories = await asyncio.to_thread(self._collect_empty_dirs, workdir)
         await self._reimport(written, deleted)
 
@@ -219,7 +216,7 @@ class BwrapExecutor:
 
             repo = self.agent_fs.kv.repository(prefix="", model_type=RunRecord)
             run = await repo.load(RUN_KEY)
-        except Exception:
+        except Exception:  # noqa: BLE001 - no persisted record yet is the normal case
             return
         if run is None:
             return
@@ -264,7 +261,7 @@ class BwrapExecutor:
             bwrap,
             "--unshare-all",
             "--die-with-parent",
-            "--new-session",       # detach from the controlling terminal
+            "--new-session",  # detach from the controlling terminal
             "--clearenv",
             "--uid",
             str(uid),
@@ -336,7 +333,7 @@ class BwrapExecutor:
         prefix = self._python_path().parent.parent
         if (prefix / "lib").is_dir():
             binds += ["--ro-bind", str(prefix), str(prefix)]
-        for src, dst in (self.settings.runtime_mounts or DEFAULT_RUNTIME_MOUNTS):
+        for src, dst in self.settings.runtime_mounts or DEFAULT_RUNTIME_MOUNTS:
             binds += ["--ro-bind-try", src, dst]
         return binds
 
@@ -359,7 +356,7 @@ class BwrapExecutor:
         try:
             return await asyncio.create_subprocess_exec(
                 *argv,
-                stdin=asyncio.subprocess.DEVNULL,   # never inherit the user's tty
+                stdin=asyncio.subprocess.DEVNULL,  # never inherit the user's tty
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -501,7 +498,12 @@ class BwrapExecutor:
                 except Exception as retry_exc:  # noqa: BLE001 — best effort
                     logger.warning(
                         "Failed to re-import sandbox change",
-                        extra={"agent_id": self.agent_id, "path": rel, "error": str(exc), "retry_error": str(retry_exc)},
+                        extra={
+                            "agent_id": self.agent_id,
+                            "path": rel,
+                            "error": str(exc),
+                            "retry_error": str(retry_exc),
+                        },
                     )
         for rel in deleted:
             # Tombstone both overlay-owned and stable-only deletions: the

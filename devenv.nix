@@ -86,10 +86,15 @@ in
     # the real-sandbox integration tests silently skip.
     test -n "$CAIRN_EXECUTOR_BWRAP_PATH" || { echo "CAIRN_EXECUTOR_BWRAP_PATH not set"; exit 1; }
     test -n "$CAIRN_EXECUTOR_PYTHON_PATH" || { echo "CAIRN_EXECUTOR_PYTHON_PATH not set"; exit 1; }
+    echo "==> Lockfile freshness (uv lock --check)"
+    uv lock --check
+    echo "==> Lint (ruff check + format)"
+    ruff check src tests
+    ruff format --check src tests
     echo "==> Type checking (ty)"
     ty check
-    echo "==> Tests (pytest, incl. real-sandbox via CAIRN_EXECUTOR_*)"
-    pytest -q
+    echo "==> Tests (pytest, incl. real-sandbox via CAIRN_EXECUTOR_*; coverage floor enforced)"
+    pytest -q --cov=cairn --cov-report=term-missing
   '';
 
   # https://devenv.sh/pre-commit-hooks/

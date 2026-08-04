@@ -37,7 +37,6 @@ from cairn.core.constants import (
 )
 from cairn.core.exceptions import (
     AgentNotFoundError,
-    CairnError,
     LifecycleError,
     ProviderError,
     RecoverableError,
@@ -50,9 +49,9 @@ from cairn.core.exceptions import (
 )
 from cairn.core.types import AgentSummary
 from cairn.orchestrator.lifecycle import (
+    LIFECYCLE_MIRROR_NAME,
     RUN_KEY,
     SUBMISSION_KEY,
-    LIFECYCLE_MIRROR_NAME,
     LifecycleRecord,
     LifecycleStore,
     RunRecord,
@@ -64,8 +63,8 @@ from cairn.orchestrator.signals import SignalHandler
 from cairn.providers.providers import CodeProvider, FileCodeProvider
 from cairn.runtime.agent import AgentContext, AgentState
 from cairn.runtime.sandbox import (
-    BwrapExecutor,
     SANDBOX_DIR_NAME,
+    BwrapExecutor,
     SandboxExecutionError,
     SandboxExecutor,
     SandboxResult,
@@ -201,12 +200,12 @@ class CairnOrchestrator:
             if not db_path.exists():
                 return None
             agent_fs = await Fsdantic.open(path=str(db_path))
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort mirror enrichment
             return None
         try:
             repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
             return await repo.load(RUN_KEY)
-        except Exception:
+        except Exception:  # noqa: BLE001 - best-effort mirror enrichment
             return None
         finally:
             await agent_fs.close()
@@ -241,7 +240,7 @@ class CairnOrchestrator:
 
             try:
                 agent_fs = await Fsdantic.open(path=str(db_path))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - any open failure -> explicit ERRORED
                 record.state = AgentState.ERRORED
                 record.error = format_agent_error(
                     "Failed to open agent database",
@@ -507,8 +506,7 @@ class CairnOrchestrator:
             if stale:
                 raise WorkspaceMergeError(
                     format_agent_error(
-                        "Stable changed since this agent started; accepting would "
-                        "discard those changes",
+                        "Stable changed since this agent started; accepting would discard those changes",
                         agent_id=agent_id,
                         state=ctx.state.value,
                         stale_paths=stale,
@@ -568,7 +566,7 @@ class CairnOrchestrator:
         try:
             repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
             return await repo.load(RUN_KEY)
-        except Exception:
+        except Exception:  # noqa: BLE001 - run record may not exist yet
             return None
 
     async def _detect_stale_paths(self, run: RunRecord) -> list[str]:
@@ -585,8 +583,8 @@ class CairnOrchestrator:
         for rel, base_digest in run.base_hashes.items():
             try:
                 current = await self.stable.files.read(rel, mode="binary")
-            except Exception:
-                continue          # absent now: deletion is handled by tombstones
+            except Exception:  # noqa: BLE001, S112 - absent now: deletion is handled by tombstones
+                continue
             if self._sha256_bytes(current) != base_digest:
                 stale.append(rel)
         return sorted(stale)
@@ -710,7 +708,7 @@ class CairnOrchestrator:
         except (ResourceLimitError, CairnTimeoutError, SandboxExecutionError) as exc:
             await self._handle_agent_error(ctx, exc)
             return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - any failure is recorded as an agent error
             await self._handle_agent_error(ctx, exc)
         finally:
             self._semaphore.release()
@@ -1010,20 +1008,23 @@ class CairnOrchestrator:
         for rel in sorted(set(run.written) | set(run.deleted)):
             try:
                 content = await self.stable.files.read(rel, mode="binary")
-            except Exception:
-                removed.append(rel)      # did not exist before: undo = delete
+            except Exception:  # noqa: BLE001 - did not exist before: undo = delete
+                removed.append(rel)  # did not exist before: undo = delete
                 continue
             await self.bin.files.write(prefix + rel, content, mode="binary")
             restored.append(rel)
 
         repo = self.bin.kv.repository(prefix="", model_type=UndoRecord)
-        await repo.save(f"undo:{ctx.agent_id}", UndoRecord(
-            agent_id=ctx.agent_id,
-            restore_paths=restored,
-            delete_paths=removed,
-            created_at=time.time(),
-            updated_at=time.time(),
-        ))
+        await repo.save(
+            f"undo:{ctx.agent_id}",
+            UndoRecord(
+                agent_id=ctx.agent_id,
+                restore_paths=restored,
+                delete_paths=removed,
+                created_at=time.time(),
+                updated_at=time.time(),
+            ),
+        )
 
     async def undo_accept(self, agent_id: str) -> dict[str, int]:
         """Restore stable to its pre-accept state for one agent's changes."""

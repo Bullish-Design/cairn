@@ -25,9 +25,9 @@ from cairn.core.exceptions import TimeoutError as CairnTimeoutError
 from cairn.orchestrator.daemon import daemon_pidfile, read_daemon_pid
 from cairn.orchestrator.lifecycle import LifecycleRecord, open_lifecycle_readonly
 from cairn.orchestrator.orchestrator import CairnOrchestrator
+from cairn.orchestrator.queue import TaskPriority
 from cairn.orchestrator.signals import write_signal
 from cairn.providers.providers import CodeProvider, resolve_code_provider
-from cairn.orchestrator.queue import TaskPriority
 from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 
@@ -351,7 +351,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     accept_parser = subparsers.add_parser("accept", help="Accept agent changes")
     accept_parser.add_argument("agent_id")
-    accept_parser.add_argument("--force", action="store_true", help="Accept even if stable changed since the agent started")
+    accept_parser.add_argument(
+        "--force", action="store_true", help="Accept even if stable changed since the agent started"
+    )
     accept_parser.add_argument("--timeout", type=float, default=300.0, help="Seconds to wait for the accept to settle")
     accept_parser.set_defaults(handler=_run_accept, is_async=True)
 

@@ -29,14 +29,33 @@ class SyncStats:
 # (__pycache__, .git, .hg, .svn, .tox, .venv, .idea, node_modules,
 # .mypy_cache, .pytest_cache, .hypothesis).
 EXTRA_IGNORE_DIRS: tuple[str, ...] = (
-    ".agentfs", ".jj", ".devenv", ".direnv", "venv",
-    ".ruff_cache", ".coverage", "htmlcov",
-    "dist", "build", "target", ".eggs",
+    ".agentfs",
+    ".jj",
+    ".devenv",
+    ".direnv",
+    "venv",
+    ".ruff_cache",
+    ".coverage",
+    "htmlcov",
+    "dist",
+    "build",
+    "target",
+    ".eggs",
 )
 
 DEFAULT_IGNORE_SUFFIXES: tuple[str, ...] = (
-    ".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3",
-    ".so", ".dylib", ".dll", ".o", ".a", ".pyc", ".pyo",
+    ".db",
+    ".db-wal",
+    ".db-shm",
+    ".sqlite",
+    ".sqlite3",
+    ".so",
+    ".dylib",
+    ".dll",
+    ".o",
+    ".a",
+    ".pyc",
+    ".pyo",
 )
 
 
@@ -164,7 +183,7 @@ class FileWatcher:
                 logger.debug("Skipping oversized file", extra={"path": rel_path})
                 return
         except OSError:
-            return                       # vanished between event and stat
+            return  # vanished between event and stat
 
         content = await asyncio.to_thread(path.read_bytes)
         await self.workspace.files.write(rel_path, content, mode="binary")

@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.runtime.agent import AgentState
 from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.providers.providers import InlineCodeProvider
+from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import OrchestratorSettings
 
 

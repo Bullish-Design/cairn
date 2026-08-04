@@ -130,8 +130,12 @@ def test_runtime_binds_use_declared_closure_manifest(tmp_path: Path) -> None:
     binds = _Executor()._runtime_bind_args()
 
     assert binds == [
-        "--ro-bind", "/nix/store/aaaaaaaa-python-3.13", "/nix/store/aaaaaaaa-python-3.13",
-        "--ro-bind", "/nix/store/bbbbbbbb-glibc-2.42", "/nix/store/bbbbbbbb-glibc-2.42",
+        "--ro-bind",
+        "/nix/store/aaaaaaaa-python-3.13",
+        "/nix/store/aaaaaaaa-python-3.13",
+        "--ro-bind",
+        "/nix/store/bbbbbbbb-glibc-2.42",
+        "/nix/store/bbbbbbbb-glibc-2.42",
     ]
 
 
@@ -229,7 +233,10 @@ async def _open_workspaces(tmp_path: Path) -> tuple[object, object]:
     return stable, agent
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)")
+@pytest.mark.skipif(
+    not BWRAP or not SANDBOX_PYTHON,
+    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
+)
 @pytest.mark.integration
 async def test_real_sandbox_executes_reimports_and_submits(tmp_path: Path) -> None:
     stable, agent = await _open_workspaces(tmp_path)
@@ -272,7 +279,10 @@ async def test_real_sandbox_executes_reimports_and_submits(tmp_path: Path) -> No
         await stable.close()
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)")
+@pytest.mark.skipif(
+    not BWRAP or not SANDBOX_PYTHON,
+    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
+)
 @pytest.mark.integration
 async def test_real_sandbox_deletions_tombstoned_in_overlay(tmp_path: Path) -> None:
     stable, agent = await _open_workspaces(tmp_path)
@@ -294,11 +304,7 @@ async def test_real_sandbox_deletions_tombstoned_in_overlay(tmp_path: Path) -> N
     # sees them both on the materialized disk, and the re-import records a
     # tombstone for each (fsdantic >= 0.7.0), so stable-only deletions survive
     # into the accept merge.
-    code = (
-        "delete_file('overlay.txt')\n"
-        "delete_file('keep.txt')\n"
-        "submit_result(summary='deleted', changed_files=[])\n"
-    )
+    code = "delete_file('overlay.txt')\ndelete_file('keep.txt')\nsubmit_result(summary='deleted', changed_files=[])\n"
     try:
         result = await executor.run(code=code, task="delete")
         assert sorted(result.changes["deleted"]) == ["keep.txt", "overlay.txt"]
@@ -320,7 +326,10 @@ async def test_real_sandbox_deletions_tombstoned_in_overlay(tmp_path: Path) -> N
         await stable.close()
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)")
+@pytest.mark.skipif(
+    not BWRAP or not SANDBOX_PYTHON,
+    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
+)
 @pytest.mark.integration
 async def test_real_sandbox_timeout_kills_process(tmp_path: Path) -> None:
     stable, agent = await _open_workspaces(tmp_path)
@@ -342,7 +351,10 @@ async def test_real_sandbox_timeout_kills_process(tmp_path: Path) -> None:
         await stable.close()
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)")
+@pytest.mark.skipif(
+    not BWRAP or not SANDBOX_PYTHON,
+    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
+)
 @pytest.mark.integration
 async def test_real_sandbox_failure_reports_traceback(tmp_path: Path) -> None:
     stable, agent = await _open_workspaces(tmp_path)
@@ -368,7 +380,10 @@ async def test_real_sandbox_failure_reports_traceback(tmp_path: Path) -> None:
         await stable.close()
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)")
+@pytest.mark.skipif(
+    not BWRAP or not SANDBOX_PYTHON,
+    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
+)
 @pytest.mark.integration
 async def test_real_sandbox_imports_work_stdlib_only(tmp_path: Path) -> None:
     stable, agent = await _open_workspaces(tmp_path)
@@ -388,7 +403,10 @@ async def test_real_sandbox_imports_work_stdlib_only(tmp_path: Path) -> None:
     )
     try:
         await executor.run(code=code, task="stdlib")
-        assert await agent.files.read("payload.json") == '{"digest": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"}'
+        assert (
+            await agent.files.read("payload.json")
+            == '{"digest": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"}'
+        )
     finally:
         await agent.close()
         await stable.close()

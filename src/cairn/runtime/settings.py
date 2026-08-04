@@ -83,12 +83,8 @@ class ExecutorSettings(BaseSettings):
         default=64 * 1024 * 1024,
         description="RLIMIT_FSIZE: largest single file the sandbox may create",
     )
-    max_processes: int = Field(
-        default=64, description="RLIMIT_NPROC: process/thread cap inside the sandbox"
-    )
-    max_open_files: int = Field(
-        default=1024, description="RLIMIT_NOFILE: open file descriptor cap"
-    )
+    max_processes: int = Field(default=64, description="RLIMIT_NPROC: process/thread cap inside the sandbox")
+    max_open_files: int = Field(default=1024, description="RLIMIT_NOFILE: open file descriptor cap")
     max_workspace_bytes: int = Field(
         default=DEFAULT_MAX_WORKSPACE_BYTES,
         description="Post-run cap on total materialized workspace size",

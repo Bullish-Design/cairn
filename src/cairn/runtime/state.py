@@ -8,7 +8,7 @@ agent ID to prevent collisions between agents.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from fsdantic import SerializationError
@@ -55,7 +55,7 @@ class AgentStateManager:
         ```
     """
 
-    def __init__(self, workspace: "Workspace", agent_id: str):
+    def __init__(self, workspace: Workspace, agent_id: str):
         """Create a state manager for an agent.
 
         Args:
@@ -225,7 +225,7 @@ class AgentStateManager:
 
     async def touch(self) -> None:
         """Update last_active timestamp."""
-        await self.set("last_active", datetime.now(timezone.utc).isoformat())
+        await self.set("last_active", datetime.now(UTC).isoformat())
 
     async def get_last_active(self) -> datetime | None:
         """Get last_active timestamp.

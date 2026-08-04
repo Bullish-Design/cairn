@@ -61,7 +61,7 @@ def _set_limit(which: int, value: int) -> None:
     if value <= 0:
         return
     try:
-        soft, hard = resource.getrlimit(which)
+        _soft, hard = resource.getrlimit(which)
     except (ValueError, OSError):
         return
     capped = value if hard == resource.RLIM_INFINITY else min(value, hard)

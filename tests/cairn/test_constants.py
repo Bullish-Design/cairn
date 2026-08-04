@@ -5,12 +5,12 @@ from cairn.core.constants import (
     GB,
     HOUR,
     KB,
+    LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
+    MAX_FILE_SIZE_BYTES,
     MB,
     MINUTE,
     SECOND,
     WEEK,
-    LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
-    MAX_FILE_SIZE_BYTES,
 )
 
 

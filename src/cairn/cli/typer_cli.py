@@ -15,29 +15,24 @@ import asyncio
 import json
 from contextlib import suppress
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
-from rich import print as rprint
+from fsdantic import Fsdantic
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 
-from fsdantic import Fsdantic, MergeStrategy
 from cairn.cli.commands import (
-    AcceptCommand,
-    ListAgentsCommand,
-    QueueCommand,
-    RejectCommand,
-    StatusCommand,
     parse_command_payload,
 )
-from cairn.core.exceptions import AgentNotFoundError, TimeoutError as CairnTimeoutError
+from cairn.core.exceptions import AgentNotFoundError
+from cairn.core.exceptions import TimeoutError as CairnTimeoutError
 from cairn.orchestrator.daemon import read_daemon_pid
 from cairn.orchestrator.lifecycle import open_lifecycle_readonly
-from cairn.orchestrator.signals import write_signal
 from cairn.orchestrator.queue import TaskPriority
+from cairn.orchestrator.signals import write_signal
 from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import PathsSettings
 
@@ -61,8 +56,8 @@ console = Console()
 
 
 def get_paths_settings(
-    project_root: Optional[Path] = None,
-    cairn_home: Optional[Path] = None,
+    project_root: Path | None = None,
+    cairn_home: Path | None = None,
 ) -> PathsSettings:
     """Get path settings with optional overrides."""
     path_settings = PathsSettings()
@@ -72,7 +67,7 @@ def get_paths_settings(
     )
 
 
-def _cairn_home(project_root: Optional[Path] = None, cairn_home: Optional[Path] = None) -> Path:
+def _cairn_home(project_root: Path | None = None, cairn_home: Path | None = None) -> Path:
     return Path(get_paths_settings(project_root, cairn_home).cairn_home or Path.home() / ".cairn").expanduser()
 
 
@@ -84,8 +79,8 @@ def _cairn_home(project_root: Optional[Path] = None, cairn_home: Optional[Path] 
 @workspace_app.command("create")
 def workspace_create(
     name: Annotated[str, typer.Argument(help="Workspace name/ID")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Create a new workspace."""
 
@@ -110,8 +105,8 @@ def workspace_create(
 
 @workspace_app.command("list")
 def workspace_list(
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """List all workspaces in the project."""
 
@@ -147,8 +142,8 @@ def workspace_list(
 @workspace_app.command("info")
 def workspace_info(
     name: Annotated[str, typer.Argument(help="Workspace name/ID")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Show information about a workspace."""
 
@@ -174,7 +169,7 @@ def workspace_info(
                     stats = await workspace.files.stat(file_path)
                     if stats.is_file:
                         total_size += stats.size
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - display-only; skip unreadable entries
                     pass
 
             # Get KV count
@@ -204,8 +199,8 @@ def workspace_info(
 def workspace_delete(
     name: Annotated[str, typer.Argument(help="Workspace name/ID")],
     force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Delete a workspace."""
 
@@ -240,8 +235,8 @@ def files_list(
     workspace: Annotated[str, typer.Argument(help="Workspace name/ID")],
     path: Annotated[str, typer.Option(help="Path to list")] = "/",
     recursive: Annotated[bool, typer.Option("--recursive", "-r", help="List recursively")] = False,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """List files in a workspace."""
 
@@ -279,7 +274,7 @@ def files_list(
                     file_type = "dir" if stats.is_directory else "file"
                     size = f"{stats.size:,}" if stats.is_file else "-"
                     table.add_row(file_path, file_type, size)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - display-only
                     table.add_row(file_path, "error", str(e))
 
             console.print(table)
@@ -295,8 +290,8 @@ def files_read(
     workspace: Annotated[str, typer.Argument(help="Workspace name/ID")],
     path: Annotated[str, typer.Argument(help="File path to read")],
     binary: Annotated[bool, typer.Option("--binary", "-b", help="Read as binary")] = False,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Read a file from a workspace."""
 
@@ -322,7 +317,7 @@ def files_read(
                 text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
                 console.print(Panel(text, title=f"{workspace}:{path}"))
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - surface the read error to the user
             console.print(f"[red]Error reading file: {e}[/red]")
             raise typer.Exit(1)
         finally:
@@ -337,8 +332,8 @@ def files_write(
     path: Annotated[str, typer.Argument(help="File path to write")],
     content: Annotated[str, typer.Argument(help="Content to write")],
     binary: Annotated[bool, typer.Option("--binary", "-b", help="Write as binary")] = False,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Write a file to a workspace."""
 
@@ -359,7 +354,7 @@ def files_write(
             await ws.files.write(path, write_content, mode=mode)
             console.print(f"[green]✓[/green] Written to {workspace}:{path}")
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - surface the write error to the user
             console.print(f"[red]Error writing file: {e}[/red]")
             raise typer.Exit(1)
         finally:
@@ -372,8 +367,8 @@ def files_write(
 def files_search(
     workspace: Annotated[str, typer.Argument(help="Workspace name/ID")],
     pattern: Annotated[str, typer.Argument(help="Glob pattern to search")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Search for files matching a pattern."""
 
@@ -409,9 +404,9 @@ def files_search(
 def files_tree(
     workspace: Annotated[str, typer.Argument(help="Workspace name/ID")],
     path: Annotated[str, typer.Option(help="Root path for tree")] = "/",
-    max_depth: Annotated[Optional[int], typer.Option(help="Maximum depth to show")] = None,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    max_depth: Annotated[int | None, typer.Option(help="Maximum depth to show")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Show directory tree of a workspace."""
 
@@ -456,8 +451,8 @@ def files_tree(
 
 @agent_app.command("list")
 def agent_list(
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """List all agents (reads the lifecycle mirror read-only)."""
 
@@ -490,8 +485,8 @@ def agent_list(
 @agent_app.command("status")
 def agent_status(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Show detailed status of an agent."""
 
@@ -558,10 +553,12 @@ async def _poll_state(home: Path, agent_id: str, states: set[AgentState], timeou
 @agent_app.command("accept")
 def agent_accept(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
-    force: Annotated[bool, typer.Option("--force", help="Accept even if stable changed since the agent started")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Accept even if stable changed since the agent started")
+    ] = False,
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for the accept to settle")] = 300.0,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Accept an agent's changes (signal + poll)."""
 
@@ -588,8 +585,8 @@ def agent_accept(
 def agent_reject(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for the reject to settle")] = 300.0,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Reject an agent's changes (signal + poll)."""
 
@@ -611,8 +608,8 @@ def agent_reject(
 @agent_app.command("spawn")
 def agent_spawn(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Spawn a high-priority agent task (signal)."""
 
@@ -629,8 +626,8 @@ def agent_spawn(
 @agent_app.command("queue")
 def agent_queue(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Queue a normal-priority agent task (signal)."""
 
@@ -647,8 +644,8 @@ def agent_queue(
 @agent_app.command("undo")
 def agent_undo(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Undo an accepted agent's changes to stable (signal)."""
 
@@ -665,8 +662,8 @@ def agent_undo(
 @agent_app.command("logs")
 def agent_logs(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Print an agent's sandbox run log."""
 
@@ -690,8 +687,8 @@ def agent_logs(
 def agent_run(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for the agent")] = 300.0,
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Run a single task inline to completion (no daemon)."""
 
@@ -729,8 +726,8 @@ def agent_run(
 
 @agent_app.command("up")
 def agent_up(
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Start the orchestrator daemon."""
 
@@ -783,8 +780,8 @@ def agent_up(
 @preview_app.command("changes")
 def preview_changes(
     agent_id: Annotated[str, typer.Argument(help="Agent ID to preview")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Preview changes made by an agent."""
 
@@ -837,8 +834,8 @@ def preview_changes(
 def preview_file(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
     file_path: Annotated[str, typer.Argument(help="File path to preview")],
-    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
-    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+    project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
     """Preview a specific file from an agent's workspace."""
 
@@ -858,7 +855,7 @@ def preview_file(
             content = await agent_ws.files.read(file_path, mode="text")
             console.print(Panel(content, title=f"Agent {agent_id}: {file_path}"))
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - surface the read error to the user
             console.print(f"[red]Error reading file: {e}[/red]")
             raise typer.Exit(1)
         finally:

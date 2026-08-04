@@ -13,7 +13,6 @@ import pytest
 from cairn import open_workspace
 from cairn.runtime.workspace_manager import WorkspaceManager
 
-
 # ---------------------------------------------------------------------------
 # WAL mode tests
 # ---------------------------------------------------------------------------

@@ -22,7 +22,9 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-async def _setup_reviewing_agent(tmp_path: Path, *, stable_content: bytes) -> tuple[CairnOrchestrator, str, object, object]:
+async def _setup_reviewing_agent(
+    tmp_path: Path, *, stable_content: bytes
+) -> tuple[CairnOrchestrator, str, object, object]:
     """Orchestrator + one agent in REVIEWING whose overlay rewrites a.txt.
 
     The agent's run record claims a base hash equal to ``stable_content``'s
@@ -71,7 +73,7 @@ async def _safe_close(*workspaces: object) -> None:
     for ws in workspaces:
         try:
             await ws.close()  # type: ignore[misc]
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 - test cleanup is best-effort
             pass
 
 
@@ -79,9 +81,7 @@ async def _safe_close(*workspaces: object) -> None:
 async def test_accept_refused_when_stable_changed(tmp_path: Path) -> None:
     """P2.2: accept is refused when stable changed since the agent ran; --force
     overrides and the merge proceeds."""
-    orch, agent_id, stable, bin_ws = await _setup_reviewing_agent(
-        tmp_path, stable_content=b"v1\n"
-    )
+    orch, agent_id, stable, bin_ws = await _setup_reviewing_agent(tmp_path, stable_content=b"v1\n")
     try:
         # Something changed stable after the agent read it.
         await stable.files.write("a.txt", b"v2\n", mode="binary")

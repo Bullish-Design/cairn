@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from cairn.core.constants import MAX_WORKSPACE_CACHE_SIZE
 

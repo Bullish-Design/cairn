@@ -9,7 +9,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from watchfiles import Change, awatch
 
@@ -48,7 +48,7 @@ def write_signal(cairn_home: Path, command: CairnCommand) -> Path:
 class SignalHandler:
     """Poll signal files and dispatch normalized orchestrator commands."""
 
-    COMPATIBILITY_SIGNAL_TYPES: dict[str, CommandType | str] = {
+    COMPATIBILITY_SIGNAL_TYPES: ClassVar[dict[str, CommandType | str]] = {
         "spawn": "spawn",
         "queue": CommandType.QUEUE,
         "accept": CommandType.ACCEPT,
@@ -59,7 +59,7 @@ class SignalHandler:
     def __init__(
         self,
         cairn_home: Path,
-        orchestrator: "CairnOrchestrator",
+        orchestrator: CairnOrchestrator,
         *,
         enable_polling: bool = True,
     ):
@@ -107,9 +107,9 @@ class SignalHandler:
     async def _process_signal_path(self, signal_file: Path) -> None:
         claimed = signal_file.with_suffix(".processing")
         try:
-            signal_file.rename(claimed)      # atomic claim
+            signal_file.rename(claimed)  # atomic claim
         except FileNotFoundError:
-            return                            # someone else got it
+            return  # someone else got it
         except OSError as exc:
             logger.warning(
                 "Could not claim signal",

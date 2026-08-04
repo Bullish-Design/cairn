@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.runtime.agent import AgentState
 from cairn.core.exceptions import VersionConflictError
 from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
+from cairn.runtime.agent import AgentState
 
 
 @pytest.mark.asyncio
@@ -103,7 +103,7 @@ async def test_update_atomic_serialized_concurrent_updates(tmp_path: Path) -> No
         async def bump() -> None:
             await store.update_atomic(
                 "agent-serialized",
-                lambda rec: (setattr(rec, "priority", rec.priority + 1)),
+                lambda rec: setattr(rec, "priority", rec.priority + 1),
             )
 
         # All 10 concurrent increments must land (no lost updates, no

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import suppress
 from pathlib import Path
 
-import asyncio
 import pytest
 
-from cairn.runtime.agent import AgentState
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.providers.providers import InlineCodeProvider
+from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import OrchestratorSettings
 
 

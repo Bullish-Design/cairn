@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 from fsdantic import Fsdantic
 
-from cairn.runtime.agent import AgentContext, AgentState
 from cairn.core.exceptions import RecoverableError
 from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
+from cairn.runtime.agent import AgentContext, AgentState
 
 
 @pytest.mark.asyncio
@@ -60,7 +60,6 @@ async def test_orchestrator_lifecycle_retry_on_recoverable_error(tmp_path: Path)
     class FlakyLifecycle:
         async def load(self, agent_id: str) -> None:
             _ = agent_id
-            return None
 
         async def save(self, record: LifecycleRecord) -> None:
             nonlocal calls

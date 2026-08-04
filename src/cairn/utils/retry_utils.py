@@ -11,7 +11,8 @@ import warnings
 from collections.abc import Awaitable, Callable
 from typing import ParamSpec, TypeVar
 
-from cairn.utils.retry import RetryStrategy, with_retry as _original_with_retry
+from cairn.utils.retry import RetryStrategy
+from cairn.utils.retry import with_retry as _original_with_retry
 
 P = ParamSpec("P")
 T = TypeVar("T")

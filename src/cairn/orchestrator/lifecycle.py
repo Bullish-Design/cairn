@@ -7,26 +7,27 @@ import json
 import logging
 import shutil
 import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from fsdantic import VersionedKVRecord, Workspace
 from fsdantic.exceptions import KVConflictError
-from pydantic import ValidationError, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
-from cairn.runtime.agent import AgentState
 from cairn.core.constants import (
     LIFECYCLE_CLEANUP_MAX_AGE_SECONDS,
     LIFECYCLE_MAX_RETRY_ATTEMPTS,
     LIFECYCLE_RETRY_BACKOFF_FACTOR,
     LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
 )
-from cairn.utils.error_formatting import format_lifecycle_error
 from cairn.core.exceptions import AgentNotFoundError, LifecycleError, RecoverableError, VersionConflictError
-from cairn.utils.retry import with_retry
 from cairn.core.types import SubmissionData
+from cairn.runtime.agent import AgentState
 from cairn.runtime.workspace_cache import WorkspaceCache
+from cairn.utils.error_formatting import format_lifecycle_error
+from cairn.utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ LIFECYCLE_MIRROR_NAME = "lifecycle.json"
 def lifecycle_mirror_path(cairn_home: Path) -> Path:
     """Location of the daemon's lifecycle mirror (the CLI's read path)."""
     return Path(cairn_home) / "state" / LIFECYCLE_MIRROR_NAME
+
 
 LIFECYCLE_RETRY_EXCEPTIONS: tuple[type[Exception], ...] = (
     RecoverableError,
@@ -85,7 +87,7 @@ class LifecycleRecord(VersionedKVRecord):
         return AgentState(value)
 
     @model_validator(mode="after")
-    def validate_timestamps(self) -> "LifecycleRecord":
+    def validate_timestamps(self) -> LifecycleRecord:
         if self.state_changed_at < self.created_at:
             raise ValueError("state_changed_at must be greater than or equal to created_at")
         return self
@@ -102,21 +104,21 @@ class RunRecord(VersionedKVRecord):
     """Ground truth about what the sandbox actually did."""
 
     agent_id: str
-    written: list[str] = []
-    deleted: list[str] = []
-    base_hashes: dict[str, str] = {}
+    written: list[str] = Field(default_factory=list)
+    deleted: list[str] = Field(default_factory=list)
+    base_hashes: dict[str, str] = Field(default_factory=dict)
     log: str = ""
     exit_code: int = 0
-    executable: list[str] = []
-    directories: list[str] = []
+    executable: list[str] = Field(default_factory=list)
+    directories: list[str] = Field(default_factory=list)
 
 
 class UndoRecord(VersionedKVRecord):
     """Pre-accept snapshot of stable for one agent, enabling `cairn undo`."""
 
     agent_id: str
-    restore_paths: list[str] = []
-    delete_paths: list[str] = []
+    restore_paths: list[str] = Field(default_factory=list)
+    delete_paths: list[str] = Field(default_factory=list)
     created_at: float = 0.0
 
 

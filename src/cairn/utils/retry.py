@@ -12,7 +12,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import Optional, ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar
 
 T = TypeVar("T")
 P = ParamSpec("P")
@@ -58,7 +58,7 @@ class RetryStrategy:
     async def with_retry(
         self,
         operation: Callable[[], Awaitable[T]],
-        error_handler: Optional[Callable[[Exception, int], Awaitable[None]]] = None,
+        error_handler: Callable[[Exception, int], Awaitable[None]] | None = None,
         retry_exceptions: tuple[type[Exception], ...] = (Exception,),
     ) -> T:
         """Execute operation with retry.
@@ -101,7 +101,7 @@ class RetryStrategy:
     def with_retry_sync(
         self,
         operation: Callable[[], T],
-        error_handler: Optional[Callable[[Exception, int], None]] = None,
+        error_handler: Callable[[Exception, int], None] | None = None,
         retry_exceptions: tuple[type[Exception], ...] = (Exception,),
     ) -> T:
         """Execute a sync operation with retry.

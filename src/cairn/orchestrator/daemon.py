@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 PIDFILE_NAME = "orchestrator.pid"
 
@@ -27,11 +27,11 @@ def read_daemon_pid(cairn_home: Path) -> int | None:
     except (OSError, ValueError, KeyError, TypeError):
         return None
     try:
-        os.kill(pid, 0)          # signal 0 = liveness probe only
+        os.kill(pid, 0)  # signal 0 = liveness probe only
     except ProcessLookupError:
         return None
     except PermissionError:
-        return pid               # exists, owned by another user
+        return pid  # exists, owned by another user
     return pid
 
 
@@ -48,7 +48,7 @@ def daemon_pidfile(cairn_home: Path) -> Iterator[Path]:
         raise RuntimeError(f"A Cairn daemon is already running (pid {existing})")
     tmp = path.with_suffix(".pid.tmp")
     tmp.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
-    tmp.replace(path)            # atomic
+    tmp.replace(path)  # atomic
     try:
         yield path
     finally:

@@ -39,9 +39,8 @@ def test_daemon_pidfile_second_claim_raises(tmp_path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # os.getppid() is a live process (our parent) that is not us.
     path.write_text(json.dumps({"pid": os.getppid()}), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="already running"):
-        with daemon_pidfile(tmp_path):
-            pytest.fail("should not be reachable")
+    with pytest.raises(RuntimeError, match="already running"), daemon_pidfile(tmp_path):
+        pytest.fail("should not be reachable")
     # After the foreign pidfile is removed, claiming works again.
     path.unlink()
     with daemon_pidfile(tmp_path):

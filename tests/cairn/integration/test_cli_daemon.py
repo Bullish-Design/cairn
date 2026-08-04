@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-import cairn.cli.cli as cli
+from cairn.cli import cli
 from cairn.core.exceptions import AgentNotFoundError
 from cairn.orchestrator.daemon import read_daemon_pid
 from cairn.orchestrator.lifecycle import LifecycleRecord, open_lifecycle_readonly
@@ -72,8 +72,7 @@ async def test_queue_reaches_running_daemon(tmp_path: Path, monkeypatch: pytest.
     project = tmp_path / "project"
     (project / "scripts").mkdir(parents=True)
     (project / "scripts" / "task.py").write_text(
-        'write_file("hello.txt", "from the sandbox")\n'
-        'submit_result("did work", ["hello.txt"])\n',
+        'write_file("hello.txt", "from the sandbox")\nsubmit_result("did work", ["hello.txt"])\n',
         encoding="utf-8",
     )
     home = tmp_path / "home"
@@ -81,7 +80,8 @@ async def test_queue_reaches_running_daemon(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("CAIRN_PATHS_PROJECT_ROOT", str(project))
     monkeypatch.setenv("CAIRN_PATHS_CAIRN_HOME", str(home))
 
-    proc = subprocess.Popen(
+    proc = await asyncio.to_thread(
+        subprocess.Popen,
         [sys.executable, "-m", "cairn.cli.cli", "up"],
         env=_daemon_env(project, home),
         stdout=subprocess.DEVNULL,
@@ -104,10 +104,10 @@ async def test_queue_reaches_running_daemon(tmp_path: Path, monkeypatch: pytest.
     finally:
         proc.terminate()
         with suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=10)
+            await asyncio.to_thread(proc.wait, 10)
         if proc.poll() is None:
             proc.kill()
-            proc.wait()
+            await asyncio.to_thread(proc.wait)
 
 
 @pytest.mark.integration

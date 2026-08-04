@@ -5,12 +5,9 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-import cairn.cli.cli as cli
-import cairn.cli.typer_cli as typer_cli
-from cairn.cli.commands import CommandResult, CommandType
-from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
+from cairn.cli import cli, typer_cli
+from cairn.orchestrator.lifecycle import LifecycleRecord
 from cairn.runtime.agent import AgentState
-
 
 runner = CliRunner()
 
@@ -120,7 +117,6 @@ def test_cli_invalid_command() -> None:
 
 def _seed_cli_workspaces(project_root: Any) -> None:
     """Create stable.db + agent-1.db + my.db with content under project_root/.agentfs."""
-    import asyncio
 
     from fsdantic import Fsdantic
 
@@ -197,8 +193,6 @@ def test_cli_preview_changes_requires_stable(tmp_path: Any) -> None:
     project_root = tmp_path / "project"
     agentfs_dir = project_root / ".agentfs"
     agentfs_dir.mkdir(parents=True, exist_ok=True)
-
-    import asyncio
 
     from fsdantic import Fsdantic
 
@@ -279,10 +273,8 @@ def test_status_unknown_agent_exits_1(tmp_path: Path, monkeypatch: Any) -> None:
 
 def test_logs_shows_run_log(tmp_path: Path, monkeypatch: Any) -> None:
     """P4.3: `cairn logs <id>` prints the sandbox run log from the mirror."""
-    import io
     import contextlib
-
-    from cairn.orchestrator.lifecycle import lifecycle_mirror_path
+    import io
 
     project = tmp_path / "project"
     agentfs = project / ".agentfs"
@@ -319,8 +311,8 @@ def test_logs_unknown_agent(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("CAIRN_PATHS_PROJECT_ROOT", str(project))
     monkeypatch.setenv("CAIRN_PATHS_CAIRN_HOME", str(home))
 
-    import io
     import contextlib
+    import io
 
     _write_lifecycle_mirror(home, [])
 
