@@ -1,11 +1,15 @@
-from __future__ import annotations
-
+import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 from typer.testing import CliRunner
 
+import cairn.cli.cli as cli
 import cairn.cli.typer_cli as typer_cli
 from cairn.cli.commands import CommandResult, CommandType
+from cairn.orchestrator.lifecycle import LifecycleRecord, LifecycleStore
+from cairn.runtime.agent import AgentState
 
 
 runner = CliRunner()
@@ -191,3 +195,72 @@ def test_cli_preview_changes_requires_stable(tmp_path: Any) -> None:
 
     assert result.exit_code == 1
     assert "stable.db missing" in result.stdout
+
+
+def test_status_does_not_start_a_worker(tmp_path: Path, monkeypatch: Any) -> None:
+    """P1.4: `cairn status` reads the lifecycle mirror read-only; it must not
+    construct an orchestrator (no orchestrator.json, no agent-*.db, no
+    recovery side effects)."""
+    project = tmp_path / "project"
+    agentfs = project / ".agentfs"
+    agentfs.mkdir(parents=True)
+    home = tmp_path / "home"
+
+    monkeypatch.setenv("CAIRN_PATHS_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("CAIRN_PATHS_CAIRN_HOME", str(home))
+
+    # Seed the lifecycle mirror as a daemon would leave it.
+    record = LifecycleRecord(
+        agent_id="agent-status-only",
+        task="some task",
+        priority=3,
+        state=AgentState.REVIEWING,
+        state_changed_at=1.0,
+        created_at=1.0,
+        db_path=str(agentfs / "bin-agent-status-only.db"),
+    )
+    _write_lifecycle_mirror(home, [record])
+
+    rc = cli.main(["status", "agent-status-only"])
+    assert rc == 0
+
+    # No worker side effects: no agent-*.db, no orchestrator.json, and the
+    # lifecycle record's state was not touched.
+    assert list(agentfs.glob("agent-*.db")) == []
+    assert not (home / "state" / "orchestrator.json").exists()
+    assert record.state is AgentState.REVIEWING
+
+
+def test_status_unknown_agent_exits_1(tmp_path: Path, monkeypatch: Any) -> None:
+    """P1.6: `cairn status agent-nope` prints a friendly message and exits 1,
+    not a traceback."""
+    project = tmp_path / "project"
+    agentfs = project / ".agentfs"
+    agentfs.mkdir(parents=True)
+    home = tmp_path / "home"
+
+    monkeypatch.setenv("CAIRN_PATHS_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("CAIRN_PATHS_CAIRN_HOME", str(home))
+
+    _write_lifecycle_mirror(home, [])
+
+    import io
+
+    stderr = io.StringIO()
+    import contextlib
+
+    with contextlib.redirect_stderr(stderr):
+        rc = cli.main(["status", "agent-nope"])
+    assert rc == 1
+    assert "Unknown agent: agent-nope" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def _write_lifecycle_mirror(home: Path, records: list[LifecycleRecord]) -> None:
+    """Write the lifecycle mirror the thin CLI reads."""
+    from cairn.orchestrator.lifecycle import lifecycle_mirror_path
+
+    path = lifecycle_mirror_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {record.agent_id: record.model_dump(mode="json") for record in records}
+    path.write_text(json.dumps(payload), encoding="utf-8")

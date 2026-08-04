@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from fsdantic import VersionedKVRecord, Workspace
 from fsdantic.exceptions import KVConflictError
-from pydantic import field_validator, model_validator
+from pydantic import ValidationError, field_validator, model_validator
 
 from cairn.runtime.agent import AgentState
 from cairn.core.constants import (
@@ -20,7 +22,7 @@ from cairn.core.constants import (
     LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
 )
 from cairn.utils.error_formatting import format_lifecycle_error
-from cairn.core.exceptions import LifecycleError, RecoverableError, VersionConflictError
+from cairn.core.exceptions import AgentNotFoundError, LifecycleError, RecoverableError, VersionConflictError
 from cairn.utils.retry_utils import with_retry
 from cairn.core.types import SubmissionData
 
@@ -28,6 +30,13 @@ logger = logging.getLogger(__name__)
 
 AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
+
+LIFECYCLE_MIRROR_NAME = "lifecycle.json"
+
+
+def lifecycle_mirror_path(cairn_home: Path) -> Path:
+    """Location of the daemon's lifecycle mirror (the CLI's read path)."""
+    return Path(cairn_home) / "state" / LIFECYCLE_MIRROR_NAME
 
 LIFECYCLE_RETRY_EXCEPTIONS: tuple[type[Exception], ...] = (
     RecoverableError,
@@ -50,6 +59,7 @@ class LifecycleRecord(VersionedKVRecord):
     submission: SubmissionData | None = None
     error: str | None = None
     version: int = 0
+    accept_stats: dict[str, int] | None = None
 
     @field_validator("agent_id")
     @classmethod
@@ -233,3 +243,59 @@ class LifecycleStore:
                     db_path.unlink()
 
         return cleaned
+
+
+@asynccontextmanager
+async def open_lifecycle_readonly(cairn_home: Path) -> AsyncIterator[ReadonlyLifecycleStore]:
+    """Yield a read-only view of lifecycle records, safe alongside a daemon.
+
+    pyturso 0.7.2 takes an exclusive file lock even for read-only opens, so a
+    second process cannot open ``bin.db`` through fsdantic while the daemon
+    holds it.  The daemon therefore maintains a JSON mirror
+    (``state/lifecycle.json``) after every lifecycle mutation, and CLI queries
+    read that instead.
+    """
+    path = lifecycle_mirror_path(cairn_home)
+    if not path.exists():
+        raise AgentNotFoundError(
+            "No Cairn state found - has the orchestrator ever run?",
+            error_code="LIFECYCLE_STORE_MISSING",
+        )
+    yield ReadonlyLifecycleStore(path)
+
+
+class ReadonlyLifecycleStore:
+    """Read-only lifecycle queries over the daemon's lifecycle mirror.
+
+    ``load``/``list_all`` are async but delegate the file I/O to a worker
+    thread so they never block the event loop.
+    """
+
+    def __init__(self, mirror: Path) -> None:
+        self.mirror = Path(mirror)
+
+    async def load(self, agent_id: str) -> LifecycleRecord | None:
+        return await asyncio.to_thread(self._load_sync, agent_id)
+
+    async def list_all(self) -> list[LifecycleRecord]:
+        return await asyncio.to_thread(self._list_all_sync)
+
+    def _read(self) -> dict[str, LifecycleRecord]:
+        try:
+            payload = json.loads(self.mirror.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        records: dict[str, LifecycleRecord] = {}
+        if isinstance(payload, dict):
+            for agent_id, data in payload.items():
+                try:
+                    records[agent_id] = LifecycleRecord.model_validate(data)
+                except ValidationError:
+                    continue
+        return records
+
+    def _load_sync(self, agent_id: str) -> LifecycleRecord | None:
+        return self._read().get(agent_id)
+
+    def _list_all_sync(self) -> list[LifecycleRecord]:
+        return list(self._read().values())

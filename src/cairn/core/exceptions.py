@@ -66,6 +66,10 @@ class AgentStateError(AgentError):
     """Invalid agent state transition attempted."""
 
 
+class AgentNotFoundError(FatalError, KeyError):
+    """No agent with the requested id exists."""
+
+
 class AgentExecutionError(AgentError):
     """Error during agent code generation or execution."""
 

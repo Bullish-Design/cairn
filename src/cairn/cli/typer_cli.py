@@ -35,6 +35,7 @@ from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.providers.providers import CodeProvider, resolve_code_provider
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.orchestrator.queue import TaskPriority
+from cairn.core.exceptions import AgentNotFoundError
 
 # Initialize Typer app and subcommands
 app = typer.Typer(
@@ -543,7 +544,7 @@ def agent_status(
                 )
             )
 
-        except ValueError:
+        except (ValueError, AgentNotFoundError):
             console.print(f"[red]Unknown agent: {agent_id}[/red]")
             raise typer.Exit(1)
         finally:

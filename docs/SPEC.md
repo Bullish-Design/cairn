@@ -126,6 +126,19 @@ $CAIRN_HOME/ (default ~/.cairn)
 └── state/
 ```
 
+4. **Project sync (`FileWatcher`)**
+   - `FileWatcher` mirrors the project tree into `stable` once at orchestrator
+     startup (`initial_sync`, before the worker loop starts) and then watches
+     for filesystem changes, mirroring them into `stable` continuously.
+   - Ignoring is name-based (`watchfiles.DefaultFilter` + Cairn's exclusions:
+     `.agentfs`, `.jj`, `.devenv`, `.direnv`, `venv`, `.ruff_cache`,
+     `.coverage`, `htmlcov`, `dist`, `build`, `target`, `.eggs`, plus db/so
+     suffixes).  Files larger than `max_sync_file_bytes` are skipped.
+
+5. **Daemon ownership (P1.4)**
+   - The daemon owns all databases.  The CLI never constructs an orchestrator:
+     mutations go through signal files, queries read the lifecycle mirror.
+
 ## Storage contracts (fsdantic workspaces)
 
 ### Overlay semantics
@@ -272,17 +285,29 @@ agent:{agent_id} -> {
 - persist lifecycle metadata to canonical KV store on every state transition,
 - persist queue stats snapshot under `$CAIRN_HOME/state/` (stats only, not agent metadata).
 
-### CLI contract (current)
+### CLI contract (thin client, P1.4)
 
-CLI subcommands are a transport adapter: each invocation parses into a normalized `CairnCommand` and calls orchestrator `submit_command`.
+The daemon owns the databases.  The CLI is a thin client: it never constructs
+an orchestrator.  Mutating commands write a signal file for the daemon to pick
+up; query commands read the daemon's lifecycle mirror (`$CAIRN_HOME/state/lifecycle.json`)
+read-only — pyturso 0.7.2 locks database files exclusively even for read-only
+opens, so the CLI cannot open `bin.db` while the daemon holds it.
 
-- `cairn up [--provider PROVIDER]` - Start orchestrator with specified code provider
-- `cairn spawn <reference> [--provider PROVIDER]` - High-priority task execution
-- `cairn queue <reference> [--provider PROVIDER]` - Normal-priority task execution
-- `cairn list-agents` - List all active agents
-- `cairn status <agent-id>` - Show agent status and details
-- `cairn accept <agent-id>` - Accept and merge agent changes
-- `cairn reject <agent-id>` - Reject and discard agent changes
+- `cairn up` - Start the daemon (claims `$CAIRN_HOME/state/orchestrator.pid`; a
+  second `cairn up` in the same `CAIRN_HOME` is refused)
+- `cairn run <task> [--timeout N]` - Run a single task inline to completion
+  (no daemon; refused while a daemon is running)
+- `cairn spawn <reference>` - High-priority task; writes a `spawn` signal
+- `cairn queue <reference>` - Normal-priority task; writes a `queue` signal
+- `cairn list-agents` - Read the lifecycle mirror
+- `cairn status <agent-id>` - Read the lifecycle mirror; exit 1 + friendly
+  message for unknown agents (no traceback)
+- `cairn accept <agent-id> [--timeout N]` - Write an `accept` signal, then poll
+  the mirror until the accept settles
+- `cairn reject <agent-id> [--timeout N]` - Write a `reject` signal, then poll
+  the mirror until the reject settles
+
+Mutating commands exit 2 with guidance when no daemon is running.
 
 **Reference interpretation:**
 - With `FileCodeProvider` (default): `reference` is a path to a Python script file
@@ -290,9 +315,19 @@ CLI subcommands are a transport adapter: each invocation parses into a normalize
 - With `GitCodeProvider`: `reference` is a git URL with path (e.g., `git://github.com/org/repo:script.py`)
 - With `RegistryCodeProvider`: `reference` is a registry URL (e.g., `registry://org/script-name:version`)
 
-### Signal adapter contract
+### Signal adapter contract (P1.4/P1.5)
 
-Signals are an optional transport adapter. When `enable_signal_polling=true`, the orchestrator watches `$CAIRN_HOME/signals/*.json` and routes each file through the same command parser + `submit_command` path used by CLI ingress. When disabled, signal parsing semantics remain identical for manual/explicit `process_signals_once` processing.
+Signals are the transport for CLI→daemon mutation commands.  The CLI writes
+`$CAIRN_HOME/signals/{type}-{signal_id}.json` atomically (temp name + rename,
+so the watcher never sees a partial file).  The daemon watches the directory
+and also runs a periodic sweep (`SIGNAL_SWEEP_INTERVAL_SECONDS`) as a backstop
+so a signal written during startup is not lost.
+
+Processing claims a file by renaming it to `*.processing` (atomic — two
+observers cannot both claim it), then dispatches.  Successful signals are
+removed; failed signals are quarantined to `$CAIRN_HOME/signals/failed/` with
+an `.error.txt` sidecar so failures are inspectable rather than silently
+deleted.
 
 ## Documentation boundaries
 

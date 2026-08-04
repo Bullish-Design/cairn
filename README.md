@@ -49,6 +49,13 @@ Run these commands from the repository root.
 uv run cairn up
 ```
 
+`cairn up` runs as a daemon that owns the databases; a second `cairn up` in
+the same `CAIRN_HOME` is refused.  To run a single task without a daemon:
+
+```bash
+uv run cairn run scripts/task.py
+```
+
 ### Queue work
 
 **With file-based code provider (default):**
