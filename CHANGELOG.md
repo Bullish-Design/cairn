@@ -74,6 +74,17 @@ All notable changes to cairn are documented in this file.
   cached upstream) sticks across local runs — steady-state `act` runs take
   ~1.5 minutes.
 
+### devenv
+
+- `devenv.lock` updated: devenv module input bumped to 9d93b83 (2.2.x line).
+- `devenv.yaml` nixpkgs input switched from `github:cachix/devenv-nixpkgs/rolling`
+  (no public cache — verified: no cachix cache exists for the fork, and its
+  pinned rev's CPython build is absent from cache.nixos.org, forcing a
+  ~10-minute source compile in CI) to `github:NixOS/nixpkgs/nixpkgs-unstable`
+  (rev 104240a7, whose python3.13 output substitutes from cache.nixos.org).
+- `devenv.lock` is now tracked in git so CI resolves the exact same
+  nixpkgs/devenv inputs as local development.
+
 ## [0.2.1] - 2026-08-01
 
 - Baseline release (bwrap executor, orchestrator lifecycle, CLI).

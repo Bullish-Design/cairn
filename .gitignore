@@ -9,8 +9,11 @@ __pycache__/
 .direnv/**
 #.tmuxp.yaml
 .python-version
-devenv.lock
 .devenv.flake.nix
+
+# devenv
+#   devenv.lock is TRACKED in this repository so CI (GitHub Actions / act)
+#   resolves the exact same nixpkgs/devenv inputs as local development.
 
 
 
