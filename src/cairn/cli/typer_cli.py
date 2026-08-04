@@ -2,16 +2,18 @@
 
 This module provides the command-line interface using the Typer library,
 offering commands for managing agent tasks, inspecting state, and controlling
-the orchestrator lifecycle.
+workspaces.
 
-The CLI communicates with the orchestrator through the command pattern defined
-in commands.py, providing a user-friendly interface for all orchestrator operations.
+The daemon commands (agent list/status/accept/reject/spawn/queue/run/undo/logs)
+follow the thin-client contract from ``cairn.cli.cli``: mutations write signal
+files for a running daemon, queries read the lifecycle mirror.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -31,11 +33,13 @@ from cairn.cli.commands import (
     StatusCommand,
     parse_command_payload,
 )
-from cairn.orchestrator.orchestrator import CairnOrchestrator
-from cairn.providers.providers import CodeProvider, resolve_code_provider
-from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
+from cairn.core.exceptions import AgentNotFoundError, TimeoutError as CairnTimeoutError
+from cairn.orchestrator.daemon import read_daemon_pid
+from cairn.orchestrator.lifecycle import open_lifecycle_readonly
+from cairn.orchestrator.signals import write_signal
 from cairn.orchestrator.queue import TaskPriority
-from cairn.core.exceptions import AgentNotFoundError
+from cairn.runtime.agent import AgentState
+from cairn.runtime.settings import PathsSettings
 
 # Initialize Typer app and subcommands
 app = typer.Typer(
@@ -68,36 +72,8 @@ def get_paths_settings(
     )
 
 
-def resolve_provider(
-    provider: str,
-    project_root: Optional[Path],
-    provider_base_path: Optional[Path],
-) -> CodeProvider:
-    return resolve_code_provider(
-        provider,
-        project_root=project_root,
-        base_path=provider_base_path,
-    )
-
-
-async def get_orchestrator(
-    project_root: Optional[Path] = None,
-    cairn_home: Optional[Path] = None,
-    provider: str = "file",
-    provider_base_path: Optional[Path] = None,
-) -> CairnOrchestrator:
-    """Create and initialize an orchestrator instance."""
-    path_settings = get_paths_settings(project_root, cairn_home)
-    provider_instance = resolve_provider(provider, path_settings.project_root, provider_base_path)
-    orchestrator = CairnOrchestrator(
-        project_root=path_settings.project_root or ".",
-        cairn_home=path_settings.cairn_home,
-        config=OrchestratorSettings(),
-        executor_settings=ExecutorSettings(),
-        code_provider=provider_instance,
-    )
-    await orchestrator.initialize()
-    return orchestrator
+def _cairn_home(project_root: Optional[Path] = None, cairn_home: Optional[Path] = None) -> Path:
+    return Path(get_paths_settings(project_root, cairn_home).cairn_home or Path.home() / ".cairn").expanduser()
 
 
 # ============================================================================
@@ -483,41 +459,30 @@ def agent_list(
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
 ):
-    """List all active agents."""
+    """List all agents (reads the lifecycle mirror read-only)."""
 
     async def _list():
-        orchestrator = await get_orchestrator(project_root, cairn_home)
-
+        home = _cairn_home(project_root, cairn_home)
         try:
-            command = parse_command_payload("list_agents", {})
-            result = await orchestrator.submit_command(command)
-            agents = result.payload.get("agents", {})
+            async with open_lifecycle_readonly(home) as store:
+                records = await store.list_all()
+        except AgentNotFoundError:
+            console.print("[yellow]No agents[/yellow]")
+            return
 
-            if not agents:
-                console.print("[yellow]No active agents[/yellow]")
-                return
+        if not records:
+            console.print("[yellow]No agents[/yellow]")
+            return
 
-            table = Table(title="Active Agents")
-            table.add_column("Agent ID", style="cyan")
-            table.add_column("State", style="yellow")
-            table.add_column("Task", style="white")
-            table.add_column("Priority", justify="right")
+        table = Table(title="Agents")
+        table.add_column("Agent ID", style="cyan")
+        table.add_column("State", style="yellow")
+        table.add_column("Task", style="white")
 
-            for agent_id, agent_data in sorted(agents.items()):
-                table.add_row(
-                    agent_id,
-                    agent_data.get("state", "unknown"),
-                    agent_data.get("task", ""),
-                    str(agent_data.get("priority", "")),
-                )
+        for record in sorted(records, key=lambda r: r.agent_id):
+            table.add_row(record.agent_id, record.state.value, record.task)
 
-            console.print(table)
-
-        finally:
-            if orchestrator.stable:
-                await orchestrator.stable.close()
-            if orchestrator.bin:
-                await orchestrator.bin.close()
+        console.print(table)
 
     asyncio.run(_list())
 
@@ -531,59 +496,90 @@ def agent_status(
     """Show detailed status of an agent."""
 
     async def _status():
-        orchestrator = await get_orchestrator(project_root, cairn_home)
-
+        home = _cairn_home(project_root, cairn_home)
         try:
-            command = parse_command_payload("status", {"agent_id": agent_id})
-            result = await orchestrator.submit_command(command)
-
-            console.print(
-                Panel(
-                    json.dumps(result.payload, indent=2),
-                    title=f"Agent Status: {agent_id}",
-                )
-            )
-
-        except (ValueError, AgentNotFoundError):
+            async with open_lifecycle_readonly(home) as store:
+                record = await store.load(agent_id)
+        except AgentNotFoundError:
             console.print(f"[red]Unknown agent: {agent_id}[/red]")
             raise typer.Exit(1)
-        finally:
-            if orchestrator.stable:
-                await orchestrator.stable.close()
-            if orchestrator.bin:
-                await orchestrator.bin.close()
+        if record is None:
+            console.print(f"[red]Unknown agent: {agent_id}[/red]")
+            raise typer.Exit(1)
+
+        payload = {
+            "state": record.state.value,
+            "task": record.task,
+            "error": record.error,
+            "submission": record.submission,
+            "files_written": record.files_written,
+            "files_deleted": record.files_deleted,
+            "claim_mismatch": record.claim_mismatch,
+        }
+        console.print(Panel(json.dumps(payload, indent=2), title=f"Agent Status: {agent_id}"))
+        if record.claim_mismatch:
+            claimed = sorted(record.submission["changed_files"]) if record.submission else []
+            actual = sorted((record.run_written or []) + (record.run_deleted or []))
+            console.print(f"agent claims : {', '.join(claimed) if claimed else '(nothing)'}")
+            console.print(f"actually wrote: {', '.join(actual) if actual else '(nothing)'}")
+            console.print("[red]! the agent's self-report does not match what it did[/red]")
 
     asyncio.run(_status())
+
+
+def _mutation_required(home: Path) -> None:
+    """Refuse a mutating command when no daemon is running."""
+    if read_daemon_pid(home) is None:
+        console.print(
+            "[red]No Cairn daemon is running. Start one with `cairn up` (or run inline with `cairn run <task>`).[/red]"
+        )
+        raise typer.Exit(2)
+
+
+async def _poll_state(home: Path, agent_id: str, states: set[AgentState], timeout: float):
+    import time
+
+    from cairn.orchestrator.lifecycle import LifecycleRecord
+
+    deadline = time.monotonic() + timeout
+    async with open_lifecycle_readonly(home) as store:
+        while True:
+            record: LifecycleRecord | None = await store.load(agent_id)
+            if record is not None and record.state in states:
+                return record
+            if time.monotonic() >= deadline:
+                raise CairnTimeoutError(
+                    f"Agent {agent_id} did not settle within {timeout}s",
+                    error_code="AGENT_WAIT_TIMEOUT",
+                )
+            await asyncio.sleep(0.1)
 
 
 @agent_app.command("accept")
 def agent_accept(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
     force: Annotated[bool, typer.Option("--force", help="Accept even if stable changed since the agent started")] = False,
+    timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for the accept to settle")] = 300.0,
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
 ):
-    """Accept an agent's changes."""
+    """Accept an agent's changes (signal + poll)."""
 
     async def _accept():
-        orchestrator = await get_orchestrator(project_root, cairn_home)
+        home = _cairn_home(project_root, cairn_home)
+        _mutation_required(home)
+        command = parse_command_payload("accept", {"agent_id": agent_id, "force": force})
+        write_signal(home, command)
 
-        try:
-            command = parse_command_payload("accept", {"agent_id": agent_id, "force": force})
-            result = await orchestrator.submit_command(command)
-
-            files_merged = result.payload.get("files_merged", 0)
-            tombstones_applied = result.payload.get("tombstones_applied", 0)
-            console.print(f"[green]✓[/green] Accepted {agent_id}")
-            console.print(f"  Merged {files_merged} file(s) into stable")
-            if tombstones_applied:
-                console.print(f"  [yellow]Applied {tombstones_applied} deletion(s) to stable[/yellow]")
-
-        finally:
-            if orchestrator.stable:
-                await orchestrator.stable.close()
-            if orchestrator.bin:
-                await orchestrator.bin.close()
+        record = await _poll_state(home, agent_id, {AgentState.ACCEPTED, AgentState.ERRORED}, timeout)
+        if record.state is AgentState.ERRORED:
+            console.print(f"[red]accept failed: {record.error}[/red]")
+            raise typer.Exit(1)
+        stats = record.accept_stats or {}
+        console.print(f"[green]✓[/green] Accepted {agent_id}")
+        console.print(f"  Merged {stats.get('files_merged', 0)} file(s) into stable")
+        if stats.get("tombstones_applied"):
+            console.print(f"  [yellow]Applied {stats['tombstones_applied']} deletion(s) to stable[/yellow]")
 
     asyncio.run(_accept())
 
@@ -591,24 +587,23 @@ def agent_accept(
 @agent_app.command("reject")
 def agent_reject(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
+    timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for the reject to settle")] = 300.0,
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
 ):
-    """Reject an agent's changes."""
+    """Reject an agent's changes (signal + poll)."""
 
     async def _reject():
-        orchestrator = await get_orchestrator(project_root, cairn_home)
+        home = _cairn_home(project_root, cairn_home)
+        _mutation_required(home)
+        command = parse_command_payload("reject", {"agent_id": agent_id})
+        write_signal(home, command)
 
-        try:
-            command = parse_command_payload("reject", {"agent_id": agent_id})
-            await orchestrator.submit_command(command)
-            console.print(f"[green]✓[/green] Queued reject for {agent_id}")
-
-        finally:
-            if orchestrator.stable:
-                await orchestrator.stable.close()
-            if orchestrator.bin:
-                await orchestrator.bin.close()
+        record = await _poll_state(home, agent_id, {AgentState.REJECTED, AgentState.ERRORED}, timeout)
+        if record.state is AgentState.ERRORED:
+            console.print(f"[red]reject failed: {record.error}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]✓[/green] Rejected {agent_id}")
 
     asyncio.run(_reject())
 
@@ -618,29 +613,15 @@ def agent_spawn(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
-    provider: Annotated[str, typer.Option(help="Code provider name (file, inline, or plugin)")] = "file",
-    provider_base_path: Annotated[Optional[Path], typer.Option(help="Base path for file provider")] = None,
 ):
-    """Spawn a high-priority agent task."""
+    """Spawn a high-priority agent task (signal)."""
 
     async def _spawn():
-        orchestrator = await get_orchestrator(
-            project_root,
-            cairn_home,
-            provider=provider,
-            provider_base_path=provider_base_path,
-        )
-
-        try:
-            command = parse_command_payload("spawn", {"task": task, "priority": int(TaskPriority.HIGH)})
-            await orchestrator.submit_command(command)
-            console.print("[green]✓[/green] Spawned agent task")
-
-        finally:
-            if orchestrator.stable:
-                await orchestrator.stable.close()
-            if orchestrator.bin:
-                await orchestrator.bin.close()
+        home = _cairn_home(project_root, cairn_home)
+        _mutation_required(home)
+        command = parse_command_payload("spawn", {"task": task, "priority": int(TaskPriority.HIGH)})
+        path = write_signal(home, command)
+        console.print(f"[green]✓[/green] Spawned agent task ({path.name})")
 
     asyncio.run(_spawn())
 
@@ -650,31 +631,148 @@ def agent_queue(
     task: Annotated[str, typer.Argument(help="Task description for agent")],
     project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
-    provider: Annotated[str, typer.Option(help="Code provider name (file, inline, or plugin)")] = "file",
-    provider_base_path: Annotated[Optional[Path], typer.Option(help="Base path for file provider")] = None,
 ):
-    """Queue a normal-priority agent task."""
+    """Queue a normal-priority agent task (signal)."""
 
     async def _queue():
-        orchestrator = await get_orchestrator(
-            project_root,
-            cairn_home,
-            provider=provider,
-            provider_base_path=provider_base_path,
-        )
-
-        try:
-            command = parse_command_payload("queue", {"task": task, "priority": int(TaskPriority.NORMAL)})
-            await orchestrator.submit_command(command)
-            console.print("[green]✓[/green] Queued agent task")
-
-        finally:
-            if orchestrator.stable:
-                await orchestrator.stable.close()
-            if orchestrator.bin:
-                await orchestrator.bin.close()
+        home = _cairn_home(project_root, cairn_home)
+        _mutation_required(home)
+        command = parse_command_payload("queue", {"task": task, "priority": int(TaskPriority.NORMAL)})
+        path = write_signal(home, command)
+        console.print(f"[green]✓[/green] Queued agent task ({path.name})")
 
     asyncio.run(_queue())
+
+
+@agent_app.command("undo")
+def agent_undo(
+    agent_id: Annotated[str, typer.Argument(help="Agent ID")],
+    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+):
+    """Undo an accepted agent's changes to stable (signal)."""
+
+    async def _undo():
+        home = _cairn_home(project_root, cairn_home)
+        _mutation_required(home)
+        command = parse_command_payload("undo", {"agent_id": agent_id})
+        path = write_signal(home, command)
+        console.print(f"[green]✓[/green] Submitted undo ({path.name})")
+
+    asyncio.run(_undo())
+
+
+@agent_app.command("logs")
+def agent_logs(
+    agent_id: Annotated[str, typer.Argument(help="Agent ID")],
+    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+):
+    """Print an agent's sandbox run log."""
+
+    async def _logs():
+        home = _cairn_home(project_root, cairn_home)
+        try:
+            async with open_lifecycle_readonly(home) as store:
+                record = await store.load(agent_id)
+        except AgentNotFoundError:
+            console.print(f"[red]Unknown agent: {agent_id}[/red]")
+            raise typer.Exit(1)
+        if record is None or not record.run_log:
+            console.print(f"[red]No run log for {agent_id}[/red]")
+            raise typer.Exit(1)
+        console.print(record.run_log)
+
+    asyncio.run(_logs())
+
+
+@agent_app.command("run")
+def agent_run(
+    task: Annotated[str, typer.Argument(help="Task description for agent")],
+    timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for the agent")] = 300.0,
+    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+):
+    """Run a single task inline to completion (no daemon)."""
+
+    async def _run():
+        from cairn.orchestrator.orchestrator import CairnOrchestrator
+        from cairn.providers.providers import resolve_code_provider
+        from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings
+
+        home = _cairn_home(project_root, cairn_home)
+        if read_daemon_pid(home) is not None:
+            console.print("[red]A daemon is running; use `cairn queue` instead.[/red]")
+            raise typer.Exit(2)
+
+        path_settings = get_paths_settings(project_root, cairn_home)
+        provider = resolve_code_provider("file", project_root=path_settings.project_root, base_path=None)
+        orchestrator = CairnOrchestrator(
+            project_root=path_settings.project_root or ".",
+            cairn_home=home,
+            config=OrchestratorSettings(),
+            executor_settings=ExecutorSettings(),
+            code_provider=provider,
+        )
+        await orchestrator.initialize()
+        try:
+            agent_id = await orchestrator.spawn_agent(task, TaskPriority.HIGH)
+            record = await orchestrator.wait_for_agent(agent_id, timeout=timeout)
+            console.print(json.dumps({"agent_id": agent_id, "state": record.state.value}, indent=2))
+            if record.state is not AgentState.REVIEWING:
+                raise typer.Exit(1)
+        finally:
+            await orchestrator.shutdown()
+
+    asyncio.run(_run())
+
+
+@agent_app.command("up")
+def agent_up(
+    project_root: Annotated[Optional[Path], typer.Option(help="Project root directory")] = None,
+    cairn_home: Annotated[Optional[Path], typer.Option(help="Cairn home directory")] = None,
+):
+    """Start the orchestrator daemon."""
+
+    async def _up():
+        import signal
+
+        from cairn.orchestrator.daemon import daemon_pidfile
+        from cairn.orchestrator.orchestrator import CairnOrchestrator
+        from cairn.providers.providers import resolve_code_provider
+        from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings
+
+        home = _cairn_home(project_root, cairn_home)
+        path_settings = get_paths_settings(project_root, cairn_home)
+        provider = resolve_code_provider("file", project_root=path_settings.project_root, base_path=None)
+        with daemon_pidfile(home):
+            orchestrator = CairnOrchestrator(
+                project_root=path_settings.project_root or ".",
+                cairn_home=home,
+                config=OrchestratorSettings(),
+                executor_settings=ExecutorSettings(),
+                code_provider=provider,
+            )
+            await orchestrator.initialize()
+
+            stop = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop.set)
+
+            runner = asyncio.create_task(orchestrator.run())
+            try:
+                await asyncio.wait(
+                    [runner, asyncio.create_task(stop.wait())],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                runner.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runner
+                await orchestrator.shutdown()
+
+    asyncio.run(_up())
 
 
 # ============================================================================

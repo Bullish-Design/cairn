@@ -15,81 +15,102 @@ from cairn.runtime.agent import AgentState
 runner = CliRunner()
 
 
-class DummyWorkspace:
-    async def close(self) -> None:
-        return None
+def _write_lifecycle_mirror(home: Path, records: list[LifecycleRecord]) -> None:
+    """Write the lifecycle mirror the thin CLI reads."""
+    from cairn.orchestrator.lifecycle import lifecycle_mirror_path
+
+    path = lifecycle_mirror_path(home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {record.agent_id: record.model_dump(mode="json") for record in records}
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-class StubOrchestrator:
-    def __init__(self) -> None:
-        self.submitted: list[Any] = []
-        self.stable = DummyWorkspace()
-        self.bin = DummyWorkspace()
-
-    async def submit_command(self, command: Any) -> CommandResult:
-        self.submitted.append(command)
-        payload: dict[str, Any] = {}
-        if command.type is CommandType.LIST_AGENTS:
-            payload = {
-                "agents": {
-                    "agent-1": {"state": "queued", "task": "task", "priority": 2},
-                }
-            }
-        elif command.type is CommandType.STATUS:
-            payload = {"state": "queued", "task": "task", "error": None, "submission": None}
-        return CommandResult(command_type=command.type, agent_id=getattr(command, "agent_id", None), payload=payload)
-
-
-def _patch_orchestrator(monkeypatch: Any) -> StubOrchestrator:
-    stub = StubOrchestrator()
-
-    async def fake_get_orchestrator(*args: Any, **kwargs: Any) -> StubOrchestrator:
-        _ = args, kwargs
-        return stub
-
-    monkeypatch.setattr(typer_cli, "get_orchestrator", fake_get_orchestrator)
-    return stub
+def _seed_mirror(tmp_path: Path) -> Path:
+    """Seed a lifecycle mirror with one agent record; returns cairn_home."""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    (project / ".agentfs").mkdir(parents=True)
+    _write_lifecycle_mirror(
+        home,
+        [
+            LifecycleRecord(
+                agent_id="agent-1",
+                task="task",
+                priority=2,
+                state=AgentState.QUEUED,
+                state_changed_at=1.0,
+                created_at=1.0,
+                db_path=str(project / ".agentfs" / "agent-1.db"),
+            )
+        ],
+    )
+    return home
 
 
-def test_cli_agent_list_outputs_agents(monkeypatch: Any) -> None:
-    _patch_orchestrator(monkeypatch)
-    result = runner.invoke(typer_cli.app, ["agent", "list"])
+def test_cli_agent_list_outputs_agents(tmp_path: Path) -> None:
+    home = _seed_mirror(tmp_path)
+    result = runner.invoke(typer_cli.app, ["agent", "list", "--cairn-home", str(home)])
 
     assert result.exit_code == 0
     assert "agent-1" in result.stdout
 
 
-def test_cli_agent_status_outputs_payload(monkeypatch: Any) -> None:
-    _patch_orchestrator(monkeypatch)
-    result = runner.invoke(typer_cli.app, ["agent", "status", "agent-1"])
+def test_cli_agent_status_outputs_payload(tmp_path: Path) -> None:
+    home = _seed_mirror(tmp_path)
+    result = runner.invoke(typer_cli.app, ["agent", "status", "agent-1", "--cairn-home", str(home)])
 
     assert result.exit_code == 0
     assert "agent-1" in result.stdout
 
 
-def test_cli_agent_accept_reject_commands(monkeypatch: Any) -> None:
-    _patch_orchestrator(monkeypatch)
+def test_cli_agent_accept_reject_commands(tmp_path: Path) -> None:
+    """Without a running daemon, mutating commands refuse with exit 2."""
+    home = _seed_mirror(tmp_path)
 
-    accept_result = runner.invoke(typer_cli.app, ["agent", "accept", "agent-1"])
-    reject_result = runner.invoke(typer_cli.app, ["agent", "reject", "agent-1"])
+    accept_result = runner.invoke(typer_cli.app, ["agent", "accept", "agent-1", "--cairn-home", str(home)])
+    reject_result = runner.invoke(typer_cli.app, ["agent", "reject", "agent-1", "--cairn-home", str(home)])
 
-    assert accept_result.exit_code == 0
-    assert "Accepted agent-1" in accept_result.stdout
-    assert "Merged 0 file(s) into stable" in accept_result.stdout
-    assert reject_result.exit_code == 0
-    assert "Queued reject" in reject_result.stdout
+    assert accept_result.exit_code == 2
+    assert "No Cairn daemon" in accept_result.stdout
+    assert reject_result.exit_code == 2
+    assert "No Cairn daemon" in reject_result.stdout
 
 
-def test_cli_agent_spawn_queue_commands(monkeypatch: Any) -> None:
-    _patch_orchestrator(monkeypatch)
+def test_cli_agent_spawn_queue_commands(tmp_path: Path) -> None:
+    """Without a running daemon, mutating commands refuse with exit 2."""
+    home = _seed_mirror(tmp_path)
 
-    spawn_result = runner.invoke(typer_cli.app, ["agent", "spawn", "task"])
-    queue_result = runner.invoke(typer_cli.app, ["agent", "queue", "task"])
+    spawn_result = runner.invoke(typer_cli.app, ["agent", "spawn", "task", "--cairn-home", str(home)])
+    queue_result = runner.invoke(typer_cli.app, ["agent", "queue", "task", "--cairn-home", str(home)])
 
-    assert spawn_result.exit_code == 0
-    assert "Spawned agent" in spawn_result.stdout
-    assert queue_result.exit_code == 0
-    assert "Queued agent" in queue_result.stdout
+    assert spawn_result.exit_code == 2
+    assert "No Cairn daemon" in spawn_result.stdout
+    assert queue_result.exit_code == 2
+    assert "No Cairn daemon" in queue_result.stdout
+
+
+def test_cli_agent_logs_shows_run_log(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    (project / ".agentfs").mkdir(parents=True)
+    _write_lifecycle_mirror(
+        home,
+        [
+            LifecycleRecord(
+                agent_id="agent-logs",
+                task="t",
+                priority=3,
+                state=AgentState.ERRORED,
+                state_changed_at=1.0,
+                created_at=1.0,
+                db_path=str(project / ".agentfs" / "agent-logs.db"),
+                run_log="RuntimeError: boom\n",
+            )
+        ],
+    )
+    result = runner.invoke(typer_cli.app, ["agent", "logs", "agent-logs", "--cairn-home", str(home)])
+    assert result.exit_code == 0
+    assert "RuntimeError: boom" in result.stdout
 
 
 def test_cli_invalid_command() -> None:
@@ -254,16 +275,6 @@ def test_status_unknown_agent_exits_1(tmp_path: Path, monkeypatch: Any) -> None:
     assert rc == 1
     assert "Unknown agent: agent-nope" in stderr.getvalue()
     assert "Traceback" not in stderr.getvalue()
-
-
-def _write_lifecycle_mirror(home: Path, records: list[LifecycleRecord]) -> None:
-    """Write the lifecycle mirror the thin CLI reads."""
-    from cairn.orchestrator.lifecycle import lifecycle_mirror_path
-
-    path = lifecycle_mirror_path(home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {record.agent_id: record.model_dump(mode="json") for record in records}
-    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_logs_shows_run_log(tmp_path: Path, monkeypatch: Any) -> None:

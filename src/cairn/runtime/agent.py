@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from cairn.orchestrator.queue import TaskPriority
 from cairn.core.exceptions import AgentStateError
-from cairn.core.types import ExecutionResult, SubmissionData
+from cairn.core.types import SubmissionData
 
 
 class AgentState(str, Enum):
@@ -51,7 +51,6 @@ class AgentContext(BaseModel):
     agent_db_path: Path
     agent_fs: Workspace | None = None
     generated_code: str | None = None
-    execution_result: ExecutionResult | None = None
     submission: SubmissionData | None = None
     error: str | None = None
     files_written: int = 0

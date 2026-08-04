@@ -6,7 +6,7 @@ import logging
 import pytest
 
 import cairn.utils.retry as retry_module
-from cairn.utils.retry_utils import with_retry
+from cairn.utils.retry import with_retry
 
 
 @pytest.mark.asyncio

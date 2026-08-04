@@ -60,3 +60,6 @@ jobs:
           ln -sf "$(nix eval --raw nixpkgs#glibc.outPath)/lib/ld-linux-x86-64.so.2" /lib64/ld-linux-x86-64.so.2
           ls -l /lib64/ld-linux-x86-64.so.2
           devenv ci
+
+      - name: Smoke-test the demo script
+        run: uv run python scripts/demo_cairn_library.py

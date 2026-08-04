@@ -361,3 +361,15 @@ To avoid drift:
 - `CONCEPT.md`: conceptual model and invariants only.
 - `SPEC.md`: runtime details, contracts, and public APIs only.
 - `.agents/skills/*`: implementation workflows that link back to these canonical docs.
+
+## Retry utilities
+
+`with_retry` lives in `cairn.utils.retry`; `cairn.utils.retry_utils` is a
+one-release deprecated alias.
+
+## CLI entry points
+
+Both `cairn` (argparse) and `cairn-cli` (Typer) implement the thin-client
+contract: daemon commands write signals / read the lifecycle mirror, and
+neither constructs an orchestrator for a subcommand.  `cairn-cli agent up|run|
+queue|spawn|accept|reject|status|list|undo|logs` mirror the `cairn` commands.

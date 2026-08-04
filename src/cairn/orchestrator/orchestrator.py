@@ -74,7 +74,7 @@ from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, Paths
 from cairn.runtime.workspace_cache import WorkspaceCache
 from cairn.runtime.workspace_manager import WorkspaceManager
 from cairn.utils.error_formatting import format_agent_error
-from cairn.utils.retry_utils import with_retry
+from cairn.utils.retry import with_retry
 from cairn.watcher.watcher import FileWatcher
 
 logger = logging.getLogger(__name__)

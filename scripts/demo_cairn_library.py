@@ -31,8 +31,8 @@ def load_module(module_name: str, relative_path: str):
     return module
 
 
-queue_mod = load_module("cairn_queue", "src/cairn/queue.py")
-retry_mod = load_module("cairn_retry", "src/cairn/retry.py")
+queue_mod = load_module("cairn_queue", "src/cairn/orchestrator/queue.py")
+retry_mod = load_module("cairn_retry", "src/cairn/utils/retry.py")
 
 TaskPriority = queue_mod.TaskPriority
 TaskQueue = queue_mod.TaskQueue

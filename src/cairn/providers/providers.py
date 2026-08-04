@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
 from cairn.core.exceptions import ProviderError, RecoverableError
-from cairn.utils.retry_utils import with_retry
+from cairn.utils.retry import with_retry
 
 PROVIDER_RETRY_EXCEPTIONS: tuple[type[Exception], ...] = (
     RecoverableError,

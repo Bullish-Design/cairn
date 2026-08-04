@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from fsdantic import SerializationError
+from fsdantic.exceptions import KeyNotFoundError
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
@@ -97,8 +98,7 @@ class AgentStateManager:
         full_key = self._full_key(key)
         try:
             return await self._kv.get(full_key, default=default)
-        except Exception as e:
-            logger.debug("Failed to get state %s: %s", key, e)
+        except KeyNotFoundError:
             return default
 
     async def set(self, key: str, value: Any) -> None:
@@ -136,24 +136,13 @@ class AgentStateManager:
         try:
             await self._kv.get(full_key)
             return True
-        except Exception:
+        except KeyNotFoundError:
             return False
 
     async def list_keys(self) -> list[str]:
-        """List all state keys for this agent.
-
-        Returns:
-            List of key names (without the agent prefix)
-        """
-        # Use KV list with prefix filtering
-        try:
-            entries = await self._kv._agent_fs.kv.list(prefix=self._prefix)
-            return [
-                entry["key"][len(self._prefix) :] for entry in entries if entry.get("key", "").startswith(self._prefix)
-            ]
-        except Exception as e:
-            logger.debug("Failed to list keys: %s", e)
-            return []
+        """List all state keys for this agent (without the agent prefix)."""
+        entries = await self._kv.list(prefix=self._prefix)
+        return [entry["key"][len(self._prefix) :] for entry in entries]
 
     async def get_typed(self, key: str, model: type[T]) -> T | None:
         """Get state as typed Pydantic model.

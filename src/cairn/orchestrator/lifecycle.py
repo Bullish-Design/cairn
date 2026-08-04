@@ -24,7 +24,7 @@ from cairn.core.constants import (
 )
 from cairn.utils.error_formatting import format_lifecycle_error
 from cairn.core.exceptions import AgentNotFoundError, LifecycleError, RecoverableError, VersionConflictError
-from cairn.utils.retry_utils import with_retry
+from cairn.utils.retry import with_retry
 from cairn.core.types import SubmissionData
 from cairn.runtime.workspace_cache import WorkspaceCache
 

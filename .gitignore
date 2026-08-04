@@ -230,3 +230,6 @@ __marimo__/
 
 # Scratch notes (never commit)
 /.scratch/
+
+# Vendored upstream source (fsdantic/agentfs) — keep local copy, not tracked
+.context/

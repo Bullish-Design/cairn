@@ -2,7 +2,7 @@
 
 import pytest
 
-from cairn.core.types import Result, SearchContentMatchData, SubmissionData
+from cairn.core.types import SearchContentMatchData, SubmissionData
 
 
 def test_search_content_match_structure() -> None:
@@ -23,35 +23,3 @@ def test_submission_data_structure() -> None:
     assert isinstance(submission["summary"], str)
     assert isinstance(submission["changed_files"], list)
     assert isinstance(submission["submitted_at"], float)
-
-
-def test_result_ok() -> None:
-    """Test Result.ok() creates successful result."""
-    result = Result.ok(42)
-    assert result.is_ok()
-    assert not result.is_error()
-    assert result.unwrap() == 42
-
-
-def test_result_error() -> None:
-    """Test Result.error() creates error result."""
-    result = Result.error("Something failed")
-    assert result.is_error()
-    assert not result.is_ok()
-    assert result.error_message() == "Something failed"
-
-
-def test_result_unwrap_error_raises() -> None:
-    """Test unwrapping error result raises."""
-    result = Result.error("Failed")
-    with pytest.raises(ValueError, match="Cannot unwrap error result"):
-        result.unwrap()
-
-
-def test_result_unwrap_or() -> None:
-    """Test unwrap_or returns default on error."""
-    result = Result.error("Failed")
-    assert result.unwrap_or(999) == 999
-
-    result_ok = Result.ok(42)
-    assert result_ok.unwrap_or(999) == 42

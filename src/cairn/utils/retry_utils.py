@@ -1,18 +1,22 @@
-"""Decorator helpers for retrying async operations."""
+"""Deprecated re-export shim for the retry decorator.
+
+``with_retry`` now lives in :mod:`cairn.utils.retry`.  Import it from there;
+this module exists for one release for backward compatibility.
+"""
 
 from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Awaitable, Callable
-from functools import wraps
 from typing import ParamSpec, TypeVar
 
-from cairn.utils.retry import RetryStrategy
+from cairn.utils.retry import RetryStrategy, with_retry as _original_with_retry
 
 P = ParamSpec("P")
 T = TypeVar("T")
 
-LOGGER = logging.getLogger(__name__)
+__all__ = ["RetryStrategy", "with_retry"]
 
 
 def with_retry(
@@ -23,50 +27,17 @@ def with_retry(
     retry_exceptions: tuple[type[Exception], ...] = (Exception,),
     logger: logging.Logger | None = None,
 ) -> Callable[[Callable[P, Awaitable[T]]], Callable[P, Awaitable[T]]]:
-    """Retry an async function with exponential backoff.
-
-    Args:
-        max_attempts: Maximum number of attempts.
-        initial_delay: Initial delay in seconds before retrying.
-        max_delay: Maximum delay in seconds between retries.
-        backoff_factor: Multiplier used for exponential backoff delays.
-        retry_exceptions: Exception types that should trigger a retry.
-        logger: Optional logger used for retry error messages.
-
-    Returns:
-        A decorator for async callables.
-    """
-
-    retry_logger = logger or LOGGER
-
-    def decorator(func: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
-        @wraps(func)
-        async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
-            strategy = RetryStrategy(
-                max_attempts=max_attempts,
-                initial_delay=initial_delay,
-                max_delay=max_delay,
-                backoff_factor=backoff_factor,
-            )
-
-            async def operation() -> T:
-                return await func(*args, **kwargs)
-
-            async def error_handler(error: Exception, attempt: int) -> None:
-                retry_logger.warning(
-                    "Retryable operation '%s' failed on attempt %d/%d",
-                    getattr(func, "__name__", type(func).__name__),
-                    attempt + 1,
-                    max_attempts,
-                    exc_info=error,
-                )
-
-            return await strategy.with_retry(
-                operation,
-                error_handler=error_handler,
-                retry_exceptions=retry_exceptions,
-            )
-
-        return wrapped
-
-    return decorator
+    """Deprecated alias for ``cairn.utils.retry.with_retry``."""
+    warnings.warn(
+        "cairn.utils.retry_utils.with_retry is deprecated; import from cairn.utils.retry",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _original_with_retry(
+        max_attempts=max_attempts,
+        initial_delay=initial_delay,
+        max_delay=max_delay,
+        backoff_factor=backoff_factor,
+        retry_exceptions=retry_exceptions,
+        logger=logger,
+    )

@@ -40,3 +40,12 @@ def test_lifecycle_cleanup_age() -> None:
     """Test lifecycle cleanup age matches week."""
     assert LIFECYCLE_CLEANUP_MAX_AGE_SECONDS == WEEK
     assert LIFECYCLE_CLEANUP_MAX_AGE_SECONDS == 604800.0
+
+
+def test_version_matches_metadata() -> None:
+    """P5.4: __version__ is single-sourced from package metadata."""
+    from importlib.metadata import version
+
+    import cairn
+
+    assert cairn.__version__ == version("cairn")
