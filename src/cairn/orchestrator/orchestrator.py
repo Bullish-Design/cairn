@@ -31,6 +31,7 @@ from cairn.core.constants import (
     LIFECYCLE_RETRY_INITIAL_DELAY_SECONDS,
 )
 from cairn.core.exceptions import (
+    AgentNotFoundError,
     CairnError,
     LifecycleError,
     ProviderError,
@@ -43,7 +44,13 @@ from cairn.core.exceptions import (
     TimeoutError as CairnTimeoutError,
 )
 from cairn.core.types import AgentSummary
-from cairn.orchestrator.lifecycle import SUBMISSION_KEY, LifecycleRecord, LifecycleStore, SubmissionRecord
+from cairn.orchestrator.lifecycle import (
+    SUBMISSION_KEY,
+    LIFECYCLE_MIRROR_NAME,
+    LifecycleRecord,
+    LifecycleStore,
+    SubmissionRecord,
+)
 from cairn.orchestrator.queue import TaskPriority, TaskQueue
 from cairn.orchestrator.signals import SignalHandler
 from cairn.providers.providers import CodeProvider, FileCodeProvider
@@ -57,6 +64,13 @@ from cairn.utils.retry_utils import with_retry
 from cairn.watcher.watcher import FileWatcher
 
 logger = logging.getLogger(__name__)
+
+TERMINAL_STATES = {
+    AgentState.REVIEWING,
+    AgentState.ACCEPTED,
+    AgentState.REJECTED,
+    AgentState.ERRORED,
+}
 
 
 class CairnOrchestrator:
@@ -107,15 +121,48 @@ class CairnOrchestrator:
         self.workspace_manager.track_workspace(self.stable)
         self.workspace_manager.track_workspace(self.bin)
 
-        self.watcher = FileWatcher(self.project_root, self.stable)
+        self.watcher = FileWatcher(
+            self.project_root,
+            self.stable,
+            max_file_bytes=self.config.max_sync_file_bytes,
+            extra_ignore_dirs=self.config.extra_ignore_dirs,
+        )
         self.signals = SignalHandler(self.cairn_home, self, enable_polling=self.config.enable_signal_polling)
         self.lifecycle = LifecycleStore(self.bin)
 
+        if self.config.sync_project_on_start:
+            await self.watcher.initial_sync()
+
         await self.recover_from_lifecycle_store()
+        await self._mirror_lifecycle()
 
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._worker_loop())
         await self.persist_state()
+
+    async def _mirror_lifecycle(self) -> None:
+        """Write the lifecycle mirror that CLI read-only queries consume.
+
+        pyturso locks ``bin.db`` exclusively even for read-only opens, so the
+        CLI cannot open it while the daemon runs; the mirror under
+        ``$CAIRN_HOME/state/lifecycle.json`` is the CLI's query path.
+        """
+        if self.lifecycle is None:
+            return
+        try:
+            records = await self.lifecycle.list_all()
+        except Exception:
+            logger.exception("Failed to list lifecycle records for mirror")
+            return
+        payload = {record.agent_id: record.model_dump(mode="json") for record in records}
+        await asyncio.to_thread(self._write_mirror_sync, payload)
+
+    def _write_mirror_sync(self, payload: dict) -> None:
+        state_dir = self.cairn_home / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = state_dir / f"{LIFECYCLE_MIRROR_NAME}.tmp"
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(state_dir / LIFECYCLE_MIRROR_NAME)
 
     async def recover_from_lifecycle_store(self) -> None:
         if self.lifecycle is None:
@@ -213,6 +260,29 @@ class CairnOrchestrator:
                 return await self._handle_list_agents(command)
         raise ValueError(f"Unsupported command type: {command.type.value}")
 
+    async def wait_for_agent(
+        self,
+        agent_id: str,
+        *,
+        timeout: float = 300.0,
+        poll_interval: float = 0.05,
+    ) -> LifecycleRecord:
+        """Block until the agent reaches a terminal state."""
+        if self.lifecycle is None:
+            raise RuntimeError("Orchestrator not initialized")
+        deadline = time.monotonic() + timeout
+        while True:
+            record = await self.lifecycle.load(agent_id)
+            if record is not None and record.state in TERMINAL_STATES:
+                return record
+            if time.monotonic() >= deadline:
+                raise CairnTimeoutError(
+                    f"Agent {agent_id} did not settle within {timeout}s",
+                    error_code="AGENT_WAIT_TIMEOUT",
+                    context={"agent_id": agent_id, "timeout_seconds": timeout},
+                )
+            await asyncio.sleep(poll_interval)
+
     async def _handle_queue(self, command: QueueCommand) -> CommandResult:
         agent_id = await self.spawn_agent(task=command.task, priority=command.priority)
         return CommandResult(command_type=command.type, agent_id=agent_id)
@@ -239,11 +309,19 @@ class CairnOrchestrator:
             )
 
         if self.lifecycle is None:
-            raise KeyError(f"Unknown agent_id: {command.agent_id}")
+            raise AgentNotFoundError(
+                f"Unknown agent_id: {command.agent_id}",
+                error_code="AGENT_NOT_FOUND",
+                context={"agent_id": command.agent_id},
+            )
 
         record = await self.lifecycle.load(command.agent_id)
         if record is None:
-            raise KeyError(f"Unknown agent_id: {command.agent_id}")
+            raise AgentNotFoundError(
+                f"Unknown agent_id: {command.agent_id}",
+                error_code="AGENT_NOT_FOUND",
+                context={"agent_id": command.agent_id},
+            )
 
         return CommandResult(
             command_type=command.type,
@@ -381,7 +459,9 @@ class CairnOrchestrator:
         ctx.transition(AgentState.ACCEPTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
-        return {"files_merged": files_merged, "tombstones_applied": tombstones_applied}
+        stats = {"files_merged": files_merged, "tombstones_applied": tombstones_applied}
+        await self._record_accept_stats(agent_id, stats)
+        return stats
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
@@ -443,6 +523,7 @@ class CairnOrchestrator:
         finally:
             self.active_agents.pop(agent_id, None)
             await self.persist_state()
+        await self._mirror_lifecycle()
 
     async def _worker_loop(self) -> None:
         while True:
@@ -607,7 +688,9 @@ class CairnOrchestrator:
     ) -> int:
         if self.lifecycle is None:
             return 0
-        return await self.lifecycle.cleanup_old(max_age_seconds, self.agentfs_dir)
+        cleaned = await self.lifecycle.cleanup_old(max_age_seconds, self.agentfs_dir)
+        await self._mirror_lifecycle()
+        return cleaned
 
     def _apply_lifecycle_update(
         self,
@@ -646,6 +729,7 @@ class CairnOrchestrator:
                     "Persistent version conflict saving lifecycle",
                     extra={"agent_id": ctx.agent_id, "state": ctx.state.value},
                 )
+            await self._mirror_lifecycle()
             return
 
         record = LifecycleRecord(
@@ -672,9 +756,27 @@ class CairnOrchestrator:
             await lifecycle.save(record)
 
         await _persist_record()
+        await self._mirror_lifecycle()
 
     def _get_agent(self, agent_id: str) -> AgentContext:
         ctx = self.active_agents.get(agent_id)
         if ctx is None:
-            raise KeyError(f"Unknown agent_id: {agent_id}")
+            raise AgentNotFoundError(
+                f"Unknown agent_id: {agent_id}",
+                error_code="AGENT_NOT_FOUND",
+                context={"agent_id": agent_id},
+            )
         return ctx
+
+    async def _record_accept_stats(self, agent_id: str, stats: dict[str, int]) -> None:
+        """Persist accept merge statistics on the lifecycle record."""
+        if self.lifecycle is None:
+            return
+        try:
+            await self.lifecycle.update_atomic(
+                agent_id,
+                lambda record: setattr(record, "accept_stats", stats),
+            )
+        except LifecycleError:
+            logger.debug("Could not persist accept stats", extra={"agent_id": agent_id})
+        await self._mirror_lifecycle()

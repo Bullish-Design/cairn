@@ -29,6 +29,8 @@ from cairn.orchestrator.lifecycle import LifecycleStore
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
 from cairn.runtime.agent import AgentContext, AgentState
+from cairn.runtime.settings import OrchestratorSettings
+from cairn.watcher.watcher import FileWatcher
 
 
 def _fixture_root() -> Path:
@@ -46,12 +48,14 @@ def _expected_fixture_files() -> dict[str, bytes]:
 
 
 async def _seed_from_fixtures(workspace, root: Path | None = None) -> None:
-    """Write every file in the live fixture tree into the workspace."""
+    """Mirror every file in the live fixture tree into the workspace.
+
+    Uses the production initial-sync path so the test helper and the
+    orchestrator share one implementation.
+    """
     root = root or _fixture_root()
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            rel = path.relative_to(root).as_posix()
-            await workspace.files.write(rel, path.read_bytes())
+    watcher = FileWatcher(project_root=root, workspace=workspace)
+    await watcher.initial_sync()
 
 
 def _disk_manifest(root: Path) -> dict[str, bytes]:
@@ -205,6 +209,56 @@ class TestMaterializeLiveFixture:
         finally:
             await agent.close()
             await stable.close()
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator initial sync (P1.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestOrchestratorInitialSync:
+    async def test_initialize_seeds_stable_from_project(self, tmp_path: Path) -> None:
+        """P1.2: initialize() mirrors the project tree into stable before the
+        worker loop starts, so agents see the project rather than an empty
+        tree."""
+        project = tmp_path / "project"
+        project.mkdir(parents=True)
+        (project / "src").mkdir()
+        (project / "src" / "a.py").write_text("A = 1\n", encoding="utf-8")
+        (project / "notes.txt").write_text("hello\n", encoding="utf-8")
+
+        orch = CairnOrchestrator(
+            project_root=project,
+            cairn_home=tmp_path / "cairn-home",
+            config=OrchestratorSettings(),
+        )
+        await orch.initialize()
+        try:
+            assert orch.stable is not None
+            assert await orch.stable.files.read("src/a.py", mode="binary") == b"A = 1\n"
+            assert await orch.stable.files.read("notes.txt", mode="binary") == b"hello\n"
+        finally:
+            await orch.shutdown()
+
+    async def test_initialize_can_skip_sync(self, tmp_path: Path) -> None:
+        """Tests that want an empty stable can opt out of the initial sync."""
+        project = tmp_path / "project"
+        project.mkdir(parents=True)
+        (project / "src").mkdir()
+        (project / "src" / "a.py").write_text("A = 1\n", encoding="utf-8")
+
+        orch = CairnOrchestrator(
+            project_root=project,
+            cairn_home=tmp_path / "cairn-home",
+            config=OrchestratorSettings(sync_project_on_start=False),
+        )
+        await orch.initialize()
+        try:
+            assert orch.stable is not None
+            assert await orch.stable.files.exists("src/a.py") is False
+        finally:
+            await orch.shutdown()
 
 
 # ---------------------------------------------------------------------------
