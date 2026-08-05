@@ -21,6 +21,7 @@ from cairn.orchestrator.lifecycle import RUN_KEY, LifecycleStore, RunRecord
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
 from cairn.runtime.agent import AgentContext, AgentState
+from cairn.runtime.repo import ManifestEntry
 from cairn.runtime.sandbox import SandboxResult
 
 pytestmark = [pytest.mark.integration]
@@ -45,6 +46,7 @@ async def _setup_reviewing_agent(
     written: list[str],
     deleted: list[str] | None = None,
     extra_base_hashes: dict[str, str] | None = None,
+    extra_base_entries: dict[str, ManifestEntry] | None = None,
 ) -> tuple[CairnOrchestrator, str, Path, object]:
     """Real project tree + orchestrator + one REVIEWING agent.
 
@@ -87,11 +89,17 @@ async def _setup_reviewing_agent(
 
     base_hashes = {rel: _sha256(content.encode()) for rel, content in project_files.items()}
     base_hashes.update(extra_base_hashes or {})
+    base_manifest = {
+        rel: ManifestEntry(path=rel, kind="file", digest=_sha256(content.encode()), mode=0o644)
+        for rel, content in project_files.items()
+    }
+    base_manifest.update(extra_base_entries or {})
     result = SandboxResult(
         submission={"summary": "rewrote files", "changed_files": written, "submitted_at": 1.0},
         changes={"written": written, "deleted": deleted or []},
         log="",
         base_hashes=base_hashes,
+        base_manifest=base_manifest,
         exit_code=0,
     )
     await orch._record_run(ctx, result)
@@ -282,5 +290,124 @@ async def test_accept_fails_closed_when_run_record_missing(tmp_path: Path) -> No
 
         # The tree is untouched by the refusal.
         assert (project / "a.txt").read_text(encoding="utf-8") == "v1\n"
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
+async def test_accept_refused_when_mode_changed(tmp_path: Path) -> None:
+    """Review §2.6: a human chmod-only change to a touched path must fail the
+    gate closed (mode drift), not be silently overwritten."""
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"run.sh": "#!/bin/sh\necho hi\n"},
+        agent_files={"run.sh": "#!/bin/sh\necho hi\n"},
+        written=["run.sh"],
+    )
+    try:
+        # Human chmods the file while the agent is in review (no content change).
+        (project / "run.sh").chmod(0o600)
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.accept_agent(agent_id)
+        assert excinfo.value.error_code == "ACCEPT_STALE_BASE"
+        assert "run.sh" in excinfo.value.context.get("stale_paths", [])
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
+async def test_accept_refused_when_type_changed(tmp_path: Path) -> None:
+    """Review §2.6: a human replacing a touched file with a directory must
+    fail the gate closed (type change)."""
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"a.txt": "v1\n"},
+        agent_files={"a.txt": "agent version\n"},
+        written=["a.txt"],
+    )
+    try:
+        # Human replaces the file with a directory while the agent is in review.
+        (project / "a.txt").unlink()
+        (project / "a.txt").mkdir()
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.accept_agent(agent_id)
+        assert excinfo.value.error_code == "ACCEPT_STALE_BASE"
+        assert "a.txt" in excinfo.value.context.get("stale_paths", [])
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
+async def test_accept_refused_when_symlink_retargeted(tmp_path: Path) -> None:
+    """Review §2.6: a human retargeting a symlink the agent touched must fail
+    the gate closed (symlink target drift)."""
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"target-a.txt": "a\n"},
+        agent_files={"target-a.txt": "a\n"},
+        written=[],
+        deleted=[],
+        extra_base_entries={
+            "link.txt": ManifestEntry(path="link.txt", kind="symlink", link_target="target-a.txt", mode=0o777),
+        },
+    )
+    try:
+        # The agent touched the symlink (recorded in its changeset).
+        ctx = orch.active_agents[agent_id]
+        run = await orch._load_run_record(ctx.agent_fs)
+        assert run is not None
+        run.written = ["link.txt"]
+        repo = ctx.agent_fs.kv.repository(prefix="", model_type=RunRecord)
+        await repo.save(RUN_KEY, run)
+        # The agent's workspace holds the symlink (same target as base).
+        (project / "target-a.txt").write_text("a\n", encoding="utf-8")
+        workdir_link = orch.cairn_home / "workspaces" / agent_id / "link.txt"
+        workdir_link.symlink_to("target-a.txt")
+
+        # Human retargets the symlink while the agent is in review.
+        link = project / "link.txt"
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to("target-b.txt")
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.accept_agent(agent_id)
+        assert excinfo.value.error_code == "ACCEPT_STALE_BASE"
+        assert "link.txt" in excinfo.value.context.get("stale_paths", [])
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
+async def test_accept_applies_executable_bit_change(tmp_path: Path) -> None:
+    """Review §3.3: a chmod-only sandbox change (no content change) is part of
+    the computed changeset and lands in the tree on accept."""
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"run.sh": "#!/bin/sh\necho hi\n"},
+        agent_files={"run.sh": "#!/bin/sh\necho hi\n"},
+        written=[],  # same content; the change is mode-only
+        extra_base_entries={
+            "run.sh": ManifestEntry(path="run.sh", kind="file", digest=_sha256(b"#!/bin/sh\necho hi\n"), mode=0o644),
+        },
+    )
+    try:
+        # The executor records the mode-only change (same content, exec bit added).
+        ctx = orch.active_agents[agent_id]
+        run = await orch._load_run_record(ctx.agent_fs)
+        assert run is not None
+        run.mode_changed = ["run.sh"]
+        run.executable = ["run.sh"]
+        repo = ctx.agent_fs.kv.repository(prefix="", model_type=RunRecord)
+        await repo.save(RUN_KEY, run)
+        # The agent's workspace holds the chmodded file.
+        (orch.cairn_home / "workspaces" / agent_id / "run.sh").chmod(0o755)
+
+        stats = await orch.accept_agent(agent_id)
+
+        assert stats == {"files_written": 0, "files_deleted": 0}
+        assert (project / "run.sh").stat().st_mode & 0o111
     finally:
         await _safe_close(bin_ws)

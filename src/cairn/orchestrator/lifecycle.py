@@ -25,6 +25,7 @@ from cairn.core.constants import (
 from cairn.core.exceptions import AgentNotFoundError, LifecycleError, RecoverableError, VersionConflictError
 from cairn.core.types import SubmissionData
 from cairn.runtime.agent import AgentState
+from cairn.runtime.repo import ManifestEntry
 from cairn.runtime.workspace_cache import WorkspaceCache
 from cairn.utils.error_formatting import format_lifecycle_error
 from cairn.utils.retry import with_retry
@@ -107,6 +108,11 @@ class RunRecord(VersionedKVRecord):
     written: list[str] = Field(default_factory=list)
     deleted: list[str] = Field(default_factory=list)
     base_hashes: dict[str, str] = Field(default_factory=dict)
+    # Full fidelity base entries (kind/digest/mode/symlink-target) for every
+    # touched path, including explicit absent states (a touched path with no
+    # entry here did not exist at run start).  This is what accept revalidates
+    # against the current tree (review §2.6, §3.3).
+    base_manifest: dict[str, ManifestEntry] = Field(default_factory=dict)
     log: str = ""
     exit_code: int = 0
     executable: list[str] = Field(default_factory=list)

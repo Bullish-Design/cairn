@@ -75,6 +75,7 @@ class SandboxResult:
     changes: dict[str, list[str]] = field(default_factory=lambda: {"written": [], "deleted": []})
     log: str = ""
     base_hashes: dict[str, str] = field(default_factory=dict)  # for the accept staleness check
+    base_manifest: dict[str, repo.ManifestEntry] = field(default_factory=dict)  # full fidelity base entries
     exit_code: int = 0
     executable: list[str] = field(default_factory=list)
     directories: list[str] = field(default_factory=list)
@@ -183,6 +184,10 @@ class BwrapExecutor:
         base_hashes = {
             rel: entry.digest for rel, entry in base_manifest.files().items() if rel in touched and entry.digest
         }
+        # Full-fidelity base entries for every touched path (kind/mode/digest/
+        # symlink target); touched paths absent from the base manifest were
+        # explicitly absent at run start.
+        base_manifest_entries = {rel: entry for rel, entry in base_manifest.entries.items() if rel in touched}
         executable = self._collect_executable(current_manifest, set(written) | set(diff.mode_changed))
         directories = self._collect_empty_dirs(current_manifest)
 
@@ -192,6 +197,7 @@ class BwrapExecutor:
             changes={"written": written, "deleted": deleted},
             log=run_log,
             base_hashes=base_hashes,
+            base_manifest=base_manifest_entries,
             exit_code=proc.returncode or 0,
             executable=executable,
             directories=directories,

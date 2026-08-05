@@ -89,6 +89,18 @@ TERMINAL_STATES = {
 INTERRUPTED_STATES = {AgentState.GENERATING, AgentState.EXECUTING, AgentState.SUBMITTING}
 
 
+def _entry_changed(base: repo.ManifestEntry, current: repo.ManifestEntry) -> bool:
+    """Full-fidelity comparison of a base entry vs the current tree entry:
+    kind, content (digest) or symlink target, and permission bits."""
+    if base.kind != current.kind:
+        return True
+    if base.kind == "symlink":
+        return base.link_target != current.link_target
+    if base.kind == "file":
+        return base.digest != current.digest or base.mode != current.mode
+    return False
+
+
 class CairnOrchestrator:
     """Main orchestrator managing agent lifecycle."""
 
@@ -534,25 +546,41 @@ class CairnOrchestrator:
         """Touched paths whose current state in the real working tree differs
         from the base the agent saw at run start.
 
-        ``base_hashes`` records the digest of every touched path that existed
-        at run start; any touched path absent from ``base_hashes`` was
-        *explicitly absent* then.  Revalidating against a fresh manifest of
-        the canonical tree catches delete/write collisions (a base entry that
-        vanished or changed), create/create collisions (an absent-at-start
-        path that a human created meanwhile), and type/symlink/mode drift the
-        hash check alone would miss.
+        The run record carries a full-fidelity base entry (kind/digest/mode/
+        symlink target) for every touched path; any touched path absent from
+        ``base_manifest`` was *explicitly absent* then.  Revalidating against a
+        fresh manifest of the canonical tree catches delete/write collisions
+        (a base entry that vanished), create/create collisions (an
+        absent-at-start path that a human created meanwhile), content, mode,
+        type, and symlink-target changes — anything an OVERWRITE-style apply
+        would silently discard (review §2.6).
         """
         current = await asyncio.to_thread(repo.capture_manifest, self.project_root)
         stale: list[str] = []
-        for rel, base_digest in run.base_hashes.items():
-            entry = current.entry_for(rel)
-            if entry is None or entry.kind != "file" or entry.digest != base_digest:
-                stale.append(rel)
-        for rel in set(run.written) | set(run.deleted) | set(run.mode_changed):
-            if rel in run.base_hashes:
-                continue  # existed at run start; checked above
-            if current.entry_for(rel) is not None:
-                stale.append(rel)  # absent at run start, present now: create/create collision
+        touched = set(run.written) | set(run.deleted) | set(run.mode_changed)
+
+        if not run.base_manifest:
+            # Legacy (pre-M4) records carry hash-only base data.
+            for rel, base_digest in run.base_hashes.items():
+                entry = current.entry_for(rel)
+                if entry is None or entry.kind != "file" or entry.digest != base_digest:
+                    stale.append(rel)
+            for rel in touched:
+                if rel not in run.base_hashes and current.entry_for(rel) is not None:
+                    stale.append(rel)  # create/create collision
+            return sorted(set(stale))
+
+        for rel in touched:
+            base_entry = run.base_manifest.get(rel)
+            current_entry = current.entry_for(rel)
+            if base_entry is not None:
+                if current_entry is None:
+                    stale.append(rel)  # delete/write collision: base entry vanished
+                elif _entry_changed(base_entry, current_entry):
+                    stale.append(rel)
+            elif current_entry is not None:
+                stale.append(rel)  # create/create collision
+
         return sorted(set(stale))
 
     def _validate_rel(self, rel: str) -> None:
@@ -803,6 +831,7 @@ class CairnOrchestrator:
             written=result.changes["written"],
             deleted=result.changes["deleted"],
             base_hashes=result.base_hashes,
+            base_manifest=result.base_manifest,
             log=result.log[-MAX_STORED_LOG_BYTES:],
             exit_code=result.exit_code,
             executable=result.executable,
@@ -817,7 +846,10 @@ class CairnOrchestrator:
         ctx.files_deleted = len(record.deleted)
         claimed = set((result.submission or {}).get("changed_files", []))
         actual = set(record.written) | set(record.deleted)
-        ctx.claim_mismatch = bool(claimed) and claimed != actual
+        # Empty claims are cross-checked too: a claim of "nothing changed"
+        # that disagrees with the computed changeset is still a mismatch
+        # (review §2.7a).  The computed set is always authoritative.
+        ctx.claim_mismatch = claimed != actual
 
     async def _transition_agent_state(self, ctx: AgentContext, new_state: AgentState) -> None:
         """Persist an agent state transition."""
