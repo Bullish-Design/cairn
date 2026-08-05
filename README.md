@@ -97,9 +97,9 @@ editors, Git, and build tools see accepted work immediately.
 
 ## Read-only inspection
 
-Inspection commands (`cairn-cli workspace info`, `files list|read|search|tree`,
-`preview changes|file`) open workspaces read-only (`readonly=True`), so they
-never modify the databases they inspect.
+Inspection commands (`cairn workspace info`, `cairn files list|read|search|tree`,
+`cairn preview changes|file`) open workspaces read-only (`readonly=True`), so
+they never modify the databases they inspect.
 
 ## Development
 

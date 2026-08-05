@@ -119,7 +119,6 @@ for artifact in "$WHEEL" "$SDIST"; do
         cd "$WORKDIR"
         "$venv/bin/python" -c "import cairn; print('    import cairn OK (version', cairn.__version__ + ')')"
         "$venv/bin/cairn" --help >/dev/null && echo "    cairn --help OK"
-        "$venv/bin/cairn-cli" --help >/dev/null && echo "    cairn-cli --help OK"
     )
 done
 

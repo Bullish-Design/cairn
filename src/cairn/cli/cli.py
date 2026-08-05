@@ -196,6 +196,7 @@ async def _run_status(args: argparse.Namespace) -> int:
         return 1
 
     payload = {
+        "agent_id": record.agent_id,
         "state": record.state.value,
         "task": record.task,
         "error": record.error,
@@ -280,16 +281,253 @@ async def _run_inline(args: argparse.Namespace) -> int:
         await orchestrator.shutdown()
 
 
+def _agentfs_dir(args: argparse.Namespace) -> Path:
+    path_settings = PathsSettings(
+        project_root=Path(args.project_root) if args.project_root is not None else None,
+    )
+    return (path_settings.project_root or Path(".")).resolve() / ".agentfs"
+
+
+def _workspace_path(args: argparse.Namespace, name: str) -> Path:
+    return _agentfs_dir(args) / f"{name}.db"
+
+
+MANAGED_WORKSPACE_NAMES: frozenset[str] = frozenset({"stable", "bin"})
+
+
+def _validate_workspace_name(name: str) -> None:
+    """Reject traversal and Cairn-managed metadata names (review §2.8)."""
+    if not name or any(part in ("", ".", "..") for part in name.split("/")) or "/" in name or "\\" in name:
+        raise SystemExit(f"invalid workspace name: {name!r} (no path separators or traversal)")
+    if not all(ch.isalnum() or ch in "_-" for ch in name):
+        raise SystemExit(f"invalid workspace name: {name!r} (alphanumeric, dash, underscore only)")
+    if name in MANAGED_WORKSPACE_NAMES or name.startswith(("agent-", "bin-")):
+        raise SystemExit(f"workspace {name!r} is managed by Cairn and cannot be modified directly")
+
+
+async def _run_workspace_create(args: argparse.Namespace) -> int:
+    _validate_workspace_name(args.name)
+    agentfs_dir = _agentfs_dir(args)
+    agentfs_dir.mkdir(parents=True, exist_ok=True)
+    workspace_path = agentfs_dir / f"{args.name}.db"
+    if workspace_path.exists():
+        print(f"Workspace '{args.name}' already exists at {workspace_path}", file=sys.stderr)
+        return 1
+    from fsdantic import Fsdantic
+
+    workspace = await Fsdantic.open(path=str(workspace_path))
+    await workspace.close()
+    print(f"created workspace: {args.name} ({workspace_path})")
+    return 0
+
+
+async def _run_workspace_list(args: argparse.Namespace) -> int:
+    agentfs_dir = _agentfs_dir(args)
+    if not agentfs_dir.is_dir():
+        print("No .agentfs directory found")
+        return 0
+    workspaces = sorted(agentfs_dir.glob("*.db"))
+    if not workspaces:
+        print("No workspaces found")
+        return 0
+    for ws_path in workspaces:
+        size_mb = ws_path.stat().st_size / (1024 * 1024)
+        print(f"{ws_path.stem}\t{ws_path}\t{size_mb:.2f} MB")
+    return 0
+
+
+async def _run_workspace_info(args: argparse.Namespace) -> int:
+    _validate_workspace_name(args.name)
+    workspace_path = _workspace_path(args, args.name)
+    if not workspace_path.exists():
+        print(f"Workspace '{args.name}' not found", file=sys.stderr)
+        return 1
+    from fsdantic import Fsdantic
+
+    workspace = await Fsdantic.open(path=str(workspace_path), readonly=True)
+    try:
+        files = await workspace.files.search("**/*")
+        kv_entries = await workspace.kv.list(prefix="")
+        print(f"Name:    {args.name}")
+        print(f"Path:    {workspace_path}")
+        print(f"Size:    {workspace_path.stat().st_size / (1024 * 1024):.2f} MB")
+        print(f"Files:   {len(files)}")
+        print(f"KV:      {len(kv_entries)}")
+    finally:
+        await workspace.close()
+    return 0
+
+
+async def _run_workspace_delete(args: argparse.Namespace) -> int:
+    _validate_workspace_name(args.name)
+    workspace_path = _workspace_path(args, args.name)
+    if not workspace_path.exists():
+        print(f"Workspace '{args.name}' not found", file=sys.stderr)
+        return 1
+    workspace_path.unlink()
+    print(f"deleted workspace: {args.name}")
+    return 0
+
+
+async def _open_workspace_readonly(args: argparse.Namespace, name: str, *, for_write: bool = False):
+    """Open a user workspace; managed names are always refused."""
+    _validate_workspace_name(name)
+    workspace_path = _workspace_path(args, name)
+    if not workspace_path.exists():
+        raise SystemExit(f"workspace '{name}' not found")
+    from fsdantic import Fsdantic
+
+    return await Fsdantic.open(path=str(workspace_path), readonly=not for_write), workspace_path
+
+
+async def _run_files_list(args: argparse.Namespace) -> int:
+    ws, _ = await _open_workspace_readonly(args, args.workspace)
+    try:
+        if args.recursive:
+            pattern = f"{args.path.rstrip('/')}/**/*" if args.path != "/" else "**/*"
+            files = sorted(await ws.files.search(pattern))
+            if not files:
+                print(f"No files found in {args.path}")
+                return 0
+            for file_path in files:
+                print(file_path)
+            return 0
+        entries = await ws.files.list_dir(args.path, output="full")
+        if not entries:
+            print(f"No files found in {args.path}")
+            return 0
+        for entry in entries:
+            name = entry.get("name") if isinstance(entry, dict) else entry
+            etype = entry.get("type", "file") if isinstance(entry, dict) else "file"
+            print(f"{name}\t{etype}")
+        return 0
+    finally:
+        await ws.close()
+
+
+async def _run_files_read(args: argparse.Namespace) -> int:
+    ws, _ = await _open_workspace_readonly(args, args.workspace)
+    try:
+        mode = "binary" if args.binary else "text"
+        content = await ws.files.read(args.path, mode=mode)
+        if args.binary:
+            print(f"binary content ({len(content)} bytes)")
+            if isinstance(content, bytes):
+                print(content[:200])
+            else:
+                print(content)
+        else:
+            text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+            print(text)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - surface the read error to the user
+        print(f"error reading file: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        await ws.close()
+
+
+async def _run_files_write(args: argparse.Namespace) -> int:
+    ws, _ = await _open_workspace_readonly(args, args.workspace, for_write=True)
+    try:
+        mode = "binary" if args.binary else "text"
+        content = args.content.encode() if args.binary else args.content
+        await ws.files.write(args.path, content, mode=mode)
+        print(f"written to {args.workspace}:{args.path}")
+        return 0
+    except Exception as exc:  # noqa: BLE001 - surface the write error to the user
+        print(f"error writing file: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        await ws.close()
+
+
+async def _run_files_search(args: argparse.Namespace) -> int:
+    ws, _ = await _open_workspace_readonly(args, args.workspace)
+    try:
+        files = sorted(await ws.files.search(args.pattern))
+        if not files:
+            print(f"No files found matching '{args.pattern}'")
+            return 0
+        for file_path in files:
+            print(file_path)
+        return 0
+    finally:
+        await ws.close()
+
+
+async def _run_files_tree(args: argparse.Namespace) -> int:
+    ws, _ = await _open_workspace_readonly(args, args.workspace)
+    try:
+        tree_data = await ws.files.tree(args.path, max_depth=args.max_depth)
+
+        def _render(node: dict, prefix: str = "") -> None:
+            children = node.get("children", [])
+            for child in children:
+                name = child.get("name", "?")
+                if child.get("type") == "directory":
+                    print(f"{prefix}{name}/")
+                    _render(child, prefix + "  ")
+                else:
+                    print(f"{prefix}{name}")
+
+        _render(tree_data)
+        return 0
+    finally:
+        await ws.close()
+
+
+async def _run_preview_changes(args: argparse.Namespace) -> int:
+    """Diff the agent's disposable workspace against the current tree."""
+    from cairn.runtime import repo
+
+    home = _resolve_cairn_home(args)
+    workdir = home / "workspaces" / args.agent_id
+    if not workdir.is_dir():
+        print(f"workspace not found for agent: {args.agent_id}", file=sys.stderr)
+        return 1
+    project_root = (
+        PathsSettings(project_root=Path(args.project_root) if args.project_root else None).project_root or Path(".")
+    ).resolve()
+    base = await asyncio.to_thread(repo.capture_manifest, project_root)
+    current = await asyncio.to_thread(repo.capture_manifest, workdir)
+    diff = repo.diff_manifests(base, current)
+    rows = [
+        (t, rel)
+        for t, rels in (
+            ("added", diff.added),
+            ("modified", diff.modified),
+            ("removed", diff.removed),
+            ("mode", diff.mode_changed),
+        )
+        for rel in rels
+    ]
+    if not rows:
+        print(f"No changes found for agent {args.agent_id}")
+        return 0
+    for change_type, rel in rows:
+        print(f"{change_type:10} {rel}")
+    print(f"\ntotal changes: {len(rows)}")
+    return 0
+
+
+async def _run_preview_file(args: argparse.Namespace) -> int:
+    home = _resolve_cairn_home(args)
+    workdir = home / "workspaces" / args.agent_id
+    if not workdir.is_dir():
+        print(f"workspace not found for agent: {args.agent_id}", file=sys.stderr)
+        return 1
+    try:
+        print((workdir / args.file_path).read_text(encoding="utf-8"))
+        return 0
+    except Exception as exc:  # noqa: BLE001 - surface the read error to the user
+        print(f"error reading file: {exc}", file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cairn")
-    parser.add_argument("--project-root", default=None)
-    parser.add_argument("--cairn-home", default=None)
-    parser.add_argument("--max-concurrent-agents", type=int, default=None)
-    parser.add_argument("--max-execution-time", type=float, default=None)
-    parser.add_argument("--max-memory-bytes", type=int, default=None)
-    parser.add_argument("--max-recursion-depth", type=int, default=None)
-    parser.add_argument("--provider", default="file", help="Code provider (file, inline, or plugin)")
-    parser.add_argument("--provider-base-path", default=None, help="Base path for file provider")
+    _add_common_flags(parser)
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -337,7 +575,106 @@ def build_parser() -> argparse.ArgumentParser:
     reject_parser.add_argument("--timeout", type=float, default=300.0, help="Seconds to wait for the reject to settle")
     reject_parser.set_defaults(handler=_run_reject, is_async=True)
 
-    return parser
+    # --- workspace management (metadata workspaces only; managed names refused) ---
+    workspace_parser = subparsers.add_parser("workspace", help="Workspace management")
+    workspace_sub = workspace_parser.add_subparsers(dest="workspace_command", required=True)
+
+    ws_create = workspace_sub.add_parser("create", help="Create a workspace")
+    ws_create.add_argument("name")
+    ws_create.set_defaults(handler=_run_workspace_create, is_async=True)
+
+    ws_list = workspace_sub.add_parser("list", help="List workspaces")
+    ws_list.set_defaults(handler=_run_workspace_list, is_async=True)
+
+    ws_info = workspace_sub.add_parser("info", help="Show workspace info")
+    ws_info.add_argument("name")
+    ws_info.set_defaults(handler=_run_workspace_info, is_async=True)
+
+    ws_delete = workspace_sub.add_parser("delete", help="Delete a workspace")
+    ws_delete.add_argument("name")
+    ws_delete.add_argument("--force", "-f", action="store_true", help="Skip confirmation")
+    ws_delete.set_defaults(handler=_run_workspace_delete, is_async=True)
+
+    # --- files (user workspaces only; managed names refused) ---
+    files_parser = subparsers.add_parser("files", help="File operations in workspaces")
+    files_sub = files_parser.add_subparsers(dest="files_command", required=True)
+
+    fl = files_sub.add_parser("list", help="List files")
+    fl.add_argument("workspace")
+    fl.add_argument("--path", default="/")
+    fl.add_argument("--recursive", "-r", action="store_true")
+    fl.set_defaults(handler=_run_files_list, is_async=True)
+
+    fr = files_sub.add_parser("read", help="Read a file")
+    fr.add_argument("workspace")
+    fr.add_argument("path")
+    fr.add_argument("--binary", "-b", action="store_true")
+    fr.set_defaults(handler=_run_files_read, is_async=True)
+
+    fw = files_sub.add_parser("write", help="Write a file")
+    fw.add_argument("workspace")
+    fw.add_argument("path")
+    fw.add_argument("content")
+    fw.add_argument("--binary", "-b", action="store_true")
+    fw.set_defaults(handler=_run_files_write, is_async=True)
+
+    fs = files_sub.add_parser("search", help="Search files by glob")
+    fs.add_argument("workspace")
+    fs.add_argument("pattern")
+    fs.set_defaults(handler=_run_files_search, is_async=True)
+
+    ft = files_sub.add_parser("tree", help="Show a directory tree")
+    ft.add_argument("workspace")
+    ft.add_argument("--path", default="/")
+    ft.add_argument("--max-depth", type=int, default=None)
+    ft.set_defaults(handler=_run_files_tree, is_async=True)
+
+    # --- preview (the review surface: disposable workspace vs current tree) ---
+    preview_parser = subparsers.add_parser("preview", help="Preview agent changes")
+    preview_sub = preview_parser.add_subparsers(dest="preview_command", required=True)
+
+    pv = preview_sub.add_parser("changes", help="Diff the agent's workspace against the tree")
+    pv.add_argument("agent_id")
+    pv.set_defaults(handler=_run_preview_changes, is_async=True)
+
+    pf = preview_sub.add_parser("file", help="Read a file from the agent's workspace")
+    pf.add_argument("agent_id")
+    pf.add_argument("file_path")
+    pf.set_defaults(handler=_run_preview_file, is_async=True)
+
+    # The common flags must work on every subcommand (docs promise
+    # `--project-root`/`--cairn-home`/provider flags on all commands).
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                _add_common_flags_recursive(_as_parser(sub))
+
+    return parser  # type: ignore[no-any-return]
+
+
+def _add_common_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project-root", default=None)
+    parser.add_argument("--cairn-home", default=None)
+    parser.add_argument("--max-concurrent-agents", type=int, default=None)
+    parser.add_argument("--max-execution-time", type=float, default=None)
+    parser.add_argument("--max-memory-bytes", type=int, default=None)
+    parser.add_argument("--max-recursion-depth", type=int, default=None)
+    parser.add_argument("--provider", default="file", help="Code provider (file, inline, or plugin)")
+    parser.add_argument("--provider-base-path", default=None, help="Base path for file provider")
+
+
+def _add_common_flags_recursive(parser: argparse.ArgumentParser) -> None:
+    _add_common_flags(parser)
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                _add_common_flags_recursive(_as_parser(sub))
+
+
+def _as_parser(value: object) -> argparse.ArgumentParser:
+    from typing import cast
+
+    return cast(argparse.ArgumentParser, value)
 
 
 def main(argv: list[str] | None = None) -> int:

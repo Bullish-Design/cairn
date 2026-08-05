@@ -3,13 +3,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from typer.testing import CliRunner
+import pytest
 
-from cairn.cli import cli, typer_cli
+from cairn.cli import cli
 from cairn.orchestrator.lifecycle import LifecycleRecord
 from cairn.runtime.agent import AgentState
-
-runner = CliRunner()
 
 
 def _write_lifecycle_mirror(home: Path, records: list[LifecycleRecord]) -> None:
@@ -44,49 +42,55 @@ def _seed_mirror(tmp_path: Path) -> Path:
     return home
 
 
-def test_cli_agent_list_outputs_agents(tmp_path: Path) -> None:
+def test_cli_agent_list_outputs_agents(tmp_path: Path, capsys: Any) -> None:
     home = _seed_mirror(tmp_path)
-    result = runner.invoke(typer_cli.app, ["agent", "list", "--cairn-home", str(home)])
+    rc = cli.main(["list-agents", "--cairn-home", str(home)])
+    captured = capsys.readouterr()
 
-    assert result.exit_code == 0
-    assert "agent-1" in result.stdout
+    assert rc == 0
+    assert "agent-1" in captured.out
 
 
-def test_cli_agent_status_outputs_payload(tmp_path: Path) -> None:
+def test_cli_agent_status_outputs_payload(tmp_path: Path, capsys: Any) -> None:
     home = _seed_mirror(tmp_path)
-    result = runner.invoke(typer_cli.app, ["agent", "status", "agent-1", "--cairn-home", str(home)])
+    rc = cli.main(["status", "agent-1", "--cairn-home", str(home)])
+    captured = capsys.readouterr()
 
-    assert result.exit_code == 0
-    assert "agent-1" in result.stdout
+    assert rc == 0
+    assert "agent-1" in captured.out
 
 
-def test_cli_agent_accept_reject_commands(tmp_path: Path) -> None:
+def test_cli_agent_accept_reject_commands(tmp_path: Path, capsys: Any) -> None:
     """Without a running daemon, mutating commands refuse with exit 2."""
     home = _seed_mirror(tmp_path)
 
-    accept_result = runner.invoke(typer_cli.app, ["agent", "accept", "agent-1", "--cairn-home", str(home)])
-    reject_result = runner.invoke(typer_cli.app, ["agent", "reject", "agent-1", "--cairn-home", str(home)])
+    accept_rc = cli.main(["accept", "agent-1", "--cairn-home", str(home)])
+    accept_err = capsys.readouterr().err
+    reject_rc = cli.main(["reject", "agent-1", "--cairn-home", str(home)])
+    reject_err = capsys.readouterr().err
 
-    assert accept_result.exit_code == 2
-    assert "No Cairn daemon" in accept_result.stdout
-    assert reject_result.exit_code == 2
-    assert "No Cairn daemon" in reject_result.stdout
+    assert accept_rc == 2
+    assert "No Cairn daemon" in accept_err
+    assert reject_rc == 2
+    assert "No Cairn daemon" in reject_err
 
 
-def test_cli_agent_spawn_queue_commands(tmp_path: Path) -> None:
+def test_cli_agent_spawn_queue_commands(tmp_path: Path, capsys: Any) -> None:
     """Without a running daemon, mutating commands refuse with exit 2."""
     home = _seed_mirror(tmp_path)
 
-    spawn_result = runner.invoke(typer_cli.app, ["agent", "spawn", "task", "--cairn-home", str(home)])
-    queue_result = runner.invoke(typer_cli.app, ["agent", "queue", "task", "--cairn-home", str(home)])
+    spawn_rc = cli.main(["spawn", "task", "--cairn-home", str(home)])
+    spawn_err = capsys.readouterr().err
+    queue_rc = cli.main(["queue", "task", "--cairn-home", str(home)])
+    queue_err = capsys.readouterr().err
 
-    assert spawn_result.exit_code == 2
-    assert "No Cairn daemon" in spawn_result.stdout
-    assert queue_result.exit_code == 2
-    assert "No Cairn daemon" in queue_result.stdout
+    assert spawn_rc == 2
+    assert "No Cairn daemon" in spawn_err
+    assert queue_rc == 2
+    assert "No Cairn daemon" in queue_err
 
 
-def test_cli_agent_logs_shows_run_log(tmp_path: Path) -> None:
+def test_cli_agent_logs_shows_run_log(tmp_path: Path, capsys: Any) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     (project / ".agentfs").mkdir(parents=True)
@@ -105,14 +109,17 @@ def test_cli_agent_logs_shows_run_log(tmp_path: Path) -> None:
             )
         ],
     )
-    result = runner.invoke(typer_cli.app, ["agent", "logs", "agent-logs", "--cairn-home", str(home)])
-    assert result.exit_code == 0
-    assert "RuntimeError: boom" in result.stdout
+    rc = cli.main(["logs", "agent-logs", "--cairn-home", str(home)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "RuntimeError: boom" in captured.out
 
 
 def test_cli_invalid_command() -> None:
-    result = runner.invoke(typer_cli.app, ["agent", "unknown"])
-    assert result.exit_code != 0
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli.main(["unknown-command"])
 
 
 def _seed_cli_workspaces(project_root: Any) -> None:
@@ -140,9 +147,10 @@ def _seed_cli_workspaces(project_root: Any) -> None:
     asyncio.run(_seed())
 
 
-def test_cli_inspection_commands_open_readonly(tmp_path: Any, monkeypatch: Any) -> None:
-    """Inspection commands (info/list/read/search/tree/preview) must open
-    workspaces read-only; mutating commands (create/write) must not."""
+def test_cli_inspection_commands_open_readonly(tmp_path: Any, monkeypatch: Any, capsys: Any) -> None:
+    """Inspection commands (info/list/read/search/tree) must open workspaces
+    read-only; mutating commands (create/write) must not."""
+    import fsdantic as fsdantic_mod
     from fsdantic import Fsdantic
 
     project_root = tmp_path / "project"
@@ -156,7 +164,7 @@ def test_cli_inspection_commands_open_readonly(tmp_path: Any, monkeypatch: Any) 
         calls.append(kwargs)
         return await real_open(**kwargs)
 
-    monkeypatch.setattr(typer_cli.Fsdantic, "open", spy_open)
+    monkeypatch.setattr(fsdantic_mod.Fsdantic, "open", spy_open)
 
     args = ["--project-root", str(project_root)]
     inspection_cmds = [
@@ -168,8 +176,8 @@ def test_cli_inspection_commands_open_readonly(tmp_path: Any, monkeypatch: Any) 
     ]
     for cmd in inspection_cmds:
         calls.clear()
-        result = runner.invoke(typer_cli.app, cmd + args)
-        assert result.exit_code == 0, f"{cmd} failed: {result.stdout}"
+        rc = cli.main(cmd + args)
+        assert rc == 0, f"{cmd} failed: {capsys.readouterr().err}"
         assert calls, f"{cmd} opened no workspace"
         assert all(call.get("readonly") is True for call in calls), f"{cmd} not readonly: {calls}"
 
@@ -179,8 +187,8 @@ def test_cli_inspection_commands_open_readonly(tmp_path: Any, monkeypatch: Any) 
         ["files", "write", "my", "new.txt", "hello"],
     ]:
         calls.clear()
-        result = runner.invoke(typer_cli.app, cmd + args)
-        assert result.exit_code == 0, f"{cmd} failed: {result.stdout}"
+        rc = cli.main(cmd + args)
+        assert rc == 0, f"{cmd} failed: {capsys.readouterr().err}"
         assert calls
         assert all(call.get("readonly") is not True for call in calls), f"{cmd} should be read-write: {calls}"
 
@@ -191,13 +199,15 @@ def test_cli_preview_changes_requires_workspace(tmp_path: Any) -> None:
     project_root = tmp_path / "project"
     (project_root / ".agentfs").mkdir(parents=True, exist_ok=True)
 
-    result = runner.invoke(
-        typer_cli.app,
-        ["preview", "changes", "agent-1", "--project-root", str(project_root)],
-    )
+    import contextlib
+    import io
 
-    assert result.exit_code == 1
-    assert "Workspace not found for agent" in result.stdout
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        rc = cli.main(["preview", "changes", "agent-1", "--project-root", str(project_root)])
+
+    assert rc == 1
+    assert "workspace not found for agent" in stderr.getvalue()
 
 
 def test_status_does_not_start_a_worker(tmp_path: Path, monkeypatch: Any) -> None:
@@ -309,3 +319,42 @@ def test_logs_unknown_agent(tmp_path: Path, monkeypatch: Any) -> None:
         rc = cli.main(["logs", "agent-nope"])
     assert rc == 1
     assert "Unknown agent: agent-nope" in stderr.getvalue()
+
+
+def test_managed_workspace_mutation_is_refused(tmp_path: Any) -> None:
+    """Review §2.8: direct mutation of Cairn-managed workspaces (stable, bin,
+    agent-*/bin-*) is refused — there is no `files write stable` bypass."""
+    project_root = tmp_path / "project"
+    (project_root / ".agentfs").mkdir(parents=True)
+    _seed_cli_workspaces(project_root)  # creates stable.db, agent-1.db, my.db
+
+    for cmd in [
+        ["files", "write", "stable", "x.txt", "evil"],
+        ["files", "write", "bin", "x.txt", "evil"],
+        ["workspace", "delete", "stable", "--force"],
+        ["workspace", "delete", "agent-1", "--force"],
+    ]:
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main(cmd + ["--project-root", str(project_root)])
+        assert "managed by Cairn" in str(excinfo.value), cmd
+
+    # The managed databases are untouched.
+    assert (project_root / ".agentfs" / "stable.db").exists()
+    assert (project_root / ".agentfs" / "agent-1.db").exists()
+
+
+def test_workspace_name_traversal_is_rejected(tmp_path: Any) -> None:
+    """Review §2.8: workspace names are validated — no traversal, no path
+    separators, no dot-dot escapes out of .agentfs."""
+    import pytest as _pytest
+
+    project_root = tmp_path / "project"
+    (project_root / ".agentfs").mkdir(parents=True)
+
+    for bad in ("../escape", "a/b", "..", ".", "a\\b", "name with spaces"):
+        with _pytest.raises(SystemExit):
+            cli.main(["workspace", "create", bad, "--project-root", str(project_root)])
+
+    # Nothing escaped .agentfs.
+    assert not (tmp_path / "escape.db").exists()
+    assert list((project_root / ".agentfs").glob("*.db")) == []

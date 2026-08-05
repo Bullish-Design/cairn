@@ -19,7 +19,6 @@ dependencies = [
 
 [project.scripts]
 cairn = "cairn.cli.cli:main"
-cairn-cli = "cairn.cli.typer_cli:main"
 
 [project.optional-dependencies]
 dev = [

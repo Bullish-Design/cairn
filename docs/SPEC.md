@@ -423,7 +423,12 @@ one-release deprecated alias.
 
 ## CLI entry points
 
-Both `cairn` (argparse) and `cairn-cli` (Typer) implement the thin-client
+There is one CLI: `cairn` (argparse).  It implements the thin-client
 contract: daemon commands send requests over the transport / read the
-lifecycle mirror, and neither constructs an orchestrator for a subcommand.  `cairn-cli agent up|run|
-queue|spawn|accept|reject|status|list|undo|logs` mirror the `cairn` commands.
+lifecycle mirror, and no subcommand constructs an orchestrator.  Commands:
+`up`, `run`, `spawn`, `queue`, `list-agents`, `status`, `accept`, `reject`,
+`undo`, `logs`, plus the `workspace`, `files`, and `preview` groups.  The
+`--project-root`/`--cairn-home`/provider flags work on every command.
+Managed workspaces (`stable`, `bin`, `agent-*`, `bin-*`) are never writable
+through the CLI, and workspace names are validated against traversal
+(review §2.8).
