@@ -54,32 +54,38 @@ class BenchmarkExecutor:
 
     def __init__(self, **kwargs: object) -> None:
         self.workdir: Path | None = kwargs.get("workdir")  # type: ignore[assignment]
-        self.agent_fs: object | None = kwargs.get("agent_fs")
+        self.project_root: Path | None = kwargs.get("project_root")  # type: ignore[assignment]
 
     async def run(self, *, code: str, task: str) -> SandboxResult:
         _ = code
         assert self.workdir is not None
-        assert self.agent_fs is not None
         self.workdir.mkdir(parents=True, exist_ok=True)
 
+        written: list[str] = []
         if task == "refactor-small-file":
-            await self.agent_fs.files.write("changes/small.py", "value = 1")  # type: ignore[union-attr]
+            (self.workdir / "changes").mkdir(parents=True, exist_ok=True)
+            (self.workdir / "changes" / "small.py").write_text("value = 1", encoding="utf-8")
+            written = ["changes/small.py"]
         elif task == "generate-docs":
-            await self.agent_fs.files.write("docs/README.md", "# generated")  # type: ignore[union-attr]
-            await self.agent_fs.files.write("docs/USAGE.md", "usage")  # type: ignore[union-attr]
-            await self.agent_fs.files.write("docs/API.md", "api")  # type: ignore[union-attr]
+            docs = self.workdir / "docs"
+            docs.mkdir(parents=True, exist_ok=True)
+            (docs / "README.md").write_text("# generated", encoding="utf-8")
+            (docs / "USAGE.md").write_text("usage", encoding="utf-8")
+            (docs / "API.md").write_text("api", encoding="utf-8")
+            written = ["docs/API.md", "docs/README.md", "docs/USAGE.md"]
         else:
-            await self.agent_fs.files.write("changes/default.txt", task)  # type: ignore[union-attr]
+            (self.workdir / "changes").mkdir(parents=True, exist_ok=True)
+            (self.workdir / "changes" / "default.txt").write_text(task, encoding="utf-8")
+            written = ["changes/default.txt"]
 
-        await self.agent_fs.files.write("changes/small.py", "value = 1")  # type: ignore[union-attr]
         return SandboxResult(
             submission={"summary": f"completed {task}", "changed_files": [], "submitted_at": 1.0},
-            changes={"written": [], "deleted": []},
+            changes={"written": written, "deleted": []},
             log="",
         )
 
 
-async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object, object, object, Path]:
+async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
@@ -91,17 +97,15 @@ async def _setup_orchestrator(tmp_path: Path) -> tuple[CairnOrchestrator, object
     (orch.cairn_home / "workspaces").mkdir(parents=True, exist_ok=True)
     orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
 
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
     bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
     agent_db_path = tmp_path / "agent.db"
     agent_ws = await Fsdantic.open(path=str(agent_db_path))
 
-    orch.stable = stable
     orch.bin = bin_ws
     orch.lifecycle = LifecycleStore(bin_ws)
     await orch.workspace_cache.put(str(agent_db_path), agent_ws)
 
-    return orch, stable, bin_ws, agent_ws, agent_db_path
+    return orch, bin_ws, agent_ws, agent_db_path
 
 
 @pytest.mark.asyncio
@@ -112,7 +116,7 @@ async def test_agent_lifecycle_latency_benchmarks(
     tmp_path: Path,
 ) -> None:
     """Benchmark phase-5 latency targets from CAIRN_REFACTOR-STEP_5.md."""
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
     spawned_agent_id: str | None = None
 
     try:
@@ -142,15 +146,13 @@ async def test_agent_lifecycle_latency_benchmarks(
         record_property("execution_duration_threshold_seconds", execution_threshold)
         assert execution_duration < execution_threshold
 
-        preview_target = orch.cairn_home / "workspaces" / "preview-benchmark"
+        from cairn.runtime import repo
+
         preview_start = time.perf_counter()
-        assert ctx.agent_fs is not None
-        await ctx.agent_fs.materialize.to_disk(
-            target_path=preview_target,
-            base=stable,
-            clean=True,
-            allow_root=orch.cairn_home / "workspaces",
-        )
+        base = await asyncio.to_thread(repo.capture_manifest, orch.project_root)
+        current = await asyncio.to_thread(repo.capture_manifest, orch.cairn_home / "workspaces" / ctx.agent_id)
+        diff = repo.diff_manifests(base, current)
+        assert diff.written
         preview_latency = time.perf_counter() - preview_start
         record_property("preview_latency_seconds", preview_latency)
         preview_threshold = _threshold(PREVIEW_LATENCY_TARGET_SECONDS)
@@ -180,7 +182,6 @@ async def test_agent_lifecycle_latency_benchmarks(
         if extra is not None and extra.agent_fs is not None:
             await extra.agent_fs.close()
         await bin_ws.close()
-        await stable.close()
 
 
 @pytest.mark.asyncio
@@ -200,7 +201,7 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
     tmp_path: Path,
 ) -> None:
     """Benchmark representative execution durations and capture optional memory telemetry."""
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path)
     ctx = AgentContext(
         agent_id=f"agent-{task}",
         task=task,
@@ -231,7 +232,6 @@ async def test_execution_duration_benchmarks_for_representative_tasks(
     finally:
         await orch.trash_agent(ctx.agent_id)
         await bin_ws.close()
-        await stable.close()
 
 
 @pytest.mark.asyncio
@@ -267,17 +267,17 @@ async def test_long_snapshot_does_not_block_event_loop(tmp_path: Path) -> None:
     scheduled sleep completes promptly instead of waiting for the walk."""
     import time as time_mod
 
-    from cairn.runtime.sandbox import BwrapExecutor
+    from cairn.runtime import repo
 
     for i in range(1500):
         (tmp_path / f"f{i:04d}.txt").write_text("x" * 200, encoding="utf-8")
 
     start = time_mod.monotonic()
-    snap_task = asyncio.create_task(asyncio.to_thread(BwrapExecutor._snapshot, tmp_path))
+    snap_task = asyncio.create_task(asyncio.to_thread(repo.capture_manifest, tmp_path))
     await asyncio.sleep(0.01)
     elapsed = time_mod.monotonic() - start
     await snap_task
 
-    # The sleep completed while the snapshot was still (or already) running;
-    # a synchronous snapshot would have delayed it by the full walk duration.
-    assert elapsed < 0.05, f"event loop blocked for {elapsed:.3f}s by snapshot"
+    # The sleep completed while the capture was still (or already) running;
+    # a synchronous walk would have delayed it by the full duration.
+    assert elapsed < 0.05, f"event loop blocked for {elapsed:.3f}s by manifest capture"
