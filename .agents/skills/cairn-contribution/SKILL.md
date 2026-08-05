@@ -67,7 +67,7 @@ tests/
 │   ├── test_state.py, test_queue_limits.py, test_watcher.py, ...
 │   └── integration/            # end-to-end; marked @pytest.mark.integration
 │       ├── test_e2e_workflows.py      # spawn→review→accept/reject with stub executors
-│       ├── test_cli_daemon.py         # signals, daemon pidfile, exit codes
+│       ├── test_cli_daemon.py         # socket transport, daemon ownership, exit codes
 │       ├── test_accept_safety.py      # ACCEPT_STALE_BASE, undo
 │       ├── test_sandbox_boundary.py   # adversarial sandbox tests
 │       ├── test_crash_recovery.py, test_concurrency.py,
@@ -132,10 +132,11 @@ Conventions:
 
 Critical paths (keep these in mind when changing them):
 
-- File sync (watch event → stable.db): <10 ms.
+- Manifest capture + workspace materialization: proportional to tree size
+  (reflink/copy-on-write where supported).
 - Agent spawn: <1 s.
 - Preview open: <100 ms.
-- Accept/reject: <50 ms.
+- Accept/reject (revalidate + apply): <50 ms.
 
 Non-critical: LLM generation <5 s, materialization <500 ms. Benchmarks live in
 `tests/cairn/test_performance.py` (deselected by default; CI runs a separate
@@ -160,8 +161,9 @@ non-blocking job with relaxed thresholds).
 6. **State transitions** — only move through `VALID_TRANSITIONS`
    (`AgentContext.transition`); persist lifecycle on every transition and
    rewrite the mirror.
-7. **Signal races** — claim by atomic rename to `*.processing`; write signals
-   atomically (temp + rename); quarantine failures instead of deleting them.
+7. **Transport races** — the socket transport records command IDs and
+   recovers in-flight commands on startup; mirror/state files are written
+   with unique temp + `fsync` + `os.replace`.
 8. **Untrusted input in accept** — keep the staleness check
    (`_detect_stale_paths` against `base_hashes`) and the undo snapshot in
    front of every merge.

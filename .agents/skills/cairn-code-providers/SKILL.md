@@ -15,8 +15,9 @@ metadata:
 
 Cairn sources the executable code for each agent through a pluggable
 `CodeProvider`. Providers resolve a `reference` string into Python source code
-and may validate it before execution. The orchestrator never generates code
-itself — that is always the provider's job.
+and validate it before execution (the orchestrator calls `validate_code`
+unconditionally). The orchestrator never generates code itself — that is
+always the provider's job.
 
 Canonical reference: [PROVIDERS](../../../docs/PROVIDERS.md) and
 `src/cairn/providers/providers.py`.
@@ -33,20 +34,21 @@ class CodeProvider(Protocol):
         raise NotImplementedError
 
     async def validate_code(self, code: str) -> tuple[bool, str | None]:
-        """Optional pre-flight validation. Default: (True, None)."""
+        """Pre-flight validation; the orchestrator calls it unconditionally."""
         return True, None
 ```
 
-- `get_code` is the only required method. It must return **source text** (the
-  sandbox runs it as `.cairn/task.py`), not a path or an object.
-- `validate_code` is the **only pre-flight gate** in the pipeline. Returning
-  `(False, reason)` aborts the run and transitions the agent to `ERRORED`.
-  Syntax errors are not checked here — they surface as sandbox tracebacks that
-  also mark the agent `ERRORED`.
+- `get_code` must return **source text** (the sandbox runs it as
+  `.cairn/task.py`), not a path or an object.
+- `validate_code` is the **only pre-flight gate** in the pipeline and is
+  **required**. Returning `(False, reason)` aborts the run and transitions
+  the agent to `ERRORED`. Syntax errors are not checked here — they surface as
+  sandbox tracebacks that also mark the agent `ERRORED`.
 - `context` is supplied by the orchestrator per-agent:
-  `{"agent_id": str, "workspace": Workspace, "stable": Workspace}` — the agent
-  overlay and stable fsdantic workspaces, so a provider can inspect project
-  state if it needs to.
+  `{"agent_id": str, "workspace": ProjectView, "project_root": Path}` — the
+  workspace entry is a **read-only** gitignore-aware snapshot view over the
+  canonical tree (`cairn.runtime.driver.ProjectView`); providers never receive
+  a writable workspace or database, so they cannot mutate project state.
 - Raise `ProviderError` (or `cairn.core.exceptions.ProviderError`) for
   user-facing failures; `get_code` failures are recorded on the agent as its
   error message.

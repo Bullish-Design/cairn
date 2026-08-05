@@ -33,6 +33,7 @@ import logging
 import shutil
 import sys
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -127,31 +128,52 @@ class BwrapExecutor:
 
         argv = self._build_argv()
         proc = await self._spawn(argv)
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=self.settings.max_execution_time,
-            )
-        except TimeoutError:
-            proc.kill()
-            stdout, stderr = b"", b""
-            with _suppress_timeout():
-                stdout, stderr = await proc.communicate()
-            partial = f"{stdout.decode('utf-8', 'replace')}\n{stderr.decode('utf-8', 'replace')}".strip()
-            (cairn_dir / "run.log").write_text(
-                partial + f"\n\n[cairn] killed after {self.settings.max_execution_time}s\n",
-                encoding="utf-8",
-            )
-            raise CairnTimeoutError(
-                f"Operation exceeded timeout of {self.settings.max_execution_time}s",
-                error_code="EXECUTION_TIMEOUT",
-                context={"agent_id": self.agent_id, "timeout_seconds": self.settings.max_execution_time},
-            ) from None
 
-        stdout_text = stdout.decode("utf-8", errors="replace")
-        stderr_text = stderr.decode("utf-8", errors="replace")
+        # Bounded capture: stdout/stderr are streamed into a capped buffer and
+        # the task is killed once output exceeds the cap (review §2.9) — the
+        # old ``communicate()`` buffered arbitrary output in host memory.
+        # The workspace sampler enforces the total byte/file budget during
+        # the run, not only after it.
+        state: dict[str, str] = {}
+        stdout_reader = asyncio.create_task(self._read_bounded(proc.stdout, self.settings.max_log_bytes, proc, state))
+        stderr_reader = asyncio.create_task(self._read_bounded(proc.stderr, self.settings.max_log_bytes, proc, state))
+        sampler = asyncio.create_task(self._sample_workspace(proc, state))
+        kill_reason: str | None = None
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=self.settings.max_execution_time)
+        except TimeoutError:
+            kill_reason = f"killed after {self.settings.max_execution_time}s"
+            proc.kill()
+            with _suppress_timeout():
+                await proc.wait()
+        finally:
+            sampler.cancel()
+            with suppress(asyncio.CancelledError):
+                await sampler
+        kill_reason = kill_reason or state.get("killed")
+        stdout_captured = await stdout_reader
+        stderr_captured = await stderr_reader
+
+        stdout_text = stdout_captured.decode("utf-8", errors="replace")
+        stderr_text = stderr_captured.decode("utf-8", errors="replace")
         run_log = f"{stdout_text}\n{stderr_text}".strip()
+        if kill_reason:
+            run_log += f"\n\n[cairn] {kill_reason}\n"
         (cairn_dir / "run.log").write_text(run_log, encoding="utf-8")
+
+        if kill_reason is not None and proc.returncode != 0:
+            if kill_reason.startswith("killed after"):
+                raise CairnTimeoutError(
+                    f"Operation exceeded timeout of {self.settings.max_execution_time}s",
+                    error_code="EXECUTION_TIMEOUT",
+                    context={"agent_id": self.agent_id, "timeout_seconds": self.settings.max_execution_time},
+                ) from None
+            if kill_reason == "workspace budget exceeded":
+                raise ResourceLimitError(
+                    f"Sandbox wrote more than the {self.settings.max_workspace_bytes} byte workspace budget",
+                    error_code="WORKSPACE_BUDGET_EXCEEDED",
+                    context={"agent_id": self.agent_id, "reason": "sampled during run"},
+                )
 
         if proc.returncode != 0:
             raise SandboxExecutionError(
@@ -342,6 +364,70 @@ class BwrapExecutor:
             )
             return []
         return [line.strip() for line in text.splitlines() if line.strip()]
+
+    async def _read_bounded(
+        self,
+        stream: asyncio.StreamReader | None,
+        cap: int,
+        proc: asyncio.subprocess.Process,
+        state: dict[str, str],
+    ) -> bytes:
+        """Read a pipe into a capped buffer; kill the process on overflow so a
+        log-spammer cannot exhaust host memory (review §2.9)."""
+        if stream is None:
+            return b""
+        buffer = bytearray()
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                break
+            if state.get("killed"):
+                continue
+            remaining = cap - len(buffer)
+            if remaining <= 0 or len(chunk) > remaining:
+                state["killed"] = "output cap exceeded"
+                buffer.extend(chunk[: max(0, remaining)])
+                with suppress(ProcessLookupError):
+                    proc.kill()
+                continue
+            buffer.extend(chunk)
+        return bytes(buffer)
+
+    async def _sample_workspace(self, proc: asyncio.subprocess.Process, state: dict[str, str]) -> None:
+        """Periodically enforce the total workspace byte/file budget during the
+        run (review §2.9) — an agent cannot fill the host disk while it runs."""
+        interval = self.settings.workspace_sample_interval_seconds
+        while not state.get("killed"):
+            await asyncio.sleep(interval)
+            if state.get("killed"):
+                return
+            try:
+                total_bytes, _file_count = await asyncio.to_thread(self._workspace_usage)
+            except OSError:
+                continue
+            if total_bytes > self.settings.max_workspace_bytes:
+                state["killed"] = "workspace budget exceeded"
+                with suppress(ProcessLookupError):
+                    proc.kill()
+                return
+
+    def _workspace_usage(self) -> tuple[int, int]:
+        """(total bytes, file count) of the disposable workspace, excluding the
+        host-owned ``.cairn`` scaffolding."""
+        total = 0
+        count = 0
+        for path in self.workdir.rglob("*"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            rel = path.relative_to(self.workdir).as_posix()
+            if rel == SANDBOX_DIR_NAME or rel.startswith(f"{SANDBOX_DIR_NAME}/"):
+                continue
+            try:
+                total += path.stat().st_size
+                count += 1
+            except OSError:
+                continue
+        return total, count
 
     async def _spawn(self, argv: list[str]) -> asyncio.subprocess.Process:
         try:

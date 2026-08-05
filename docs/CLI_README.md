@@ -178,8 +178,12 @@ cairn status agent-abc123
 ### Spawn a High-Priority Task
 
 ```bash
-cairn spawn "<reference>" [--provider PROVIDER]
+cairn spawn "<reference>"
 ```
+
+> The code provider is chosen when the daemon starts (`cairn up
+> --provider <name>`) or for inline runs (`cairn run --provider <name>`); the
+> daemon's provider resolves every reference.
 
 Examples:
 ```bash
@@ -190,7 +194,7 @@ cairn spawn "scripts/add_docstrings.py"
 ### Queue a Normal-Priority Task
 
 ```bash
-cairn queue "<reference>" [--provider PROVIDER]
+cairn queue "<reference>"
 ```
 
 Examples:

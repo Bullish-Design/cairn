@@ -121,6 +121,6 @@ merges.
 
 ## Contributing
 
-- Workflow conventions: [AGENT.md](AGENT.md)
+- Workflow conventions: `.agents/skills/`
 - Architecture and contracts: [CONCEPT.md](docs/CONCEPT.md), [SPEC.md](docs/SPEC.md)
 - Tests and local validation: [TESTING.md](docs/TESTING.md)

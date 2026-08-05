@@ -71,8 +71,8 @@ the host reads back and stores in the agent's KV as the review payload. Rules:
   `changed_files = []`.
 - **Be accurate about `changed_files`.** The host compares your claim against
   the *actual* changeset (computed from the filesystem snapshot). A mismatch
-  sets `claim_mismatch` on the record, and `cairn status` / `cairn-cli agent
-  status` prints a warning showing what you claimed vs. what actually changed.
+  sets `claim_mismatch` on the record, and `cairn status` prints a warning
+  showing what you claimed vs. what actually changed.
 - The actual changeset (written/deleted files, run log, base hashes) is the
   ground truth used for the review, the accept staleness check, and undo.
 
@@ -86,9 +86,13 @@ the host reads back and stores in the agent's KV as the review payload. Rules:
 - **Processes/threads**: `RLIMIT_NPROC`, default 64 (fork bombs are capped).
 - **Open descriptors**: `RLIMIT_NOFILE`, default 1024.
 - **Recursion depth**: `sys.setrecursionlimit`, default 1000.
-- **Workspace budget**: post-run, if the sandbox wrote more than
-  `max_workspace_bytes` (default 512 MB), the run fails with
-  `WORKSPACE_BUDGET_EXCEEDED`.
+- **Workspace budget**: the total disposable workspace size is sampled
+  *during* the run (default 1 s interval) and checked after; once it exceeds
+  `max_workspace_bytes` (default 512 MB) the task is killed and the run fails
+  with `WORKSPACE_BUDGET_EXCEEDED`.
+- **Output**: stdout/stderr are streamed into a capped buffer; a task that
+  prints past `max_log_bytes` (default 10 MB) is killed — it cannot exhaust
+  host memory.
 
 ## Environment facts
 
@@ -140,8 +144,8 @@ submit_result(summary="no changes made", changed_files=[])
   `$CAIRN_HOME/workspaces/{agent_id}/.cairn/run.log` — the single best place
   to look when a run fails. A syntax error or raised exception prints a normal
   Python traceback there and the agent transitions to `ERRORED`.
-- `cairn logs <agent-id>` (or `cairn-cli agent logs <agent-id>`) prints the run
-  log for both errored and reviewed agents.
+- `cairn logs <agent-id>` prints the run log for both errored and reviewed
+  agents.
 - `sys.exit(n)` is honored: non-zero exit fails the run (`SANDBOX_EXECUTION_FAILED`).
 - `submit_result` returning `False`/errors: the host tolerates a missing or
   invalid `submission.json` (falls back to the task description), but an

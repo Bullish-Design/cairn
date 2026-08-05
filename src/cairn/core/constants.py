@@ -25,6 +25,9 @@ GB = 1024 * MB
 MAX_FILE_SIZE_BYTES = 10 * MB
 MAX_CONTENT_SIZE_BYTES = 10 * MB
 DEFAULT_MAX_WORKSPACE_BYTES = 512 * MB
+# Host-side cap on captured sandbox stdout/stderr (review §2.9): the old
+# ``proc.communicate()`` buffered arbitrary output in orchestrator memory.
+DEFAULT_MAX_LOG_BYTES = 10 * MB
 
 # Execution limits
 DEFAULT_EXECUTION_TIMEOUT_SECONDS = 60.0

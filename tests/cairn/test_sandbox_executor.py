@@ -412,3 +412,52 @@ def test_toolchain_runtime_mounts_are_bound_readonly(tmp_path: Path) -> None:
     assert "--bind" in argv  # only the workspace is writable
     assert argv[argv.index("--bind") + 1] == str(tmp_path)
     assert "--ro-bind-try" in argv
+
+
+@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@pytest.mark.integration
+async def test_real_sandbox_log_spammer_is_killed_and_capped(tmp_path: Path) -> None:
+    """Review §2.9: stdout/stderr are streamed into a capped buffer and the
+    task is killed on overflow — a log-spammer cannot exhaust host memory."""
+    project = _project_with(tmp_path, {})
+    settings = _sandbox_settings(tmp_path, max_log_bytes=4096)
+    executor = BwrapExecutor(
+        agent_id="spammer",
+        workdir=tmp_path / "work",
+        project_root=project,
+        settings=settings,
+    )
+    code = "while True:\n    print('x' * 1000)\n"
+    with pytest.raises(SandboxExecutionError):
+        await executor.run(code=code, task="spam")
+    log = (tmp_path / "work" / ".cairn" / "run.log").read_text(encoding="utf-8")
+    assert len(log) < 5000, "captured log exceeded the configured cap"
+
+
+@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@pytest.mark.integration
+async def test_real_sandbox_workspace_budget_enforced_during_run(tmp_path: Path) -> None:
+    """Review §2.9: the total workspace budget is sampled *during* the run and
+    the task is killed once it overflows — an agent cannot fill the host disk
+    while it runs."""
+    from cairn.core.exceptions import ResourceLimitError
+
+    project = _project_with(tmp_path, {})
+    settings = _sandbox_settings(
+        tmp_path,
+        max_workspace_bytes=64 * 1024,
+        workspace_sample_interval_seconds=0.05,
+        max_execution_time=60.0,
+    )
+    executor = BwrapExecutor(
+        agent_id="filler",
+        workdir=tmp_path / "work",
+        project_root=project,
+        settings=settings,
+    )
+    code = (
+        "import time\nfor i in range(5000):\n    with open(f'f{i}.bin', 'wb') as fh:\n        fh.write(b'x' * 4096)\n"
+    )
+    with pytest.raises(ResourceLimitError) as excinfo:
+        await executor.run(code=code, task="fill disk")
+    assert excinfo.value.error_code == "WORKSPACE_BUDGET_EXCEEDED"

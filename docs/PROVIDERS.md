@@ -1,25 +1,25 @@
 # Cairn Code Providers
 
-Cairn sources executable code through pluggable `CodeProvider` implementations. Providers resolve a `reference` string into `.pym` code and optionally validate it before execution.
+Cairn sources executable code through pluggable `CodeProvider` implementations. Providers resolve a `reference` string into `.py` code and validate it before execution.
 
 ## Built-in Providers
 
 ### `FileCodeProvider` (default)
-- Loads `.pym` files from disk.
-- `reference` is a path to a `.pym` script (extension optional).
+- Loads `.py` files from disk.
+- `reference` is a path to a `.py` script (extension optional).
 
 Example:
 ```bash
-cairn spawn scripts/refactor_imports.pym
+cairn spawn scripts/refactor_imports.py
 ```
 
 ### `InlineCodeProvider`
 - Treats `reference` as the code itself.
 - Useful for ad-hoc scripts or testing.
 
-Example:
+Example (inline run or daemon started with `--provider inline`):
 ```bash
-cairn spawn "print('hello')" --provider inline
+cairn run "print('hello')" --provider inline
 ```
 
 ## Plugin Providers
@@ -27,21 +27,23 @@ cairn spawn "print('hello')" --provider inline
 Plugin providers register entry points under `cairn.providers` and are loaded by name.
 
 ### `GitCodeProvider` (`cairn-git`)
-- Loads `.pym` files from git references.
+- Loads `.py` files from git references.
 - `reference` uses the `git://` scheme and a fragment for the file path.
 
-Example:
+Example (daemon started with `--provider git`):
 ```bash
-cairn spawn "git://github.com/org/scripts?ref=main#tasks/cleanup.pym" --provider git
+cairn up --provider git
+cairn queue "git://github.com/org/scripts?ref=main#tasks/cleanup.py"
 ```
 
 ### `RegistryCodeProvider` (`cairn-registry`)
-- Loads `.pym` files from a remote registry.
+- Loads `.py` files from a remote registry.
 - `reference` uses the `registry://` scheme or a relative path with `--provider-base-path`.
 
-Example:
+Example (daemon started with `--provider registry`):
 ```bash
-cairn spawn "registry://registry.example.com/scripts/format.pym" --provider registry
+cairn up --provider registry
+cairn queue "registry://registry.example.com/scripts/format.py"
 ```
 
 ## Writing a Custom Provider

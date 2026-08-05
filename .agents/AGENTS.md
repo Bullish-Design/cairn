@@ -12,7 +12,7 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 2. **Code Providers** (`src/cairn/providers/providers.py`) - Pluggable code sourcing (file, inline, LLM, git, registry)
 3. **Sandbox Runtime** (`src/cairn/runtime/sandbox/`) - BwrapExecutor (materialize → sandbox run → re-import) and the sandbox API (`boot.py`)
 4. **Workspace APIs** (`src/cairn/runtime/`) - open_workspace, WorkspaceInspector, AgentStateManager, WorkspaceManager
-5. **CLI** (`src/cairn/cli/`) - Thin-client `cairn` (argparse) and `cairn-cli` (Typer); signals + lifecycle mirror
+5. **CLI** (`src/cairn/cli/`) - Thin-client `cairn` (argparse); socket transport + lifecycle mirror
 6. **Documentation** - README, CONCEPT, SPEC, PROVIDERS, MIGRATION, and the agent skills in `.agents/skills/`
 
 ### Technology Stack
@@ -88,13 +88,13 @@ cairn/
 │   ├── utils/
 │   │   ├── retry.py         # with_retry decorator, RetryStrategy
 │   │   └── error_formatting.py
-│   └── watcher/
-│       └── watcher.py       # FileWatcher: project → stable sync
+│   ├── repo.py             # ProjectFilter, capture_manifest, materialize
+│   ├── driver.py           # WorkspaceCapability, IterativeDriver, ProjectView
+│   └── integration.py      # IntegrationLock (flock)
 │
-├── .agentfs/                # FSdantic databases
-│   ├── stable.db            # source of truth
-│   ├── bin.db               # lifecycle KV + undo snapshots
-│   └── agent-{id}.db        # per-agent overlays
+├── .agentfs/                # Metadata databases (never a repo mirror)
+│   ├── bin.db               # lifecycle KV + undo snapshots + journal
+│   └── agent-{id}.db        # per-agent metadata KV (run record, submission)
 │
 ├── tests/
 │   ├── cairn/               # unit-ish tests (async)
@@ -170,8 +170,8 @@ uv run pytest
 # Targeted: orchestrator + workspace flow
 uv run pytest tests/cairn/test_orchestrator.py tests/cairn/test_workspace.py
 
-# Agent lifecycle + tools + watcher
-uv run pytest tests/cairn/test_lifecycle.py tests/cairn/test_agent_tools.py tests/cairn/test_watcher.py
+# Repo snapshots + driver + orchestrator
+uv run pytest tests/cairn/test_repo.py tests/cairn/test_driver.py tests/cairn/test_orchestrator.py
 
 # Performance-marked tests (deselected by default)
 uv run pytest -m benchmark tests/cairn/test_performance.py
@@ -228,7 +228,7 @@ at the bottom of each skill.
   protocol, built-ins, plugin entry points.
 - [cairn-library-api](skills/cairn-library-api/SKILL.md) — open_workspace,
   WorkspaceInspector, AgentStateManager, TaskQueue, embedding the orchestrator.
-- [cairn-cli-operations](skills/cairn-cli-operations/SKILL.md) — daemon, CLI
+- [cairn-operations](skills/cairn-operations/SKILL.md) — daemon, CLI
   commands, signals/mirror, accept/reject/undo, troubleshooting.
 - [cairn-contribution](skills/cairn-contribution/SKILL.md) — the dev gate,
   tests, conventions, security model, pitfalls when modifying the repo.
@@ -303,7 +303,7 @@ git commit -m "message"
 
 - **Workspace APIs** - open_workspace, WorkspaceManager, WorkspaceInspector, AgentStateManager
 - **Sandbox API** - read_file/write_file/list_dir/file_exists/delete_file/search_files/search_content/submit_result/log
-- **CLI commands** - `cairn up/run/spawn/queue/list-agents/status/accept/reject/undo/logs`; `cairn-cli` groups
+- **CLI commands** - `cairn up/run/spawn/queue/list-agents/status/accept/reject/undo/logs`; `cairn` groups
 - **Environment variables** - `CAIRN_*` (including `CAIRN_ORCHESTRATOR_`, `CAIRN_EXECUTOR_`, `CAIRN_PATHS_` prefixes)
 - **CodeProvider protocol** - `get_code` / `validate_code`
 
@@ -424,7 +424,7 @@ async def test_full_agent_lifecycle(tmp_path):
 cairn up &
 ORCH_PID=$!
 
-# Queue a task (writes a signal file; daemon picks it up)
+# Queue a task (socket request; result returns synchronously)
 cairn queue scripts/task.py
 
 # Wait for it to reach REVIEWING
@@ -447,7 +447,8 @@ kill $ORCH_PID
 
 These must be optimized:
 
-1. **File sync** (inotify → stable.db): <10ms
+1. **Manifest capture + materialize**: proportional to tree size (CoW where
+   supported)
 2. **Agent spawn**: <1s
 3. **Preview open**: <100ms
 4. **Accept/reject**: <50ms
@@ -636,8 +637,8 @@ cairn logs agent-<id>
 cat ~/.cairn/workspaces/agent-<id>/.cairn/run.log
 
 # Inspect an agent overlay read-only via the Typer CLI
-cairn-cli preview changes agent-<id>
-cairn-cli files list agent-<id>
+cairn preview changes agent-<id>
+cairn files list agent-<id>
 
 # Inspect the lifecycle mirror (CLI query path)
 cat ~/.cairn/state/lifecycle.json

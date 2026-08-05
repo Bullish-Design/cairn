@@ -22,12 +22,14 @@ re-exported from `cairn` and `cairn.runtime`.
 from cairn import (
     AgentContext, AgentState, AgentStateManager,
     BwrapExecutor, CairnOrchestrator, CodeProvider,
-    ExecutorSettings, FileCodeProvider, FileWatcher, InlineCodeProvider,
+    ExecutorSettings, FileCodeProvider, InlineCodeProvider,
     OrchestratorSettings, PathsSettings, QueuedTask, RetryStrategy,
-    SandboxExecutionError, SandboxResult, SignalHandler,
+    SandboxExecutionError, SandboxResult,
     TaskPriority, TaskQueue, WorkspaceInspector, WorkspaceManager,
     WorkspaceStats, open_workspace, resolve_code_provider, with_retry,
 )
+# Note: SignalHandler/FileWatcher were removed with the signal-file transport
+# and the stable.db mirror (M3/M6).
 ```
 
 ## Workspace opening — `open_workspace`
@@ -103,7 +105,7 @@ Read-only workspace access for CLIs and diagnostics
 ```python
 from cairn import WorkspaceInspector
 
-async with await WorkspaceInspector.from_path("stable.db") as inspector:
+async with await WorkspaceInspector.from_path("my.db") as inspector:
     names = await inspector.list_dir("/")
     stats = await inspector.stats()
 ```
@@ -194,24 +196,28 @@ finally:
 
 Notes for embedders:
 
-- `initialize()` runs the project sync (`sync_project_on_start=True` by
-  default) and starts the worker loop unless
-  `config.start_worker_on_init=False` (use the latter when you schedule runs
-  manually).
+- `initialize()` opens the metadata workspaces, starts the transport server
+  (binding `$CAIRN_HOME/state/orchestrator.sock` — the daemon-ownership
+  primitive), recovers in-flight commands and interrupted accepts, and starts
+  the worker loop unless `config.start_worker_on_init=False` (use the latter
+  when you schedule runs manually).
 - `spawn_agent(task, priority)` returns an `agent-<hex>` id and enqueues the
   task; `wait_for_agent` polls until a terminal state
   (`REVIEWING`/`ACCEPTED`/`REJECTED`/`ERRORED`).
 - `submit_command(CairnCommand)` is the normalized dispatch entry point (the
   CLI/signal layer parses into these typed commands first — see
   [cairn-cli-operations](../cairn-cli-operations/SKILL.md)).
-- `accept_agent(agent_id, force=False)` refuses with `ACCEPT_STALE_BASE` if
-  stable changed on touched paths since the agent read them.
+- `accept_agent(agent_id, force=False)` revalidates every touched base entry
+  against a fresh manifest of the working tree under the project integration
+  lock and refuses with `ACCEPT_STALE_BASE` on any discrepancy (including a
+  missing run record), then applies the computed changeset to the actual
+  working tree, snapshotted for `cairn undo`.
 - `cleanup_completed_agents(max_age_seconds=7*DAY)` runs retention (records,
   `bin-{id}.db` files, workdirs, undo snapshots).
 
 ## Direct sandbox execution (BwrapExecutor)
 
-For running code over a workspace without the full lifecycle:
+For running code over a disposable workspace without the full lifecycle:
 
 ```python
 from cairn import BwrapExecutor
@@ -220,18 +226,21 @@ from cairn.runtime.settings import ExecutorSettings
 result = await BwrapExecutor(
     agent_id="x",
     workdir="/tmp/ws",
-    agent_fs=agent_workspace,
-    stable=stable_workspace,
+    project_root="/path/to/repo",   # the canonical working tree
     settings=ExecutorSettings(),
 ).run(code=code_text, task="description")
 # result: SandboxResult(submission, changes={"written": [...], "deleted": [...]},
-#                      log, base_hashes, exit_code, executable, directories)
+#                      log, base_hashes, base_manifest, exit_code,
+#                      executable, directories, mode_changed)
 ```
 
-`BwrapExecutor.run` materializes → runs in bwrap → re-imports the changeset
-into `agent_fs` and records tombstones for deletions. Raises
-`SandboxExecutionError` (launch/nonzero exit) or
-`cairn.core.exceptions.TimeoutError` (`EXECUTION_TIMEOUT`).
+`BwrapExecutor.run` snapshots the tree, materializes a disposable real copy
+into `workdir`, runs the code in bwrap, and computes the authoritative
+changeset from the diff — there is no overlay database or re-import. Raises
+`SandboxExecutionError` (launch/nonzero exit), `ResourceLimitError`
+(`WORKSPACE_BUDGET_EXCEEDED`), or `cairn.core.exceptions.TimeoutError`
+(`EXECUTION_TIMEOUT`). Output is capped (`max_log_bytes`) and the workspace
+budget is sampled during the run.
 
 ## Related
 

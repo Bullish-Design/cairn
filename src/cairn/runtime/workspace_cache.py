@@ -26,18 +26,24 @@ class WorkspaceCache:
         self.max_size = max_size
         self._cache: OrderedDict[str, Any] = OrderedDict()
         self._lock = asyncio.Lock()
-        self._pinned: set[str] = set()
+        # Reference-counted pins: N nested users of a key hold N pins, and the
+        # key only becomes evictable when the last user exits (review §3.6).
+        self._pinned: dict[str, int] = {}
 
     @asynccontextmanager
     async def pinned(self, key: str) -> AsyncIterator[None]:
         """Protect a cached workspace from eviction while it is in use."""
         async with self._lock:
-            self._pinned.add(key)
+            self._pinned[key] = self._pinned.get(key, 0) + 1
         try:
             yield
         finally:
             async with self._lock:
-                self._pinned.discard(key)
+                remaining = self._pinned.get(key, 0) - 1
+                if remaining <= 0:
+                    self._pinned.pop(key, None)
+                else:
+                    self._pinned[key] = remaining
                 await self._evict_if_needed()
 
     async def get(self, key: str) -> Any | None:
@@ -64,8 +70,11 @@ class WorkspaceCache:
         """
         async with self._lock:
             if key in self._cache:
+                displaced = self._cache[key]
                 self._cache[key] = workspace
                 self._cache.move_to_end(key)
+                if displaced is not workspace:
+                    await self._close_workspace(displaced, key=key)
             else:
                 self._cache[key] = workspace
             await self._evict_if_needed()

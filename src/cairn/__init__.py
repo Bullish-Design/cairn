@@ -1,4 +1,4 @@
-"""Cairn: Execution and orchestration layer for Nixbox."""
+"""Cairn: sandboxed repo-agent orchestration runtime."""
 
 from importlib.metadata import PackageNotFoundError, version
 

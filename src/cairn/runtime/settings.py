@@ -12,6 +12,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cairn.core.constants import (
+    DEFAULT_MAX_LOG_BYTES,
     DEFAULT_MAX_QUEUE_SIZE,
     DEFAULT_MAX_WORKSPACE_BYTES,
     MAX_WORKSPACE_CACHE_SIZE,
@@ -81,7 +82,15 @@ class ExecutorSettings(BaseSettings):
     max_open_files: int = Field(default=1024, description="RLIMIT_NOFILE: open file descriptor cap")
     max_workspace_bytes: int = Field(
         default=DEFAULT_MAX_WORKSPACE_BYTES,
-        description="Post-run cap on total materialized workspace size",
+        description="Total disposable workspace size cap (sampled during the run, checked after)",
+    )
+    max_log_bytes: int = Field(
+        default=DEFAULT_MAX_LOG_BYTES,
+        description="Host-side cap on captured sandbox stdout/stderr; the task is killed past it (review §2.9)",
+    )
+    workspace_sample_interval_seconds: float = Field(
+        default=1.0,
+        description="How often the host samples the workspace size/file count during the run",
     )
     bwrap_path: str | None = Field(default=None, description="Path to the bubblewrap binary")
     python_path: str | None = Field(default=None, description="Python interpreter to run inside the sandbox")

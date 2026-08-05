@@ -51,16 +51,18 @@ required = {
     "cairn/__init__.py",
     "cairn/py.typed",
     "cairn/cli/cli.py",
-    "cairn/cli/typer_cli.py",
+    "cairn/cli/commands.py",
     "cairn/core/exceptions.py",
     "cairn/orchestrator/orchestrator.py",
     "cairn/orchestrator/lifecycle.py",
-    "cairn/orchestrator/signals.py",
+    "cairn/orchestrator/transport.py",
     "cairn/providers/providers.py",
     "cairn/runtime/sandbox/sandbox.py",
     "cairn/runtime/sandbox/boot.py",
     "cairn/runtime/workspace_manager.py",
-    "cairn/watcher/watcher.py",
+    "cairn/runtime/driver.py",
+    "cairn/runtime/integration.py",
+    "cairn/runtime/repo.py",
 }
 missing = sorted(required - names)
 if missing:
