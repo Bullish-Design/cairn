@@ -64,6 +64,45 @@ jobs:
       - name: Smoke-test the demo script
         run: uv run python scripts/demo_cairn_library.py
 
+  # Review §2.1: the published artifacts must actually contain the library.
+  # Builds the sdist + wheel, installs each into a clean venv (with the
+  # git-only fsdantic dependency pinned via a constraints file), verifies the
+  # wheel ships the full package and the sdist reproduces it, then runs
+  # `import cairn` and both console entry points against each artifact.
+  dist-smoke:
+    runs-on: ubuntu-latest
+    needs: devenv-gate
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes max-jobs = 2 cores = 2"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix (GitHub runner only)
+        if: ${{ !env.ACT }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://install.determinate.systems/nix \
+            | sh -s -- install linux --extra-conf "sandbox = false" --no-confirm
+          echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+      - name: Attach public Nix cache (GitHub runner only)
+        if: ${{ !env.ACT }}
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://install.determinate.systems/magic_r0 \
+            | bash -s -- --use-cache
+
+      - name: Install devenv
+        run: nix profile install nixpkgs#devenv
+
+      - name: Prepare nix state directories
+        run: |
+          mkdir -p /nix/var/nix/builds
+          chmod 0755 /nix/var/nix/builds
+          ls -ld /nix/var/nix/builds
+
+      - name: Build sdist + wheel and smoke-test both artifacts in clean venvs
+        run: |
+          devenv shell -- bash -c 'export PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH" && scripts/smoke-test-dist.sh'
+
   # Timing-sensitive benchmarks run separately and non-blocking: relaxed
   # thresholds (no CAIRN_STRICT_BENCHMARKS) and continue-on-error so a flaky
   # measurement never blocks merges, while still surfacing regressions.

@@ -86,12 +86,15 @@ environment.python-version = "3.13"
 src.include = ["src/cairn"]
 
 
+# Review §2.1: the previous `include = ["src/cairn/py.typed"]` overrides
+# restricted both artifacts to a single marker file, shipping no Python
+# modules. The wheel must carry the full package and the sdist must be able
+# to reproduce it. The wheel's package root is declared explicitly; the
+# sdist gets no file-selection overrides (hatchling defaults apply).
 [tool.hatch.build.targets.wheel]
 packages = ["src/cairn"]
-include = ["src/cairn/py.typed"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/cairn/py.typed"]
 
 [build-system]
 requires = ["hatchling>=1.24.0"]
