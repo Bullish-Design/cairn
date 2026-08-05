@@ -302,16 +302,16 @@ cairn-cli agent accept agent-<id>
 cairn-cli workspace list
 
 # Show workspace details
-cairn-cli workspace info stable
+cairn-cli workspace info my
 
 # List files
-cairn-cli files list stable --recursive
+cairn-cli files list my --recursive
 
 # Search for specific files
-cairn-cli files search stable "**/*.py"
+cairn-cli files search my "**/*.py"
 
 # Show directory tree
-cairn-cli files tree stable --max-depth 3
+cairn-cli files tree my --max-depth 3
 ```
 
 ## Features

@@ -15,12 +15,19 @@ For implementation details and runtime contracts, use [SPEC.md](SPEC.md).
 
 A cairn is a pile of stones where each traveler adds to a shared structure.
 
-- Stable workspace remains the source of truth.
-- Code executes in isolated overlays with copy-on-write semantics.
-- Changes are previewed before integration.
-- Humans accept (merge into stable) or reject (discard).
+The shared structure is the **actual Git working tree** — the canonical source
+of truth.  Each traveler works on a **disposable real copy** of the tree
+(copy-on-write where the filesystem supports it):
 
-This model prioritizes workspace isolation and explicit human control over automatic merging.
+- The working tree remains canonical; nothing is mirrored into a database.
+- Code executes in disposable real workspaces; writes never touch the tree.
+- The computed changeset (files/directories/symlinks/modes changed) is previewed
+  before integration; the agent's summary is advisory, the diff is truth.
+- Humans accept (apply the changeset to the tree) or reject (discard the
+  workspace); every accept revalidates its base under a project lock.
+
+This model prioritizes workspace isolation and explicit human control over
+automatic merging.
 
 ## Principles
 
@@ -39,7 +46,9 @@ This model prioritizes workspace isolation and explicit human control over autom
    Outputs are inspectable as real files/workspaces before integration.
 
 4. **Human authority over automation**
-   Code can propose changes; only humans finalize what enters stable.
+   Code can propose changes; only humans finalize what enters the working tree.
+   Acceptance revalidates the base fail-closed and snapshots pre-apply content
+   so decisions stay reversible (`cairn undo`).
 
 5. **Pluggable code sources**
    Code can come from files, LLMs, git repos, registries, or custom providers.
@@ -47,9 +56,12 @@ This model prioritizes workspace isolation and explicit human control over autom
 ## Constraints
 
 - All code must run with strict sandbox boundaries.
-- Stable state is never mutated without explicit human acceptance.
+- The working tree is never mutated without explicit human acceptance.
 - Review must remain cheap: fast preview, clear diffs, reversible decisions.
-- Tooling should work with normal editor/test/build workflows.
+- Tooling should work with normal editor/test/build workflows — accepted work
+  lands in the real tree where Git, editors, and build tools can see it.
+- Containment is proportional, not perfect: kernel escape resistance is out of
+  scope and documented as such.
 - Core library remains lightweight and dependency-minimal; extensions live in plugins.
 
 ## Reading order for contributors

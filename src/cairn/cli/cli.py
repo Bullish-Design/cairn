@@ -268,7 +268,7 @@ async def _run_logs(args: argparse.Namespace) -> int:
 
 
 async def _run_undo(args: argparse.Namespace) -> int:
-    """Undo a previously accepted agent's changes to stable."""
+    """Undo a previously accepted agent's changes to the working tree."""
     command = parse_command_payload("undo", {"agent_id": args.agent_id})
     return await _dispatch_mutation(args, command)
 
@@ -352,12 +352,12 @@ def build_parser() -> argparse.ArgumentParser:
     accept_parser = subparsers.add_parser("accept", help="Accept agent changes")
     accept_parser.add_argument("agent_id")
     accept_parser.add_argument(
-        "--force", action="store_true", help="Accept even if stable changed since the agent started"
+        "--force", action="store_true", help="Accept even if the working tree changed since the agent started"
     )
     accept_parser.add_argument("--timeout", type=float, default=300.0, help="Seconds to wait for the accept to settle")
     accept_parser.set_defaults(handler=_run_accept, is_async=True)
 
-    undo_parser = subparsers.add_parser("undo", help="Undo an accepted agent's changes to stable")
+    undo_parser = subparsers.add_parser("undo", help="Undo an accepted agent's changes to the working tree")
     undo_parser.add_argument("agent_id")
     undo_parser.set_defaults(handler=_run_undo, is_async=True)
 

@@ -1,26 +1,33 @@
 """bwrap-backed sandbox executor for agent code.
 
 The executor runs agent code as a stock CPython process inside a bubblewrap
-sandbox. The workflow is:
+sandbox.  The real Git working tree is the canonical source of truth; the
+workflow is:
 
-1. **Materialize** — the agent overlay (over stable) is written to a real
-   directory (``$CAIRN_HOME/workspaces/{agent_id}``) via fsdantic's
-   ``materialize.to_disk``, giving the sandbox a real POSIX filesystem view.
-2. **Run** — ``bwrap`` launches the sandbox with only that directory bound
+1. **Snapshot** — the project tree is captured faithfully (existence, kind,
+   digest, mode, symlink target; gitignore-aware, no symlinks followed).
+2. **Materialize** — a disposable real directory (``$CAIRN_HOME/workspaces/
+   {agent_id}``) is created as a copy-on-write/reflink copy of the project
+   tree, giving the sandbox a faithful POSIX view of the repo.
+3. **Run** — ``bwrap`` launches the sandbox with only that directory bound
    (writable), the interpreter runtime bound (read-only), and everything else
-   unshared (no network, no host filesystem, no other processes). On
-   NixOS/devenv the runtime is bound from a declarative store-closure manifest
-   (``pkgs.writeClosure``), so no dependency discovery happens at runtime.
-3. **Re-import** — the changeset written by the sandbox (files added/changed/
-   deleted) is diffed against a pre-run manifest and written back into the
-   agent overlay, restoring fsdantic as the source of truth.
+   unshared (no network, no host filesystem, no other processes).  On
+   NixOS/devenv the runtime is bound from a declarative store-closure
+   manifest (``pkgs.writeClosure``), so no dependency discovery happens at
+   runtime.
+4. **Diff** — the post-run workspace is captured again and compared against
+   the base manifest: the computed changeset (written/deleted/mode-changed)
+   is the authoritative record of what the agent did.  The agent's submission
+   prose is advisory; the diff is truth.
+
+There is no overlay database and no re-import: the changeset lives on disk in
+the disposable workspace until the human accepts (apply) or rejects (remove).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import shutil
@@ -29,11 +36,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fsdantic import Workspace
-
 from cairn.core.exceptions import CairnError, ResourceLimitError
 from cairn.core.exceptions import TimeoutError as CairnTimeoutError
 from cairn.core.types import SubmissionData
+from cairn.runtime import repo
 from cairn.runtime.sandbox import boot as _boot_module
 from cairn.runtime.settings import ExecutorSettings
 
@@ -56,11 +62,6 @@ DEFAULT_RUNTIME_MOUNTS: tuple[tuple[str, str], ...] = (
     ("/etc/ld.so.cache", "/etc/ld.so.cache"),
 )
 
-# Common devices provided by bwrap --dev are enough for the stdlib; no raw
-# device access is granted.
-SANDBOX_UID = 65534  # nobody
-SANDBOX_GID = 65534  # nobody
-
 
 class SandboxExecutionError(CairnError):
     """Sandboxed execution failed (nonzero exit, missing runtime, launch failure)."""
@@ -77,53 +78,43 @@ class SandboxResult:
     exit_code: int = 0
     executable: list[str] = field(default_factory=list)
     directories: list[str] = field(default_factory=list)
+    mode_changed: list[str] = field(default_factory=list)
 
 
 class BwrapExecutor:
-    """Run agent code inside a bubblewrap sandbox over a materialized workspace."""
+    """Run agent code inside a bubblewrap sandbox over a disposable real workspace."""
 
     def __init__(
         self,
         *,
         agent_id: str,
         workdir: Path | str,
-        agent_fs: Workspace,
-        stable: Workspace,
+        project_root: Path | str,
         settings: ExecutorSettings,
-        allow_root: Path | str | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.workdir = Path(workdir)
-        self.agent_fs = agent_fs
-        self.stable = stable
+        self.project_root = Path(project_root).resolve()
         self.settings = settings
-        self.allow_root = Path(allow_root) if allow_root is not None else self.workdir.parent
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
     async def run(self, *, code: str, task: str) -> SandboxResult:
-        """Materialize the workspace, run ``code`` in the sandbox, re-import changes.
+        """Snapshot the project, materialize a disposable workspace, run
+        ``code`` in the sandbox, and return the authoritative changeset.
 
         Raises:
             SandboxExecutionError: If the sandbox cannot launch or the code exits
                 with a nonzero status.
             CairnTimeoutError: If execution exceeds ``settings.max_execution_time``.
+            ResourceLimitError: If the workspace budget is exceeded.
         """
-        workdir = self.workdir
-        workdir.mkdir(parents=True, exist_ok=True)
+        base_manifest = await asyncio.to_thread(self._capture_project)
+        await asyncio.to_thread(self._materialize, base_manifest)
 
-        # Materialize the merged overlay-on-stable view into the workdir.
-        await self.agent_fs.materialize.to_disk(
-            target_path=workdir,
-            base=self.stable,
-            clean=True,
-            allow_root=self.allow_root,
-        )
-        await self._apply_persisted_metadata()
-
-        cairn_dir = workdir / SANDBOX_DIR_NAME
+        cairn_dir = self.workdir / SANDBOX_DIR_NAME
         cairn_dir.mkdir(parents=True, exist_ok=True)
         (cairn_dir / "task.py").write_text(code, encoding="utf-8")
         (cairn_dir / "task.json").write_text(
@@ -133,9 +124,7 @@ class BwrapExecutor:
         boot_source = Path(_boot_module.__file__).read_text(encoding="utf-8")
         (cairn_dir / "boot.py").write_text(boot_source, encoding="utf-8")
 
-        baseline = await asyncio.to_thread(self._snapshot, workdir)
         argv = self._build_argv()
-
         proc = await self._spawn(argv)
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -174,64 +163,60 @@ class BwrapExecutor:
                 },
             )
 
-        written, deleted = await asyncio.to_thread(self._diff_snapshot, workdir, baseline)
-        total = sum(len(content) for _, content in written)
-        if total > self.settings.max_workspace_bytes:
-            raise ResourceLimitError(
-                f"Sandbox wrote {total} bytes, exceeding the {self.settings.max_workspace_bytes} byte workspace budget",
-                error_code="WORKSPACE_BUDGET_EXCEEDED",
-                context={"agent_id": self.agent_id, "bytes_written": total},
-            )
-        touched = [rel for rel, _ in written] + deleted
-        base_hashes = {rel: baseline[rel] for rel in touched if rel in baseline}
-        executable = await asyncio.to_thread(self._collect_executable, workdir, [rel for rel, _ in written])
-        directories = await asyncio.to_thread(self._collect_empty_dirs, workdir)
-        await self._reimport(written, deleted)
+        current_manifest = await asyncio.to_thread(self._capture_workspace)
+        diff = repo.diff_manifests(base_manifest, current_manifest)
 
-        submission = self._read_submission(workdir / SUBMISSION_RELPATH, default_summary=task)
+        written = diff.written
+        deleted = diff.removed
+        total_bytes = 0
+        for rel in written:
+            entry = current_manifest.entry_for(rel)
+            if entry is not None and entry.size is not None:
+                total_bytes += entry.size
+        if total_bytes > self.settings.max_workspace_bytes:
+            raise ResourceLimitError(
+                f"Sandbox wrote {total_bytes} bytes, exceeding the {self.settings.max_workspace_bytes} byte workspace budget",
+                error_code="WORKSPACE_BUDGET_EXCEEDED",
+                context={"agent_id": self.agent_id, "bytes_written": total_bytes},
+            )
+        touched = set(written) | set(deleted)
+        base_hashes = {
+            rel: entry.digest for rel, entry in base_manifest.files().items() if rel in touched and entry.digest
+        }
+        executable = self._collect_executable(current_manifest, set(written) | set(diff.mode_changed))
+        directories = self._collect_empty_dirs(current_manifest)
+
+        submission = self._read_submission(self.workdir / SUBMISSION_RELPATH, default_summary=task)
         return SandboxResult(
             submission=submission,
-            changes={"written": [rel for rel, _ in written], "deleted": deleted},
+            changes={"written": written, "deleted": deleted},
             log=run_log,
             base_hashes=base_hashes,
             exit_code=proc.returncode or 0,
             executable=executable,
             directories=directories,
+            mode_changed=diff.mode_changed,
         )
+
+    # ------------------------------------------------------------------
+    # Snapshot + materialization
+    # ------------------------------------------------------------------
+
+    def _capture_project(self) -> repo.Manifest:
+        return repo.capture_manifest(self.project_root)
+
+    def _materialize(self, base_manifest: repo.Manifest) -> None:
+        """(Re)create the disposable workspace from the base manifest state."""
+        if self.workdir.exists():
+            shutil.rmtree(self.workdir)
+        repo.materialize_workspace(self.project_root, self.workdir)
+
+    def _capture_workspace(self) -> repo.Manifest:
+        return repo.capture_manifest(self.workdir)
 
     # ------------------------------------------------------------------
     # Sandbox invocation
     # ------------------------------------------------------------------
-
-    async def _apply_persisted_metadata(self) -> None:
-        """Re-apply executable bits / empty dirs recorded by a previous run.
-
-        fsdantic stores content only, so a ``chmod +x`` inside the sandbox
-        would otherwise be lost on the next materialization.  The run record
-        keeps the executable set and the empty-directory set; apply them after
-        ``to_disk`` so the review surface matches what the agent produced.
-        """
-        try:
-            from cairn.orchestrator.lifecycle import RUN_KEY, RunRecord
-
-            repo = self.agent_fs.kv.repository(prefix="", model_type=RunRecord)
-            run = await repo.load(RUN_KEY)
-        except Exception:  # noqa: BLE001 - no persisted record yet is the normal case
-            return
-        if run is None:
-            return
-        for rel in run.executable:
-            target = self.workdir / rel
-            try:
-                if target.is_file() and not target.is_symlink():
-                    target.chmod(target.stat().st_mode | 0o111)
-            except OSError:
-                continue
-        for rel in run.directories:
-            try:
-                (self.workdir / rel).mkdir(parents=True, exist_ok=True)
-            except OSError:
-                continue
 
     def _bwrap_path(self) -> str:
         configured = self.settings.bwrap_path
@@ -385,137 +370,29 @@ class BwrapExecutor:
         return lines[-1][-500:]
 
     # ------------------------------------------------------------------
-    # Change tracking and re-import
+    # Changeset derivation (computed, never trusted from submission prose)
     # ------------------------------------------------------------------
 
-    @classmethod
-    def _snapshot(cls, root: Path) -> dict[str, str]:
-        """Walk ``root`` returning {relative_path: sha256} for regular files.
-
-        The sandbox scaffolding directory (``.cairn``) is excluded: it is owned
-        by the host and must never be re-imported into the overlay.
-        """
-        manifest, _ = cls._snapshot_with_modes(root)
-        return manifest
-
-    @classmethod
-    def _snapshot_with_modes(cls, root: Path) -> tuple[dict[str, str], dict[str, int]]:
-        """{rel: sha256} plus {rel: st_mode & 0o777} for regular files."""
-        manifest: dict[str, str] = {}
-        modes: dict[str, int] = {}
-        for path in sorted(root.rglob("*")):
-            if path.is_symlink() or not path.is_file():
-                continue
-            rel = path.relative_to(root).as_posix()
-            if rel == SANDBOX_DIR_NAME or rel.startswith(f"{SANDBOX_DIR_NAME}/"):
-                continue
-            manifest[rel] = cls._sha256(path)
-            modes[rel] = path.stat().st_mode & 0o777
-        return manifest, modes
-
-    @classmethod
-    def _diff_modes(cls, root: Path, baseline_modes: dict[str, int]) -> list[str]:
-        """Relative paths whose permission bits changed since the baseline."""
-        current = cls._snapshot_with_modes(root)[1]
-        return sorted(rel for rel, mode in current.items() if baseline_modes.get(rel) != mode)
-
-    @classmethod
-    def _collect_executable(cls, root: Path, rels: list[str]) -> list[str]:
-        """Relative paths (of ``rels``) that have any execute bit set."""
-        result: set[str] = set()
-        for rel in rels:
-            target = root / rel
-            try:
-                if target.is_file() and not target.is_symlink() and target.stat().st_mode & 0o111:
-                    result.add(rel)
-            except OSError:
-                continue
-        return sorted(result)
-
-    @classmethod
-    def _collect_empty_dirs(cls, root: Path) -> list[str]:
-        """Relative paths of empty directories (excluding the .cairn scaffolding)."""
-        result: list[str] = []
-        for path in sorted(root.rglob("*")):
-            if path.is_symlink() or not path.is_dir():
-                continue
-            rel = path.relative_to(root).as_posix()
-            if rel == SANDBOX_DIR_NAME or rel.startswith(f"{SANDBOX_DIR_NAME}/"):
-                continue
-            try:
-                if not any(path.iterdir()):
-                    result.append(rel)
-            except OSError:
-                continue
-        return result
+    @staticmethod
+    def _collect_executable(manifest: repo.Manifest, rels: set[str]) -> list[str]:
+        """Changed paths that carry any execute bit."""
+        return sorted(
+            rel
+            for rel in rels
+            if (entry := manifest.entry_for(rel)) is not None and entry.kind == "file" and (entry.mode or 0) & 0o111
+        )
 
     @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
-    @classmethod
-    def _diff_snapshot(cls, root: Path, baseline: dict[str, str]) -> tuple[list[tuple[str, bytes]], list[str]]:
-        """Compare the post-run snapshot against the baseline.
-
-        Returns ``(written, deleted)`` where ``written`` is a list of
-        ``(relative_path, content)`` for added/changed regular files and
-        ``deleted`` is a list of relative paths present before the run but
-        missing (or replaced by a symlink) afterwards.
-        """
-        current = cls._snapshot(root)
-        written: list[tuple[str, bytes]] = []
-        for rel, digest in current.items():
-            if baseline.get(rel) != digest:
-                target = root / rel
-                if target.is_symlink():  # never follow symlinks on the host side
-                    continue
-                written.append((rel, target.read_bytes()))
-        deleted = [rel for rel in baseline if rel not in current]
-        return written, deleted
-
-    async def _reimport(self, written: list[tuple[str, bytes]], deleted: list[str]) -> None:
-        """Write sandbox changes back into the agent overlay.
-
-        Writes are sequential (with one retry on transient lock errors) to
-        avoid SQLite "database is locked" contention on the single connection.
-        Deletions are recorded as overlay tombstones (``overlay.tombstone``,
-        fsdantic >= 0.7.0): the path is removed from the overlay if present and
-        a ``fsdantic:tombstone:<path>`` KV marker is stored, so files that
-        exist only in stable can be deleted too — the accept merge replays the
-        marker against stable (``MergeResult.tombstones_applied``).
-        """
-        for rel, content in written:
-            try:
-                await self.agent_fs.files.write(rel, content)
-            except Exception as exc:  # noqa: BLE001 — retry transient locks once
-                await asyncio.sleep(0.05)
-                try:
-                    await self.agent_fs.files.write(rel, content)
-                except Exception as retry_exc:  # noqa: BLE001 — best effort
-                    logger.warning(
-                        "Failed to re-import sandbox change",
-                        extra={
-                            "agent_id": self.agent_id,
-                            "path": rel,
-                            "error": str(exc),
-                            "retry_error": str(retry_exc),
-                        },
-                    )
-        for rel in deleted:
-            # Tombstone both overlay-owned and stable-only deletions: the
-            # marker makes the delete survive into the accept merge (stable
-            # files can be removed even though the sandbox never had them).
-            try:
-                await self.agent_fs.overlay.tombstone(rel)
-            except Exception as exc:  # noqa: BLE001 — best-effort tombstone
-                logger.warning(
-                    "Failed to record sandbox deletion",
-                    extra={"agent_id": self.agent_id, "path": rel, "error": str(exc)},
-                )
+    def _collect_empty_dirs(manifest: repo.Manifest) -> list[str]:
+        """Directories with no manifest entries beneath them (empty, as seen
+        by the agent; the ``.cairn`` scaffolding is excluded by the filter)."""
+        dirs = set(manifest.dirs())
+        prefix_of_dir: set[str] = set()
+        for rel in manifest.entries:
+            parts = rel.split("/")
+            for i in range(1, len(parts)):
+                prefix_of_dir.add("/".join(parts[:i]))
+        return sorted(dirs - prefix_of_dir)
 
     @staticmethod
     def _read_submission(path: Path, default_summary: str) -> SubmissionData | None:

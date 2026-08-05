@@ -6,9 +6,9 @@ Cairn is a workspace-aware orchestration runtime for sandboxed code execution wi
 
 Cairn provides:
 - **Safe execution of untrusted code** in sandboxed environments
-- **Isolated workspace management** with copy-on-write overlays
+- **Isolated workspace management** with disposable real workspaces
 - **Human-controlled integration** via explicit accept/reject gates
-- **Pluggable code providers** for sourcing code from files, LLMs, git repos, registries, or custom sources
+- **Pluggable code providers** for sourcing code from files, git repos, registries, or custom sources
 - **Preview environments** for inspecting changes before integration
 
 ## Use Cases
@@ -79,16 +79,21 @@ uv run cairn accept agent-<id>
 uv run cairn reject agent-<id>
 ```
 
-Accept reports the merged file count and, when the sandbox deleted files in
-stable, how many deletions were applied (fsdantic overlay tombstones).
+Accept revalidates the base every touched path had at run start against the
+current working tree (fail-closed: any discrepancy, including a missing run
+record, is refused with `ACCEPT_STALE_BASE`), then applies the computed
+changeset to the actual working tree — files written, deletions applied,
+modes/symlinks preserved.  Pre-apply content is snapshotted so `cairn undo
+<agent-id>` can reverse the accept.
 
-## Sandbox deletions (tombstones)
+## The working tree is canonical
 
-Deletions made inside the sandbox are re-imported into the agent overlay as
-**tombstones** (fsdantic >= 0.7.0 `overlay.tombstone`): files that exist only
-in stable can be deleted by an agent, and the accept merge replays the
-markers against stable (`MergeResult.tombstones_applied`).  A file
-re-created in the overlay after deletion overrides its tombstone.
+The actual Git working tree is the source of truth.  Each agent runs over a
+disposable real copy of the tree (copy-on-write where the filesystem supports
+it), materialized from a faithful snapshot that honors `.gitignore` and never
+follows symlinks.  The changeset is computed from the workspace diff — the
+agent's own summary is advisory — and accept applies it to the real tree so
+editors, Git, and build tools see accepted work immediately.
 
 ## Read-only inspection
 

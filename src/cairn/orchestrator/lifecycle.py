@@ -111,10 +111,11 @@ class RunRecord(VersionedKVRecord):
     exit_code: int = 0
     executable: list[str] = Field(default_factory=list)
     directories: list[str] = Field(default_factory=list)
+    mode_changed: list[str] = Field(default_factory=list)
 
 
 class UndoRecord(VersionedKVRecord):
-    """Pre-accept snapshot of stable for one agent, enabling `cairn undo`."""
+    """Pre-accept snapshot of the working tree for one agent, enabling `cairn undo`."""
 
     agent_id: str
     restore_paths: list[str] = Field(default_factory=list)

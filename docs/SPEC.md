@@ -26,25 +26,36 @@ Cairn runtime contracts are implemented by four concrete layers:
      - `GitCodeProvider` (cairn-git) - loads code from git repositories
      - `RegistryCodeProvider` (cairn-registry) - fetches code from registries
    - The orchestrator accepts any `CodeProvider` implementation via constructor parameter.
+   - Provider `context` is `{"agent_id": str, "workspace": Workspace, "project_root": Path}` —
+     metadata only; providers never receive a writable mirror of the repository.
 
-2. **Storage (`fsdantic.Workspace`)**
-   - The orchestrator opens `stable.db`, `bin.db`, and per-agent `agent-*.db` via `Fsdantic.open(path=...)`.
-   - Runtime file access and preview materialization use fsdantic workspace manager APIs:
-     - file operations (`workspace.files.read/write/query/search`),
-     - KV operations (`workspace.kv.get/set/delete/list`),
-     - overlay operations (`workspace.overlay.merge/list_changes/reset`),
-     - materialization (`workspace.materialize.to_disk/diff`).
+2. **Repository snapshot + disposable workspaces (`cairn.runtime.repo`)**
+   - The **actual Git working tree is the canonical source of truth**; there is no
+     `stable.db` file mirror (review §4.2).  SQLite/fsdantic stores orchestration
+     metadata only (`bin.db`, per-agent `agent-*.db`), never file contents.
+   - `ProjectFilter` — a gitignore-aware inclusion predicate confined beneath the
+     repository root: never follows symlinks and never admits `.git`/`.hg`/`.jj`,
+     `.cairn` scaffolding, `.agentfs`, or ignored paths.
+   - `capture_manifest(root)` — a faithful point-in-time snapshot: existence, kind
+     (file/dir/symlink), sha256 digest, permission bits, and symlink target.
+     Absence is an explicit state (a path not in the manifest did not exist).
+   - `materialize_workspace(src, dst)` — creates the disposable real directory the
+     agent runs over (copy-on-write/reflink where the filesystem supports it),
+     preserving modes, symlinks (as symlinks), and empty directories.
 
-3. **Execution (`BwrapExecutor` over a materialized workspace)**
-   - Code providers generate or fetch code that is written to `$CAIRN_HOME/workspaces/{agent_id}/.cairn/task.py`.
-   - The agent overlay (over stable) is materialized to a real directory via `workspace.materialize.to_disk()`.
-   - The code runs as stock CPython inside a bubblewrap sandbox (`BwrapExecutor`): only the materialized
-     directory is writable; the interpreter runtime is mounted read-only; network, host filesystem, and
-     other processes are unshared.
-   - After execution the sandbox changeset is re-imported into the agent overlay (added/changed files
-     written, deleted files tombstoned) and `submit_result` payloads are read from `.cairn/submission.json`.
-   - Execution limits (wall-clock timeout, memory, CPU, recursion) are enforced via the sandbox bootstrap
-     (rlimits) and host-side subprocess timeout.
+3. **Execution (`BwrapExecutor` over a disposable real workspace)**
+   - Per task the executor captures the base manifest, materializes a disposable
+     copy of the tree at `$CAIRN_HOME/workspaces/{agent_id}/`, writes the code to
+     `.cairn/task.py`, and runs it as stock CPython inside a bubblewrap sandbox:
+     only the disposable directory is writable; the interpreter runtime is mounted
+     read-only; network, host filesystem, and other processes are unshared.
+   - After execution the workspace is captured again and compared with the base
+     manifest: the computed changeset (written/deleted/mode-changed paths) is the
+     **authoritative record** of what the agent did.  There is no overlay database
+     and no host-side re-import; the agent's `submit_result` prose is advisory.
+   - Execution limits (wall-clock timeout, memory, CPU, recursion) are enforced via
+     the sandbox bootstrap (rlimits) and host-side subprocess timeout; the total
+     workspace budget is checked against the computed changeset after the run.
 
 4. **Sandbox API (`cairn.runtime.sandbox.boot`)**
    - The bootstrap script shipped into the sandbox exposes helper functions
@@ -57,7 +68,7 @@ Cairn runtime contracts are implemented by four concrete layers:
    - `submit_result(...)` writes `.cairn/submission.json`; the host persists it to the agent workspace
      KV submission record consumed by the orchestrator lifecycle flow.
 
-> **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator/orchestrator.py`, `src/cairn/providers/providers.py`, `src/cairn/runtime/sandbox/sandbox.py`).
+> **Source-of-truth note:** If runtime behavior in code and this section differ, update this section and the implementing modules together in the same change (`src/cairn/orchestrator/orchestrator.py`, `src/cairn/providers/providers.py`, `src/cairn/runtime/sandbox/sandbox.py`, `src/cairn/runtime/repo.py`).
 
 ## Public inspection and state APIs
 
@@ -111,55 +122,69 @@ from cairn.runtime import open_workspace, WorkspaceInspector, WorkspaceStats, Ag
 
 ```text
 $PROJECT_ROOT/.agentfs/
-├── stable.db
-├── agent-{id}.db
-└── bin.db
+├── agent-{id}.db        # per-agent metadata KV (run record, submission) — never file contents
+└── bin.db               # lifecycle KV + undo snapshots + ACCEPTING journal
 
 $CAIRN_HOME/ (default ~/.cairn)
 ├── workspaces/
-│   └── {agent_id}/          # Sandbox workdir == preview workspace
+│   └── {agent_id}/          # disposable real workspace == review surface
 │       ├── .cairn/
 │       │   ├── task.py          # Generated/loaded agent code
 │       │   ├── task.json        # Task inputs (task_description)
 │       │   ├── boot.py          # Sandbox bootstrap (shipped in)
 │       │   ├── submission.json  # submit_result payload
 │       │   └── run.log          # Sandbox stdout/stderr
-│       └── ...                  # Materialized workspace files
+│       └── ...                  # Materialized copy of the working tree
 ├── signals/
 └── state/
 ```
 
-4. **Project sync (`FileWatcher`)**
-   - `FileWatcher` mirrors the project tree into `stable` once at orchestrator
-     startup (`initial_sync`, before the worker loop starts) and then watches
-     for filesystem changes, mirroring them into `stable` continuously.
-   - Ignoring is name-based (`watchfiles.DefaultFilter` + Cairn's exclusions:
-     `.agentfs`, `.jj`, `.devenv`, `.direnv`, `venv`, `.ruff_cache`,
-     `.coverage`, `htmlcov`, `dist`, `build`, `target`, `.eggs`, plus db/so
-     suffixes).  Files larger than `max_sync_file_bytes` are skipped.
+4. **Repository snapshot (no live mirror)**
+   - The working tree is the canonical source of truth; there is no background
+     watcher copying it into a database.
+   - Per task the executor captures a base manifest of the tree (gitignore-aware,
+     no symlink following, `.git`/`.cairn`/`.agentfs` never admitted) and
+     materializes a disposable real copy; the computed diff against that manifest
+     is the authoritative changeset.
+   - At accept time the base is revalidated against a fresh manifest under the
+     project integration lock; any discrepancy (including a missing run record)
+     fails the gate closed.
 
 5. **Daemon ownership (P1.4)**
-   - The daemon owns all databases.  The CLI never constructs an orchestrator:
-     mutations go through signal files, queries read the lifecycle mirror.
+   - The daemon owns the metadata databases.  The CLI never constructs an
+     orchestrator: mutations go through signal files, queries read the lifecycle
+     mirror.
 
-## Storage contracts (fsdantic workspaces)
+## Repository manifest contracts (`cairn.runtime.repo`)
 
-### Overlay semantics
+### Manifest fidelity
 
-- Reads in an agent overlay must fall through to stable when a path is absent in the overlay.
-- Writes in an agent overlay must only update that overlay.
-- Accept copies selected overlay changes into stable.
-- Reject discards overlay changes.
+- Every admissible path is recorded with its kind: `file` (sha256 digest, size,
+  permission bits), `dir` (permission bits, including empty directories), or
+  `symlink` (raw `readlink` target, permission bits).  A path absent from the
+  manifest is explicitly absent.
+- Symlinks are **never dereferenced**: entries are read with `lstat`, files with
+  `O_NOFOLLOW`.  A repo symlink pointing outside the project is recorded as a
+  symlink entry; its target content never enters the manifest or the workspace.
+- Admissibility: gitignore rules (root plus nested, deepest pattern wins),
+  VCS metadata (`.git`/`.hg`/`.svn`/`.jj`), Cairn scaffolding (`.cairn`,
+  `.agentfs`), and developer-environment dirs are excluded; `.pyc`/`.pyo` are
+  excluded by suffix.
 
-### Required operations
+### Disposable workspace
 
-- `read_file(path) -> bytes`
-- `write_file(path, content) -> None`
-- `readdir(path) -> list[DirEntry]`
-- `stat(path) -> FileStat`
-- `remove(path) -> None`
-- `mkdir(path) -> None`
-- KV store: `get/set/delete/list`
+- `materialize_workspace` copies only admissible paths, using copy-on-write
+  reflinks where the filesystem supports them.  Modes, symlinks, and empty
+  directories are preserved byte-for-byte.
+
+### Changeset semantics
+
+- `diff_manifests(base, current)` yields `added` (absent at base, present now),
+  `removed` (present at base, absent now), `modified` (content/kind change,
+  e.g. file digest or file→symlink), and `mode_changed` (permission-only drift).
+- The executor maps this to the run record's `written`/`deleted` lists; the
+  agent's `submit_result(changed_files=...)` claim is advisory only and is
+  cross-checked against the computed set.
 
 ## Execution contracts (bwrap sandbox)
 
@@ -206,7 +231,21 @@ submit_result(summary="Done", changed_files=["src/main.py"])
   and ``..`` traversal rejected) is an ergonomic convenience for code that
   voluntarily uses the helpers — anything that must not be reachable must be
   excluded at the mount layer.
-- Symlinks in the workspace are never followed by the host-side re-import.
+- Symlinks in the workspace are never followed by the host-side apply: a path
+  the agent replaced with a symlink is recreated as a symlink, and host reads
+  use `O_NOFOLLOW`/`lstat` throughout.
+
+### Changeset application (accept)
+
+The computed changeset from the run record is applied to the actual working
+**tree** — not a database: written paths are copied from the disposable
+workspace (symlinks recreated as symlinks, modes preserved), deleted paths are
+removed, `mode_changed` permissions are applied, executable bits and empty
+directories are recreated.  Before anything is applied the base is revalidated
+against a fresh manifest of the tree; any touched path that changed (including
+absent-at-start paths that now exist, and a missing run record) fails the gate
+closed with `ACCEPT_STALE_BASE`.  Pre-apply content of every touched path is
+snapshotted into `bin.db` under `undo/{agent_id}/` for `cairn undo`.
 
 ### Sandbox runtime configuration (NixOS/devenv)
 
@@ -233,13 +272,6 @@ variables (``ExecutorSettings`` uses the ``CAIRN_EXECUTOR_`` prefix):
 - `search_content(pattern, path='.') -> list[dict]`
 - `submit_result(summary, changed_files) -> bool`
 - `log(message) -> bool`
-
-Deletions re-import into the agent overlay as **tombstones** (fsdantic >= 0.7.0
-``overlay.tombstone``): the path is removed from the overlay and a
-``fsdantic:tombstone:<path>`` KV marker is recorded, so stable-only files can
-be deleted too — the accept merge replays the markers against stable
-(``MergeResult.tombstones_applied``).  A file re-created in the overlay after
-deletion makes its marker inert (the file phase wins).
 
 ### Pre-flight validation
 
@@ -293,15 +325,19 @@ agent:{agent_id} -> {
 - enqueue tasks into a priority queue,
 - run a long-lived worker loop that acquires an `asyncio.Semaphore(max_concurrent_agents)` slot before starting each task; the loop survives per-iteration failures (backoff) and is restarted by a supervisor if it exits unexpectedly,
 - release the semaphore slot in one completion `finally` path,
-- use `CodeProvider` to source executable code (from files, LLMs, git, etc.),
+- use `CodeProvider` to source executable code (from files, git, registries, or custom providers),
 - validate code via provider `validate_code()` before execution,
 - write code to `$CAIRN_HOME/workspaces/{agent_id}/.cairn/task.py`,
-- execute code via `BwrapExecutor` (materialize → sandbox run → re-import),
-- materialize the workspace via `workspace.materialize.to_disk()` (workdir doubles as preview),
-- persist lifecycle metadata to canonical KV store on every state transition, plus a JSON mirror for CLI reads,
+- execute code via `BwrapExecutor` (capture base manifest → materialize disposable
+  workspace → sandbox run → compute changeset from the diff),
+- keep the disposable workspace as the immutable review surface (workdir doubles as preview),
+- persist the computed run record (written/deleted/mode-changed paths, base hashes, log) and
+  lifecycle metadata to the canonical KV stores on every state transition, plus a JSON mirror for CLI reads,
 - persist queue stats snapshot under `$CAIRN_HOME/state/` (stats only, not agent metadata),
 - fail agents that were mid-run when the daemon died (`GENERATING`/`EXECUTING`/`SUBMITTING` → `ERRORED` with an explanation; optionally re-queued with `requeue_interrupted`),
 - keep the workdir and partial run log when a run fails (debuggability; cleaned by retention or `cairn reject`).
+- apply accepted changesets to the actual working tree under a fresh base revalidation (fail closed),
+  with pre-apply content snapshotted for `cairn undo`.
 
 ### CLI contract (thin client, P1.4)
 
@@ -321,12 +357,12 @@ opens, so the CLI cannot open `bin.db` while the daemon holds it.
 - `cairn status <agent-id>` - Read the lifecycle mirror; exit 1 + friendly
   message for unknown agents (no traceback)
 - `cairn accept <agent-id> [--timeout N] [--force]` - Write an `accept` signal, then poll
-  the mirror until the accept settles.  Without `--force`, accept is refused
-  (`ACCEPT_STALE_BASE`) if stable changed for any path the agent touched since
-  the agent read it.
+  the mirror until the accept settles.  Without `--force`, accept revalidates every touched
+  base entry against the current working tree and is refused (`ACCEPT_STALE_BASE`) on any
+  discrepancy, including a missing run record.
 - `cairn reject <agent-id> [--timeout N]` - Write a `reject` signal, then poll
   the mirror until the reject settles
-- `cairn undo <agent-id>` - Write an `undo` signal; the daemon restores stable
+- `cairn undo <agent-id>` - Write an `undo` signal; the daemon restores the working tree
   to its pre-accept state for that agent (the snapshot lives in the bin
   workspace under `undo/{agent_id}/` and is retained on the lifecycle cleanup
   schedule)

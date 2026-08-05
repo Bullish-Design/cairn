@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
+import os
 import shutil
+import stat
 import time
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from fsdantic import Fsdantic, MergeStrategy, Workspace
+from fsdantic import Fsdantic, Workspace
 
 from cairn.cli.commands import (
     AcceptCommand,
@@ -61,6 +62,7 @@ from cairn.orchestrator.lifecycle import (
 from cairn.orchestrator.queue import TaskPriority, TaskQueue
 from cairn.orchestrator.signals import SignalHandler
 from cairn.providers.providers import CodeProvider, FileCodeProvider
+from cairn.runtime import repo
 from cairn.runtime.agent import AgentContext, AgentState
 from cairn.runtime.sandbox import (
     SANDBOX_DIR_NAME,
@@ -74,7 +76,6 @@ from cairn.runtime.workspace_cache import WorkspaceCache
 from cairn.runtime.workspace_manager import WorkspaceManager
 from cairn.utils.error_formatting import format_agent_error
 from cairn.utils.retry import with_retry
-from cairn.watcher.watcher import FileWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,6 @@ class CairnOrchestrator:
         self.config = config or OrchestratorSettings()
         self.executor_settings = executor_settings or ExecutorSettings()
 
-        self.stable: Workspace | None = None
         self.bin: Workspace | None = None
         self.active_agents: dict[str, AgentContext] = {}
         self.queue = TaskQueue(max_size=self.config.max_queue_size)
@@ -119,7 +119,6 @@ class CairnOrchestrator:
         self.code_provider = code_provider or FileCodeProvider(base_path=self.project_root)
         self.executor_factory = executor_factory or BwrapExecutor
 
-        self.watcher: FileWatcher | None = None
         self.signals: SignalHandler | None = None
         self.lifecycle: LifecycleStore | None = None
         self.state_file = self.cairn_home / "state" / "orchestrator.json"
@@ -132,26 +131,13 @@ class CairnOrchestrator:
         for directory in ("workspaces", "signals", "state"):
             (self.cairn_home / directory).mkdir(parents=True, exist_ok=True)
 
-        self.stable = await self.workspace_manager.create_workspace(
-            self.agentfs_dir / "stable.db",
-            max_content_bytes=self.config.max_content_bytes,
-        )
         self.bin = await self.workspace_manager.create_workspace(
             self.agentfs_dir / "bin.db",
             max_content_bytes=self.config.max_content_bytes,
         )
 
-        self.watcher = FileWatcher(
-            self.project_root,
-            self.stable,
-            max_file_bytes=self.config.max_sync_file_bytes,
-            extra_ignore_dirs=self.config.extra_ignore_dirs,
-        )
         self.signals = SignalHandler(self.cairn_home, self, enable_polling=self.config.enable_signal_polling)
         self.lifecycle = LifecycleStore(self.bin)
-
-        if self.config.sync_project_on_start:
-            await self.watcher.initial_sync()
 
         await self.recover_from_lifecycle_store()
         await self._mirror_lifecycle()
@@ -288,9 +274,8 @@ class CairnOrchestrator:
                     await self.spawn_agent(record.task, TaskPriority(record.priority))
 
     async def run(self) -> None:
-        assert self.watcher is not None
         assert self.signals is not None
-        await asyncio.gather(self.watcher.watch(), self.signals.watch())
+        await self.signals.watch()
 
     async def shutdown(self) -> None:
         if self._worker_task and not self._worker_task.done():
@@ -484,29 +469,42 @@ class CairnOrchestrator:
         return agent_id
 
     async def accept_agent(self, agent_id: str, *, force: bool = False) -> dict[str, int]:
-        """Accept an agent's overlay changes into stable.
+        """Apply an agent's computed changeset to the actual working tree.
 
-        Unless ``force``, refuses when stable changed for paths the agent
-        touched after the agent read them (the accept would silently discard
-        those edits).  Returns merge statistics: ``files_merged`` and
-        ``tombstones_applied``.
+        The real Git working tree is the canonical source of truth (review
+        §4.2).  Unless ``force``, the base every touched path had at run
+        start is revalidated against the current tree *before* anything is
+        applied; any discrepancy — including a missing run record — fails the
+        gate closed with ``ACCEPT_STALE_BASE``.  Returns ``{"files_written":
+        n, "files_deleted": n}``.
         """
         ctx = self._get_agent(agent_id)
         if ctx.state is not AgentState.REVIEWING:
             raise ValueError(f"Agent {agent_id} not in reviewing state")
 
-        if self.stable is None:
-            raise RuntimeError("Stable workspace not initialized")
-
         agent_fs = await self._get_agent_workspace(ctx)
         run = await self._load_run_record(agent_fs)
 
-        if run is not None and not force:
+        if run is None:
+            # Fail closed: without the run record there is no ground truth
+            # for what the agent touched, so the base cannot be revalidated.
+            raise WorkspaceMergeError(
+                format_agent_error(
+                    "Run record missing; cannot revalidate the base — refusing to apply",
+                    agent_id=agent_id,
+                    state=ctx.state.value,
+                    stale_paths=[],
+                ),
+                error_code="ACCEPT_STALE_BASE",
+                context={"agent_id": agent_id, "reason": "missing run record"},
+            )
+
+        if not force:
             stale = await self._detect_stale_paths(run)
             if stale:
                 raise WorkspaceMergeError(
                     format_agent_error(
-                        "Stable changed since this agent started; accepting would discard those changes",
+                        "The working tree changed since this agent started; accepting would discard those changes",
                         agent_id=agent_id,
                         state=ctx.state.value,
                         stale_paths=stale,
@@ -516,50 +514,13 @@ class CairnOrchestrator:
                 )
 
         await self._snapshot_for_undo(ctx, run)
-        merge_result = await self.stable.overlay.merge(agent_fs, strategy=MergeStrategy.OVERWRITE)
-        merge_errors = getattr(merge_result, "errors", None)
-        if merge_errors:
-            if isinstance(merge_errors, (list, tuple, set)):
-                errors_list = list(merge_errors)
-            else:
-                errors_list = [str(merge_errors)]
-            raise WorkspaceMergeError(
-                format_agent_error(
-                    "Failed to merge agent overlay",
-                    agent_id=agent_id,
-                    state=ctx.state.value,
-                    conflicts=errors_list,
-                ),
-                error_code="WORKSPACE_MERGE_FAILED",
-                context={
-                    "agent_id": agent_id,
-                    "conflicts": errors_list,
-                    "conflict_count": len(errors_list),
-                },
-            )
-
-        tombstones_applied = getattr(merge_result, "tombstones_applied", 0)
-        files_merged = getattr(merge_result, "files_merged", 0)
-        if tombstones_applied:
-            logger.info(
-                "Accept merge applied tombstones",
-                extra={
-                    "agent_id": agent_id,
-                    "tombstones_applied": tombstones_applied,
-                    "files_merged": files_merged,
-                },
-            )
+        stats = await self._apply_to_tree(ctx, run)
 
         ctx.transition(AgentState.ACCEPTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
-        stats = {"files_merged": files_merged, "tombstones_applied": tombstones_applied}
         await self._record_accept_stats(agent_id, stats)
         return stats
-
-    @staticmethod
-    def _sha256_bytes(data: bytes) -> str:
-        return hashlib.sha256(data).hexdigest()
 
     async def _load_run_record(self, agent_fs: Workspace) -> RunRecord | None:
         """Load the agent's run record from its workspace, if present."""
@@ -570,24 +531,126 @@ class CairnOrchestrator:
             return None
 
     async def _detect_stale_paths(self, run: RunRecord) -> list[str]:
-        """Paths whose content in stable changed after the agent read them.
+        """Touched paths whose current state in the real working tree differs
+        from the base the agent saw at run start.
 
-        base_hashes holds the digest each touched path had in the materialized
-        workspace at run start.  If stable's current content no longer matches,
-        something (you, the watcher, another agent) changed it in the meantime
-        and an OVERWRITE merge would silently discard that change.
+        ``base_hashes`` records the digest of every touched path that existed
+        at run start; any touched path absent from ``base_hashes`` was
+        *explicitly absent* then.  Revalidating against a fresh manifest of
+        the canonical tree catches delete/write collisions (a base entry that
+        vanished or changed), create/create collisions (an absent-at-start
+        path that a human created meanwhile), and type/symlink/mode drift the
+        hash check alone would miss.
         """
-        if self.stable is None:
-            return []
+        current = await asyncio.to_thread(repo.capture_manifest, self.project_root)
         stale: list[str] = []
         for rel, base_digest in run.base_hashes.items():
-            try:
-                current = await self.stable.files.read(rel, mode="binary")
-            except Exception:  # noqa: BLE001, S112 - absent now: deletion is handled by tombstones
-                continue
-            if self._sha256_bytes(current) != base_digest:
+            entry = current.entry_for(rel)
+            if entry is None or entry.kind != "file" or entry.digest != base_digest:
                 stale.append(rel)
-        return sorted(stale)
+        for rel in set(run.written) | set(run.deleted) | set(run.mode_changed):
+            if rel in run.base_hashes:
+                continue  # existed at run start; checked above
+            if current.entry_for(rel) is not None:
+                stale.append(rel)  # absent at run start, present now: create/create collision
+        return sorted(set(stale))
+
+    def _validate_rel(self, rel: str) -> None:
+        """Reject any path that could escape the project root or scaffolding."""
+        if rel == "" or rel.startswith("/") or ".." in rel.split("/"):
+            raise WorkspaceMergeError(
+                f"Invalid path in changeset: {rel!r}",
+                error_code="WORKSPACE_MERGE_FAILED",
+                context={"path": rel},
+            )
+
+    async def _apply_to_tree(self, ctx: AgentContext, run: RunRecord) -> dict[str, int]:
+        """Apply the agent's computed changeset from its disposable workspace
+        to the actual working tree.
+
+        The changeset (``written``/``deleted``/``executable``/``directories``/
+        ``mode_changed``) was computed by the executor from the workspace
+        diff — never trusted from the agent's submission prose.  Every host
+        read is no-follow and every path is validated beneath the project
+        root.
+        """
+        workdir = self.cairn_home / "workspaces" / ctx.agent_id
+        if not workdir.is_dir():
+            raise WorkspaceMergeError(
+                f"Disposable workspace missing for {ctx.agent_id}",
+                error_code="WORKSPACE_MERGE_FAILED",
+                context={"agent_id": ctx.agent_id},
+            )
+
+        stats = await asyncio.to_thread(self._apply_to_tree_sync, ctx, run, workdir)
+        logger.info(
+            "Applied agent changeset to working tree",
+            extra={"agent_id": ctx.agent_id, **stats},
+        )
+        return stats
+
+    def _apply_to_tree_sync(self, ctx: AgentContext, run: RunRecord, workdir: Path) -> dict[str, int]:
+        """Blocking apply of the computed changeset onto the working tree."""
+        written = files_deleted = 0
+        for rel in run.written:
+            self._validate_rel(rel)
+            source = workdir / rel
+            target = self.project_root / rel
+            try:
+                st = source.lstat()
+            except OSError:
+                continue  # vanished between diff and apply
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if stat.S_ISLNK(st.st_mode):
+                # Recreate the symlink as-is; never dereference it.
+                if target.is_symlink() or target.exists():
+                    target.unlink()
+                os.symlink(os.readlink(source), target)
+            elif stat.S_ISREG(st.st_mode):
+                with open(source, "rb") as fin, open(target, "wb") as fout:
+                    shutil.copyfileobj(fin, fout, length=1024 * 1024)
+                os.chmod(target, stat.S_IMODE(st.st_mode))
+            else:
+                continue
+            written += 1
+
+        for rel in run.deleted:
+            self._validate_rel(rel)
+            target = self.project_root / rel
+            try:
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
+                    files_deleted += 1
+            except OSError:
+                continue
+
+        for rel in run.mode_changed:
+            self._validate_rel(rel)
+            source = workdir / rel
+            target = self.project_root / rel
+            try:
+                if source.is_file() and not source.is_symlink() and target.is_file() and not target.is_symlink():
+                    os.chmod(target, stat.S_IMODE(source.lstat().st_mode))
+            except OSError:
+                continue
+
+        for rel in run.executable:
+            self._validate_rel(rel)
+            target = self.project_root / rel
+            try:
+                if target.is_file() and not target.is_symlink():
+                    target.chmod(target.stat().st_mode | 0o111)
+            except OSError:
+                continue
+
+        for rel in run.directories:
+            self._validate_rel(rel)
+            try:
+                (self.project_root / rel).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
+
+        return {"files_written": written, "files_deleted": files_deleted}
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
@@ -744,6 +807,7 @@ class CairnOrchestrator:
             exit_code=result.exit_code,
             executable=result.executable,
             directories=result.directories,
+            mode_changed=result.mode_changed,
             updated_at=time.time(),
         )
         repo = agent_fs.kv.repository(prefix="", model_type=RunRecord)
@@ -763,11 +827,12 @@ class CairnOrchestrator:
 
     async def _generate_code(self, ctx: AgentContext) -> str | None:
         """Fetch and validate provider code for the agent."""
-        if self.stable is None:
-            raise RuntimeError("Stable workspace not initialized")
-
         agent_fs = await self._get_agent_workspace(ctx)
-        context = {"agent_id": ctx.agent_id, "workspace": agent_fs, "stable": self.stable}
+        context = {
+            "agent_id": ctx.agent_id,
+            "workspace": agent_fs,
+            "project_root": self.project_root,
+        }
 
         try:
             generated = await self.code_provider.get_code(ctx.task, context)
@@ -786,27 +851,19 @@ class CairnOrchestrator:
         return generated
 
     async def _execute_code(self, ctx: AgentContext, generated: str) -> SandboxResult:
-        """Execute generated code in the bwrap sandbox over the materialized workspace.
+        """Execute generated code in the bwrap sandbox over a disposable real
+        workspace materialized from the canonical working tree.
 
-        The executor materializes the agent overlay (over stable) to a real
-        directory, runs the code in the sandbox, and re-imports the changeset
-        back into the agent overlay.
+        The executor snapshots the tree, materializes a copy-on-write copy,
+        runs the code inside bwrap, and computes the authoritative changeset
+        by diffing the workspace against the base manifest.
         """
-        if self.stable is None:
-            raise RuntimeError("Stable workspace not initialized")
-
-        agent_fs = ctx.agent_fs
-        if agent_fs is None:
-            agent_fs = await self._get_agent_workspace(ctx)
-
         workdir = self.cairn_home / "workspaces" / ctx.agent_id
         executor = self.executor_factory(
             agent_id=ctx.agent_id,
             workdir=workdir,
-            agent_fs=agent_fs,
-            stable=self.stable,
+            project_root=self.project_root,
             settings=self.executor_settings,
-            allow_root=self.cairn_home / "workspaces",
         )
         return await executor.run(code=generated, task=ctx.task)
 
@@ -999,16 +1056,21 @@ class CairnOrchestrator:
         await self._mirror_lifecycle()
 
     async def _snapshot_for_undo(self, ctx: AgentContext, run: RunRecord | None) -> None:
-        """Save stable's pre-merge content for the paths this accept will touch."""
-        if run is None or self.bin is None or self.stable is None:
+        """Save the working tree's pre-apply content for the paths this
+        accept will touch, so ``cairn undo`` can reverse it."""
+        if run is None or self.bin is None:
             return
         prefix = f"undo/{ctx.agent_id}/"
+        touched = sorted(set(run.written) | set(run.deleted) | set(run.mode_changed))
+        for rel in touched:
+            self._validate_rel(rel)
+
+        # Blocking tree reads happen off the event loop.
+        snapshots = await asyncio.to_thread(self._snapshot_paths_for_undo, touched)
         restored: list[str] = []
         removed: list[str] = []
-        for rel in sorted(set(run.written) | set(run.deleted)):
-            try:
-                content = await self.stable.files.read(rel, mode="binary")
-            except Exception:  # noqa: BLE001 - did not exist before: undo = delete
+        for rel, content in snapshots:
+            if content is None:
                 removed.append(rel)  # did not exist before: undo = delete
                 continue
             await self.bin.files.write(prefix + rel, content, mode="binary")
@@ -1026,10 +1088,30 @@ class CairnOrchestrator:
             ),
         )
 
+    def _snapshot_paths_for_undo(self, touched: list[str]) -> list[tuple[str, bytes | None]]:
+        """Read pre-apply tree content for the touched paths (blocking)."""
+        snapshots: list[tuple[str, bytes | None]] = []
+        for rel in touched:
+            target = self.project_root / rel
+            try:
+                st = target.lstat()
+            except OSError:
+                snapshots.append((rel, None))  # did not exist before: undo = delete
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                snapshots.append((rel, None))
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                snapshots.append((rel, os.readlink(target).encode("utf-8")))
+            else:
+                with open(target, "rb") as handle:
+                    snapshots.append((rel, handle.read()))
+        return snapshots
+
     async def undo_accept(self, agent_id: str) -> dict[str, int]:
-        """Restore stable to its pre-accept state for one agent's changes."""
-        if self.bin is None or self.stable is None:
-            raise RuntimeError("Bin/stable workspace not initialized")
+        """Restore the working tree to its pre-accept state for one agent."""
+        if self.bin is None:
+            raise RuntimeError("Bin workspace not initialized")
         repo = self.bin.kv.repository(prefix="", model_type=UndoRecord)
         undo = await repo.load(f"undo:{agent_id}")
         if undo is None:
@@ -1039,10 +1121,42 @@ class CairnOrchestrator:
             )
         prefix = f"undo/{agent_id}/"
         for rel in undo.restore_paths:
+            self._validate_rel(rel)
+
+        restore_contents: list[tuple[str, bytes]] = []
+        for rel in undo.restore_paths:
             content = await self.bin.files.read(prefix + rel, mode="binary")
-            await self.stable.files.write(rel, content, mode="binary")
-        for rel in undo.delete_paths:
-            with suppress(Exception):
-                await self.stable.files.remove(rel)
+            if not isinstance(content, bytes):
+                content = content.encode("utf-8")
+            restore_contents.append((rel, content))
+
+        restored, deleted = await asyncio.to_thread(
+            self._undo_to_tree_sync, undo.restore_paths, undo.delete_paths, restore_contents
+        )
         await repo.delete(f"undo:{agent_id}")
-        return {"restored": len(undo.restore_paths), "deleted": len(undo.delete_paths)}
+        return {"restored": restored, "deleted": deleted}
+
+    def _undo_to_tree_sync(
+        self,
+        restore_paths: list[str],
+        delete_paths: list[str],
+        restore_contents: list[tuple[str, bytes]],
+    ) -> tuple[int, int]:
+        """Blocking restore/delete against the working tree."""
+        restored = 0
+        for rel, content in restore_contents:
+            target = self.project_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "wb") as handle:
+                handle.write(content)
+            restored += 1
+        deleted = 0
+        for rel in delete_paths:
+            target = self.project_root / rel
+            try:
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
+                    deleted += 1
+            except OSError:
+                continue
+        return restored, deleted

@@ -13,7 +13,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cairn.core.constants import (
     DEFAULT_MAX_QUEUE_SIZE,
-    DEFAULT_MAX_SYNC_FILE_BYTES,
     DEFAULT_MAX_WORKSPACE_BYTES,
     MAX_WORKSPACE_CACHE_SIZE,
 )
@@ -31,12 +30,8 @@ class OrchestratorSettings(BaseSettings):
     max_queue_size: int = Field(default=DEFAULT_MAX_QUEUE_SIZE, description="Maximum queued tasks")
     workspace_cache_size: int = Field(default=MAX_WORKSPACE_CACHE_SIZE, description="Workspace cache size")
     enable_signal_polling: bool = True
-    sync_project_on_start: bool = Field(default=True, description="Mirror the project tree into stable at startup")
-    max_sync_file_bytes: int = Field(
-        default=DEFAULT_MAX_SYNC_FILE_BYTES, description="Largest file the watcher/initial sync will import"
-    )
     extra_ignore_dirs: list[str] = Field(
-        default_factory=list, description="Additional directory names to exclude from the project sync"
+        default_factory=list, description="Additional directory names to exclude from the repository snapshot"
     )
 
     requeue_interrupted: bool = False

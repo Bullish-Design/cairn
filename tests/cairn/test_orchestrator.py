@@ -44,25 +44,23 @@ class StubCodeProvider:
 
 
 class FakeExecutor:
-    """Simulates the sandbox: writes files into the workdir and records a submission."""
+    """Simulates the sandbox: writes files into the disposable workdir and
+    records a submission (the changeset is computed from the diff, so the
+    stub returns the paths it wrote)."""
 
     def __init__(
         self,
         *,
         agent_id: str,
         workdir: Path | str,
-        agent_fs: object,
-        stable: object,
+        project_root: Path | str,
         settings: object,
-        allow_root: Path | str | None = None,
         **kwargs: object,
     ) -> None:
         self.agent_id = agent_id
         self.workdir = Path(workdir)
-        self.agent_fs = agent_fs
-        self.stable = stable
+        self.project_root = Path(project_root)
         self.settings = settings
-        self.allow_root = allow_root
         self.code: str | None = None
         self.task: str | None = None
         self.fail_message: str | None = None
@@ -85,8 +83,6 @@ class FakeExecutor:
             encoding="utf-8",
         )
         (self.workdir / "generated.txt").write_text("from sandbox", encoding="utf-8")
-        # Simulate the host-side re-import of the sandbox changeset.
-        await self.agent_fs.files.write("generated.txt", "from sandbox")  # type: ignore[union-attr]
 
         return SandboxResult(
             submission={"summary": "ok", "changed_files": ["generated.txt"], "submitted_at": 1.0},
@@ -111,7 +107,7 @@ async def _setup_orchestrator(
     tmp_path: Path,
     code_provider: StubCodeProvider | None = None,
     executor_factory=None,
-) -> tuple[CairnOrchestrator, object, object, object, Path]:
+) -> tuple[CairnOrchestrator, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
@@ -123,17 +119,15 @@ async def _setup_orchestrator(
     (orch.cairn_home / "workspaces").mkdir(parents=True, exist_ok=True)
     orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
 
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
     bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
     agent_db_path = tmp_path / "agent.db"
     agent_ws = await Fsdantic.open(path=str(agent_db_path))
 
-    orch.stable = stable
     orch.bin = bin_ws
     orch.lifecycle = LifecycleStore(bin_ws)
     await orch.workspace_cache.put(str(agent_db_path), agent_ws)
 
-    return orch, stable, bin_ws, agent_ws, agent_db_path
+    return orch, bin_ws, agent_ws, agent_db_path
 
 
 async def _setup_orchestrator_with_agent_db(
@@ -141,7 +135,7 @@ async def _setup_orchestrator_with_agent_db(
     agent_id: str,
     code_provider: StubCodeProvider | None = None,
     executor_factory=None,
-) -> tuple[CairnOrchestrator, object, object, object, Path]:
+) -> tuple[CairnOrchestrator, object, object, Path]:
     orch = CairnOrchestrator(
         project_root=tmp_path / "project",
         cairn_home=tmp_path / "cairn-home",
@@ -153,23 +147,21 @@ async def _setup_orchestrator_with_agent_db(
     (orch.cairn_home / "workspaces").mkdir(parents=True, exist_ok=True)
     orch.agentfs_dir.mkdir(parents=True, exist_ok=True)
 
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
     bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
     agent_db = orch.agentfs_dir / f"{agent_id}.db"
     agent_ws = await Fsdantic.open(path=str(agent_db))
 
-    orch.stable = stable
     orch.bin = bin_ws
     orch.lifecycle = LifecycleStore(bin_ws)
     await orch.workspace_cache.put(str(agent_db), agent_ws)
 
-    return orch, stable, bin_ws, agent_ws, agent_db
+    return orch, bin_ws, agent_ws, agent_db
 
 
 @pytest.mark.asyncio
 async def test_run_agent_transitions_to_reviewing(tmp_path: Path) -> None:
     provider = StubCodeProvider()
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path, provider)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(tmp_path, provider)
 
     ctx = AgentContext(
         agent_id="agent-success",
@@ -201,16 +193,15 @@ async def test_run_agent_transitions_to_reviewing(tmp_path: Path) -> None:
         assert provider.context is not None
         assert provider.context["agent_id"] == ctx.agent_id
         assert provider.context["workspace"] is agent_ws
-        assert provider.context["stable"] is stable
+        assert provider.context["project_root"] == orch.project_root
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
 async def test_run_agent_sandbox_failure_transitions_to_errored(tmp_path: Path) -> None:
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
         tmp_path,
         executor_factory=fake_executor_factory(fail_message="execution failed"),
     )
@@ -232,12 +223,11 @@ async def test_run_agent_sandbox_failure_transitions_to_errored(tmp_path: Path) 
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
 async def test_run_agent_timeout_transitions_to_errored(tmp_path: Path) -> None:
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
         tmp_path,
         executor_factory=fake_executor_factory(timeout=True),
     )
@@ -259,7 +249,6 @@ async def test_run_agent_timeout_transitions_to_errored(tmp_path: Path) -> None:
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -271,7 +260,7 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(tmp_
         calls.append("called")
         raise AssertionError("executor should not be created for invalid provider code")
 
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator(
         tmp_path,
         provider,
         executor_factory=_factory,
@@ -295,13 +284,12 @@ async def test_run_agent_provider_validation_failure_transitions_to_errored(tmp_
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
 async def test_accept_agent_requires_reviewing_state(tmp_path: Path) -> None:
     agent_id = "agent-accept-invalid"
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
@@ -319,13 +307,12 @@ async def test_accept_agent_requires_reviewing_state(tmp_path: Path) -> None:
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
-async def test_accept_agent_merges_overlay_and_cleans(tmp_path: Path) -> None:
+async def test_accept_agent_applies_changeset_and_cleans(tmp_path: Path) -> None:
     agent_id = "agent-accept"
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
@@ -337,17 +324,31 @@ async def test_accept_agent_merges_overlay_and_cleans(tmp_path: Path) -> None:
     )
     orch.active_agents[ctx.agent_id] = ctx
 
+    # The disposable workspace holds the agent's post-run state; the run
+    # record declares what the executor computed.
+    workdir = orch.cairn_home / "workspaces" / agent_id
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "notes").mkdir(parents=True, exist_ok=True)
+    (workdir / "notes" / "accept.txt").write_text("accepted", encoding="utf-8")
+    result = SandboxResult(
+        submission={"summary": "ok", "changed_files": ["notes/accept.txt"], "submitted_at": 1.0},
+        changes={"written": ["notes/accept.txt"], "deleted": []},
+        log="",
+        base_hashes={},  # notes/accept.txt was absent at run start
+        exit_code=0,
+    )
+    await orch._record_run(ctx, result)
+
     try:
-        await agent_ws.files.write("notes/accept.txt", "accepted")
         await orch.accept_agent(agent_id)
 
-        assert await stable.files.read("notes/accept.txt") == "accepted"
+        # The change lands in the canonical working tree.
+        assert (orch.project_root / "notes" / "accept.txt").read_text(encoding="utf-8") == "accepted"
         assert agent_id not in orch.active_agents
         assert (orch.agentfs_dir / f"bin-{agent_id}.db").exists()
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
@@ -357,7 +358,7 @@ async def test_empty_change_claim_is_flagged_as_mismatch(tmp_path: Path) -> None
     non-empty claim, so an empty claim was never cross-checked against the
     computed changeset."""
     agent_id = "agent-lie"
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
@@ -383,13 +384,12 @@ async def test_empty_change_claim_is_flagged_as_mismatch(tmp_path: Path) -> None
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
 async def test_reject_agent_requires_reviewing_state(tmp_path: Path) -> None:
     agent_id = "agent-reject-invalid"
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
@@ -407,13 +407,12 @@ async def test_reject_agent_requires_reviewing_state(tmp_path: Path) -> None:
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 @pytest.mark.asyncio
-async def test_reject_agent_discards_overlay(tmp_path: Path) -> None:
+async def test_reject_agent_discards_workspace(tmp_path: Path) -> None:
     agent_id = "agent-reject"
-    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+    orch, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
 
     ctx = AgentContext(
         agent_id=agent_id,
@@ -429,13 +428,14 @@ async def test_reject_agent_discards_overlay(tmp_path: Path) -> None:
         await agent_ws.files.write("notes/reject.txt", "no")
         await orch.reject_agent(agent_id)
 
-        assert await stable.files.exists("notes/reject.txt") is False
+        # Reject discards the disposable workspace; the tree is untouched.
+        assert not (orch.cairn_home / "workspaces" / agent_id).exists()
+        assert (orch.project_root / "notes" / "reject.txt").exists() is False
         assert agent_id not in orch.active_agents
         assert (orch.agentfs_dir / f"bin-{agent_id}.db").exists()
     finally:
         await _safe_close(agent_ws)
         await _safe_close(bin_ws)
-        await _safe_close(stable)
 
 
 class _FlakyOrchestratorLifecycle:

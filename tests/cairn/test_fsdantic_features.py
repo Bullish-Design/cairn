@@ -10,8 +10,6 @@ bump:
 - ``KVManager.increment`` atomic counters
 - ``Workspace.serialized()`` read-modify-write primitive
 - ``include_base`` overlay+base union query/search
-- the sandbox re-import path recording tombstones (no bwrap required —
-  exercises ``BwrapExecutor._reimport`` directly against real workspaces)
 """
 
 from __future__ import annotations
@@ -31,8 +29,6 @@ from fsdantic import (
 
 from cairn import open_workspace
 from cairn.core.exceptions import WorkspaceError as CairnWorkspaceError
-from cairn.runtime.sandbox import BwrapExecutor
-from cairn.runtime.settings import ExecutorSettings
 from cairn.runtime.workspace_manager import WorkspaceManager
 
 
@@ -171,96 +167,6 @@ class TestTombstones:
             assert await reopened.overlay.list_tombstones() == ["/gone.txt"]
         finally:
             await reopened.close()
-
-
-# ---------------------------------------------------------------------------
-# Sandbox re-import tombstones (no bwrap needed)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-class TestSandboxReimportTombstones:
-    """Exercises ``BwrapExecutor._reimport`` directly (no bubblewrap) to
-    verify the host-side changeset writes and deletions become overlay files
-    and tombstones respectively."""
-
-    def _executor(self, tmp_path: Path, agent, stable) -> BwrapExecutor:
-        return BwrapExecutor(
-            agent_id="agent-reimport",
-            workdir=tmp_path / "work",
-            agent_fs=agent,
-            stable=stable,
-            settings=ExecutorSettings(),
-        )
-
-    async def test_reimport_writes_and_tombstones(self, tmp_path: Path) -> None:
-        stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-        agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
-        try:
-            await stable.files.write("keep.txt", "keep")
-            await agent.files.write("overlay.txt", "overlay content")
-
-            executor = self._executor(tmp_path, agent, stable)
-            written = [("src/main.py", b"new bytes"), ("new.txt", b"added by sandbox")]
-            deleted = ["overlay.txt", "keep.txt"]
-
-            await executor._reimport(written, deleted)
-
-            # Written files land in the overlay.
-            assert await agent.files.read("src/main.py") == "new bytes"
-            assert await agent.files.read("new.txt") == "added by sandbox"
-            # Deleted paths are removed from the overlay and recorded as
-            # tombstones (normalized with a leading slash) — including the
-            # stable-only file that never existed in the overlay.
-            assert sorted(await agent.overlay.list_tombstones()) == ["/keep.txt", "/overlay.txt"]
-            assert await agent.files.exists("overlay.txt") is False
-            assert await agent.files.exists("keep.txt") is False
-        finally:
-            await agent.close()
-            await stable.close()
-
-    async def test_reimport_tombstones_survive_accept_merge(self, tmp_path: Path) -> None:
-        """The full flow: sandbox re-import tombstones the stable-only file,
-        then the accept merge deletes it from stable."""
-        stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-        agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
-        try:
-            await stable.files.write("src/main.py", "original")
-            await stable.files.write("legacy.txt", "stable only")
-
-            executor = self._executor(tmp_path, agent, stable)
-            written = [("src/main.py", b"rewritten by sandbox")]
-            deleted = ["legacy.txt"]
-            await executor._reimport(written, deleted)
-
-            result = await stable.overlay.merge(agent, strategy=MergeStrategy.OVERWRITE)
-
-            assert result.files_merged == 1
-            assert result.tombstones_applied == 1
-            assert result.errors == []
-            assert await stable.files.read("src/main.py") == "rewritten by sandbox"
-            assert await stable.files.exists("legacy.txt") is False
-        finally:
-            await agent.close()
-            await stable.close()
-
-    async def test_reimport_failure_is_best_effort(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A failing tombstone (e.g. a workspace closed underneath) is
-        logged, not raised — the re-import loop is best-effort."""
-        stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-        agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
-        try:
-            executor = self._executor(tmp_path, agent, stable)
-
-            async def _boom(*_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
-                raise RuntimeError("overlay gone")
-
-            monkeypatch.setattr(agent.overlay, "tombstone", _boom)
-            # Should not raise.
-            await executor._reimport([], ["some.txt"])
-        finally:
-            await agent.close()
-            await stable.close()
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ from cairn.orchestrator.daemon import read_daemon_pid
 from cairn.orchestrator.lifecycle import open_lifecycle_readonly
 from cairn.orchestrator.queue import TaskPriority
 from cairn.orchestrator.signals import write_signal
+from cairn.runtime import repo
 from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import PathsSettings
 
@@ -783,49 +784,50 @@ def preview_changes(
     project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
-    """Preview changes made by an agent."""
+    """Preview changes made by an agent.
+
+    The disposable workspace (``$CAIRN_HOME/workspaces/{agent_id}``) is
+    diffed against the current working tree: added/modified/removed files and
+    directories, permission changes, and symlinks.
+    """
 
     async def _preview():
         path_settings = get_paths_settings(project_root, cairn_home)
-        agentfs_dir = (path_settings.project_root or Path(".")).resolve() / ".agentfs"
+        project_root_path = (path_settings.project_root or Path(".")).resolve()
+        home = (path_settings.cairn_home or Path.home() / ".cairn").expanduser()
+        workdir = home / "workspaces" / agent_id
 
-        agent_db_path = agentfs_dir / f"{agent_id}.db"
-        stable_db_path = agentfs_dir / "stable.db"
-
-        if not agent_db_path.exists():
-            console.print(f"[red]Agent workspace not found: {agent_id}[/red]")
-            raise typer.Exit(1)
-        if not stable_db_path.exists():
-            console.print("[red]Stable workspace not found (stable.db missing)[/red]")
+        if not workdir.is_dir():
+            console.print(f"[red]Workspace not found for agent: {agent_id}[/red]")
             raise typer.Exit(1)
 
-        agent_ws = await Fsdantic.open(path=str(agent_db_path), readonly=True)
-        stable_ws = await Fsdantic.open(path=str(stable_db_path), readonly=True)
+        base = await asyncio.to_thread(repo.capture_manifest, project_root_path)
+        current = await asyncio.to_thread(repo.capture_manifest, workdir)
+        diff = repo.diff_manifests(base, current)
 
-        try:
-            changes = await agent_ws.materialize.diff(stable_ws)
+        rows: list[tuple[str, str]] = []
+        for rel in diff.added:
+            rows.append(("added", rel))
+        for rel in diff.modified:
+            rows.append(("modified", rel))
+        for rel in diff.removed:
+            rows.append(("removed", rel))
+        for rel in diff.mode_changed:
+            rows.append(("mode", rel))
 
-            if not changes:
-                console.print(f"[yellow]No changes found for agent {agent_id}[/yellow]")
-                return
+        if not rows:
+            console.print(f"[yellow]No changes found for agent {agent_id}[/yellow]")
+            return
 
-            table = Table(title=f"Changes by Agent: {agent_id}")
-            table.add_column("Change Type", style="cyan")
-            table.add_column("Path", style="white")
-            table.add_column("Old Size", justify="right")
-            table.add_column("New Size", justify="right")
+        table = Table(title=f"Changes by Agent: {agent_id}")
+        table.add_column("Change Type", style="cyan")
+        table.add_column("Path", style="white")
 
-            for change in changes:
-                old_size = f"{change.old_size:,}" if change.old_size is not None else "-"
-                new_size = f"{change.new_size:,}" if change.new_size is not None else "-"
-                table.add_row(change.change_type, change.path, old_size, new_size)
+        for change_type, rel in rows:
+            table.add_row(change_type, rel)
 
-            console.print(table)
-            console.print(f"\n[green]Total changes: {len(changes)}[/green]")
-
-        finally:
-            await agent_ws.close()
-            await stable_ws.close()
+        console.print(table)
+        console.print(f"\n[green]Total changes: {len(rows)}[/green]")
 
     asyncio.run(_preview())
 
@@ -841,25 +843,20 @@ def preview_file(
 
     async def _preview():
         path_settings = get_paths_settings(project_root, cairn_home)
-        agentfs_dir = (path_settings.project_root or Path(".")).resolve() / ".agentfs"
+        home = (path_settings.cairn_home or Path.home() / ".cairn").expanduser()
+        workdir = home / "workspaces" / agent_id
 
-        agent_db_path = agentfs_dir / f"{agent_id}.db"
-
-        if not agent_db_path.exists():
-            console.print(f"[red]Agent workspace not found: {agent_id}[/red]")
+        if not workdir.is_dir():
+            console.print(f"[red]Workspace not found for agent: {agent_id}[/red]")
             raise typer.Exit(1)
 
-        agent_ws = await Fsdantic.open(path=str(agent_db_path), readonly=True)
-
         try:
-            content = await agent_ws.files.read(file_path, mode="text")
+            content = (workdir / file_path).read_text(encoding="utf-8")
             console.print(Panel(content, title=f"Agent {agent_id}: {file_path}"))
 
         except Exception as e:  # noqa: BLE001 - surface the read error to the user
             console.print(f"[red]Error reading file: {e}[/red]")
             raise typer.Exit(1)
-        finally:
-            await agent_ws.close()
 
     asyncio.run(_preview())
 

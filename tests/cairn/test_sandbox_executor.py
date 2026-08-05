@@ -1,8 +1,12 @@
 """Tests for the bwrap sandbox executor (BwrapExecutor).
 
-Includes unit tests for change tracking / submission parsing (no bwrap needed)
-and integration tests that exercise the real sandbox when bubblewrap is
-available (skipped otherwise).
+Includes unit tests for change tracking / submission parsing / sandbox argv
+(no bwrap needed) and integration tests that exercise the real sandbox when
+bubblewrap is available (skipped otherwise).
+
+The executor runs over a disposable real workspace materialized from the
+canonical working tree: the computed changeset is the authoritative record of
+what the agent did — there is no overlay database and no re-import.
 """
 
 from __future__ import annotations
@@ -15,9 +19,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from fsdantic import Fsdantic, MergeStrategy
 
 from cairn.core.exceptions import TimeoutError as CairnTimeoutError
+from cairn.runtime import repo
 from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError, SandboxResult
 from cairn.runtime.settings import ExecutorSettings
 
@@ -29,37 +33,38 @@ BWRAP = os.environ.get("CAIRN_TEST_BWRAP") or os.environ.get("CAIRN_EXECUTOR_BWR
 # ---------------------------------------------------------------------------
 
 
-def test_snapshot_excludes_scaffolding_and_tracks_files(tmp_path: Path) -> None:
+def test_workspace_capture_excludes_scaffolding_and_tracks_files(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.py").write_text("x", encoding="utf-8")
     (tmp_path / ".cairn").mkdir()
     (tmp_path / ".cairn" / "task.py").write_text("y", encoding="utf-8")
 
-    manifest = BwrapExecutor._snapshot(tmp_path)
+    manifest = repo.capture_manifest(tmp_path)
 
-    assert set(manifest) == {"src/a.py"}
-    assert BwrapExecutor._sha256(tmp_path / "src" / "a.py") in manifest.values()
+    assert set(manifest.entries) == {"src", "src/a.py"}
+    assert manifest.entries["src/a.py"].digest == repo.capture_manifest(tmp_path).files()["src/a.py"].digest
 
 
-def test_diff_snapshot_detects_changes_adds_and_deletes(tmp_path: Path) -> None:
+def test_diff_detects_changes_adds_deletes_and_symlink_kind(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.py").write_text("v1", encoding="utf-8")
     (tmp_path / "src" / "b.py").write_text("b", encoding="utf-8")
 
-    baseline = BwrapExecutor._snapshot(tmp_path)
+    base = repo.capture_manifest(tmp_path)
 
     (tmp_path / "src" / "a.py").write_text("v2", encoding="utf-8")
     (tmp_path / "src" / "b.py").unlink()
     (tmp_path / "new.txt").write_text("new", encoding="utf-8")
     (tmp_path / "evil").symlink_to("/etc/passwd")
 
-    written, deleted = BwrapExecutor._diff_snapshot(tmp_path, baseline)
+    diff = repo.diff_manifests(base, repo.capture_manifest(tmp_path))
 
-    written_paths = {rel for rel, _ in written}
-    assert written_paths == {"src/a.py", "new.txt"}
-    assert (tmp_path / "src" / "a.py").read_bytes() in [content for _, content in written]
-    assert deleted == ["src/b.py"]
-    assert "evil" not in written_paths  # symlinks are never re-imported
+    assert diff.written == ["evil", "new.txt", "src/a.py"]
+    assert diff.removed == ["src/b.py"]
+    # The symlink is recorded as a symlink entry; its *target content* is
+    # never read (no digest), so host-side reads never dereference it.
+    evil = repo.capture_manifest(tmp_path).entries["evil"]
+    assert evil.kind == "symlink" and evil.link_target == "/etc/passwd" and evil.digest is None
 
 
 def test_read_submission_parses_and_validates(tmp_path: Path) -> None:
@@ -90,7 +95,7 @@ def test_build_argv_produces_sandbox_command(tmp_path: Path) -> None:
     workdir.mkdir()
 
     class _Executor(BwrapExecutor):
-        def __init__(self) -> None:  # skip fsdantic workspaces for argv construction
+        def __init__(self) -> None:  # skip materialization setup for argv construction
             self.settings = settings
             self.workdir = workdir
             self.agent_id = "agent-x"
@@ -227,10 +232,14 @@ def _sandbox_settings(tmp_path: Path, **kwargs: object) -> ExecutorSettings:
     return ExecutorSettings(**defaults)
 
 
-async def _open_workspaces(tmp_path: Path) -> tuple[object, object]:
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
-    return stable, agent
+def _project_with(tmp_path: Path, files: dict[str, str]) -> Path:
+    project = tmp_path / "project"
+    project.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        target = project / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    return project
 
 
 @pytest.mark.skipif(
@@ -238,17 +247,14 @@ async def _open_workspaces(tmp_path: Path) -> tuple[object, object]:
     reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
 )
 @pytest.mark.integration
-async def test_real_sandbox_executes_reimports_and_submits(tmp_path: Path) -> None:
-    stable, agent = await _open_workspaces(tmp_path)
-    await stable.files.write("src/main.py", "hello")
-
+async def test_real_sandbox_materializes_runs_and_computes_changeset(tmp_path: Path) -> None:
+    project = _project_with(tmp_path, {"src/main.py": "hello"})
     settings = _sandbox_settings(tmp_path)
     workdir = tmp_path / "work"
     executor = BwrapExecutor(
         agent_id="agent-x",
         workdir=workdir,
-        agent_fs=agent,
-        stable=stable,
+        project_root=project,
         settings=settings,
     )
 
@@ -265,18 +271,19 @@ async def test_real_sandbox_executes_reimports_and_submits(tmp_path: Path) -> No
         assert result.submission["summary"] == "done"
         assert result.submission["changed_files"] == ["src/main.py", "new.txt"]
 
-        # Overlay has the re-imported changes; stable is untouched.
-        assert await agent.files.read("src/main.py") == "hello!"
-        assert await agent.files.read("new.txt") == "new file"
-        assert await stable.files.read("src/main.py") == "hello"
-
-        # The workdir doubles as the preview and holds the scaffolding.
+        # The computed changeset is authoritative and matches the workdir.
+        assert sorted(result.changes["written"]) == ["new.txt", "src/main.py"]
+        assert result.changes["deleted"] == []
         assert (workdir / "src" / "main.py").read_text(encoding="utf-8") == "hello!"
         assert (workdir / ".cairn" / "task.py").read_text(encoding="utf-8") == code
         assert (workdir / ".cairn" / "run.log").exists()
+        # base_hashes covers the touched path that existed at run start.
+        assert result.base_hashes["src/main.py"] == repo.capture_manifest(project).files()["src/main.py"].digest
+
+        # The canonical tree is untouched by the run itself.
+        assert (project / "src" / "main.py").read_text(encoding="utf-8") == "hello"
     finally:
-        await agent.close()
-        await stable.close()
+        pass
 
 
 @pytest.mark.skipif(
@@ -284,46 +291,26 @@ async def test_real_sandbox_executes_reimports_and_submits(tmp_path: Path) -> No
     reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
 )
 @pytest.mark.integration
-async def test_real_sandbox_deletions_tombstoned_in_overlay(tmp_path: Path) -> None:
-    stable, agent = await _open_workspaces(tmp_path)
-    await stable.files.write("keep.txt", "keep")
-    # A pre-existing overlay file is materialized for the sandbox; deleting it
-    # must remove it from the overlay (the merge on accept then drops it).
-    await agent.files.write("overlay.txt", "overlay content")
-
+async def test_real_sandbox_deletions_recorded_in_changeset(tmp_path: Path) -> None:
+    project = _project_with(tmp_path, {"keep.txt": "keep", "overlay.txt": "overlay content"})
     settings = _sandbox_settings(tmp_path)
     executor = BwrapExecutor(
         agent_id="agent-del",
         workdir=tmp_path / "work",
-        agent_fs=agent,
-        stable=stable,
+        project_root=project,
         settings=settings,
     )
 
-    # Delete BOTH an overlay-owned file and a stable-only file: the sandbox
-    # sees them both on the materialized disk, and the re-import records a
-    # tombstone for each (fsdantic >= 0.7.0), so stable-only deletions survive
-    # into the accept merge.
     code = "delete_file('overlay.txt')\ndelete_file('keep.txt')\nsubmit_result(summary='deleted', changed_files=[])\n"
     try:
         result = await executor.run(code=code, task="delete")
         assert sorted(result.changes["deleted"]) == ["keep.txt", "overlay.txt"]
-        assert await agent.files.exists("overlay.txt") is False
-        assert await agent.files.exists("keep.txt") is False
-        # Both deletions are recorded as tombstones (normalized with a
-        # leading slash) in the agent overlay.
-        assert sorted(await agent.overlay.list_tombstones()) == ["/keep.txt", "/overlay.txt"]
-
-        # The accept merge replays the tombstones against stable, so the
-        # stable-only file is deleted there too (fsdantic >= 0.7.0).
-        merge_result = await stable.overlay.merge(agent, strategy=MergeStrategy.OVERWRITE)
-        assert merge_result.tombstones_applied == 2
-        assert merge_result.errors == []
-        assert await stable.files.exists("keep.txt") is False
-        assert await stable.files.exists("overlay.txt") is False
+        assert (tmp_path / "work" / "keep.txt").exists() is False
+        assert (tmp_path / "work" / "overlay.txt").exists() is False
+        # The canonical tree is untouched by the run itself.
+        assert (project / "keep.txt").read_text(encoding="utf-8") == "keep"
     finally:
-        await agent.close()
-        await stable.close()
+        pass
 
 
 @pytest.mark.skipif(
@@ -332,23 +319,18 @@ async def test_real_sandbox_deletions_tombstoned_in_overlay(tmp_path: Path) -> N
 )
 @pytest.mark.integration
 async def test_real_sandbox_timeout_kills_process(tmp_path: Path) -> None:
-    stable, agent = await _open_workspaces(tmp_path)
+    project = _project_with(tmp_path, {})
     settings = _sandbox_settings(tmp_path, max_execution_time=1.0)
     executor = BwrapExecutor(
         agent_id="agent-slow",
         workdir=tmp_path / "work",
-        agent_fs=agent,
-        stable=stable,
+        project_root=project,
         settings=settings,
     )
 
     code = "import time\ntime.sleep(30)\nsubmit_result(summary='late', changed_files=[])\n"
-    try:
-        with pytest.raises(CairnTimeoutError):
-            await executor.run(code=code, task="sleep")
-    finally:
-        await agent.close()
-        await stable.close()
+    with pytest.raises(CairnTimeoutError):
+        await executor.run(code=code, task="sleep")
 
 
 @pytest.mark.skipif(
@@ -357,27 +339,20 @@ async def test_real_sandbox_timeout_kills_process(tmp_path: Path) -> None:
 )
 @pytest.mark.integration
 async def test_real_sandbox_failure_reports_traceback(tmp_path: Path) -> None:
-    stable, agent = await _open_workspaces(tmp_path)
+    project = _project_with(tmp_path, {})
     settings = _sandbox_settings(tmp_path)
     executor = BwrapExecutor(
         agent_id="agent-boom",
         workdir=tmp_path / "work",
-        agent_fs=agent,
-        stable=stable,
+        project_root=project,
         settings=settings,
     )
 
     code = "raise RuntimeError('boom')\n"
-    try:
-        with pytest.raises(SandboxExecutionError) as exc_info:
-            await executor.run(code=code, task="boom")
-        assert "boom" in str(exc_info.value)
-        assert exc_info.value.error_code == "SANDBOX_EXECUTION_FAILED"
-        # Failed runs leave no changes in the overlay.
-        assert await agent.files.exists("boom.txt") is False
-    finally:
-        await agent.close()
-        await stable.close()
+    with pytest.raises(SandboxExecutionError) as exc_info:
+        await executor.run(code=code, task="boom")
+    assert "boom" in str(exc_info.value)
+    assert exc_info.value.error_code == "SANDBOX_EXECUTION_FAILED"
 
 
 @pytest.mark.skipif(
@@ -386,13 +361,12 @@ async def test_real_sandbox_failure_reports_traceback(tmp_path: Path) -> None:
 )
 @pytest.mark.integration
 async def test_real_sandbox_imports_work_stdlib_only(tmp_path: Path) -> None:
-    stable, agent = await _open_workspaces(tmp_path)
+    project = _project_with(tmp_path, {})
     settings = _sandbox_settings(tmp_path)
     executor = BwrapExecutor(
         agent_id="agent-imports",
         workdir=tmp_path / "work",
-        agent_fs=agent,
-        stable=stable,
+        project_root=project,
         settings=settings,
     )
 
@@ -401,12 +375,8 @@ async def test_real_sandbox_imports_work_stdlib_only(tmp_path: Path) -> None:
         "write_file('payload.json', json.dumps({'digest': hashlib.sha256(b'x').hexdigest()}))\n"
         "submit_result(summary='stdlib ok', changed_files=['payload.json'])\n"
     )
-    try:
-        await executor.run(code=code, task="stdlib")
-        assert (
-            await agent.files.read("payload.json")
-            == '{"digest": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"}'
-        )
-    finally:
-        await agent.close()
-        await stable.close()
+    result = await executor.run(code=code, task="stdlib")
+    assert result.changes["written"] == ["payload.json"]
+    assert (tmp_path / "work" / "payload.json").read_text(encoding="utf-8") == (
+        '{"digest": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"}'
+    )

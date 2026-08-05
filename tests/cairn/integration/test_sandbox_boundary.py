@@ -40,39 +40,32 @@ def _executor(tmp_path: Path, **kwargs: object) -> BwrapExecutor:
     return BwrapExecutor(
         agent_id="boundary",
         workdir=tmp_path / "work",
-        agent_fs=None,  # type: ignore[arg-type]  # not used by the boundary harness
-        stable=None,  # type: ignore[arg-type]
+        project_root=tmp_path / "project",
         settings=settings,
     )
 
 
 async def _run_in_sandbox(tmp_path: Path, code: str) -> str:
-    """Materialize an empty workspace, run ``code``, and return out.txt content."""
-    from fsdantic import Fsdantic
-
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
-    try:
-        executor = BwrapExecutor(
-            agent_id="boundary",
-            workdir=tmp_path / "work",
-            agent_fs=agent,
-            stable=stable,
-            settings=ExecutorSettings(
-                bwrap_path=BWRAP,
-                python_path=SANDBOX_PYTHON,
-                max_execution_time=30.0,
-                max_memory_bytes=512 * 1024 * 1024,
-            ),
-        )
-        result = await executor.run(code=code, task="boundary test")
-        written = result.changes["written"]
-        if "out.txt" not in written:
-            return "<missing out.txt>"
-        return (await agent.files.read("out.txt")).strip()
-    finally:
-        await agent.close()
-        await stable.close()
+    """Run ``code`` over an empty disposable workspace and return out.txt."""
+    project = tmp_path / "project"
+    project.mkdir(parents=True, exist_ok=True)
+    workdir = tmp_path / "work"
+    executor = BwrapExecutor(
+        agent_id="boundary",
+        workdir=workdir,
+        project_root=project,
+        settings=ExecutorSettings(
+            bwrap_path=BWRAP,
+            python_path=SANDBOX_PYTHON,
+            max_execution_time=30.0,
+            max_memory_bytes=512 * 1024 * 1024,
+        ),
+    )
+    result = await executor.run(code=code, task="boundary test")
+    written = result.changes["written"]
+    if "out.txt" not in written:
+        return "<missing out.txt>"
+    return (workdir / "out.txt").read_text(encoding="utf-8").strip()
 
 
 BOUNDARY_CASES = [
@@ -170,86 +163,73 @@ def test_argv_passes_resource_limit_env(tmp_path: Path) -> None:
 async def test_fork_bomb_blocked_by_rlimit_nproc(tmp_path: Path) -> None:
     """P3.2: a task forking many processes fails fast instead of hitting the
     machine."""
-    from fsdantic import Fsdantic
-
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
-    try:
-        executor = BwrapExecutor(
-            agent_id="forkbomb",
-            workdir=tmp_path / "work",
-            agent_fs=agent,
-            stable=stable,
-            settings=ExecutorSettings(
-                bwrap_path=BWRAP,
-                python_path=SANDBOX_PYTHON,
-                max_execution_time=30.0,
-                max_memory_bytes=512 * 1024 * 1024,
-                max_processes=32,
-            ),
-        )
-        code = textwrap.dedent("""
-            import os, sys
-            kids = []
-            try:
-                for _ in range(200):
-                    pid = os.fork()
-                    if pid == 0:
-                        os._exit(0)
-                    kids.append(pid)
-                write_file("out.txt", f"forked {len(kids)} ok")
-            except BlockingIOError as exc:
-                write_file("out.txt", f"blocked: {type(exc).__name__}")
-            finally:
-                for pid in kids:
-                    try:
-                        os.waitpid(pid, 0)
-                    except OSError:
-                        pass
-        """)
-        await executor.run(code=code, task="fork bomb")
-        out = (await agent.files.read("out.txt")).strip()
-        assert out.startswith("blocked"), out
-    finally:
-        await agent.close()
-        await stable.close()
+    project = tmp_path / "project"
+    project.mkdir(parents=True, exist_ok=True)
+    workdir = tmp_path / "work"
+    executor = BwrapExecutor(
+        agent_id="forkbomb",
+        workdir=workdir,
+        project_root=project,
+        settings=ExecutorSettings(
+            bwrap_path=BWRAP,
+            python_path=SANDBOX_PYTHON,
+            max_execution_time=30.0,
+            max_memory_bytes=512 * 1024 * 1024,
+            max_processes=32,
+        ),
+    )
+    code = textwrap.dedent("""
+        import os, sys
+        kids = []
+        try:
+            for _ in range(200):
+                pid = os.fork()
+                if pid == 0:
+                    os._exit(0)
+                kids.append(pid)
+            write_file("out.txt", f"forked {len(kids)} ok")
+        except BlockingIOError as exc:
+            write_file("out.txt", f"blocked: {type(exc).__name__}")
+        finally:
+            for pid in kids:
+                try:
+                    os.waitpid(pid, 0)
+                except OSError:
+                    pass
+    """)
+    await executor.run(code=code, task="fork bomb")
+    out = (workdir / "out.txt").read_text(encoding="utf-8").strip()
+    assert out.startswith("blocked"), out
 
 
 @pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
 @pytest.mark.integration
 async def test_workspace_budget_exceeded(tmp_path: Path) -> None:
     """P3.2: total workspace growth beyond the budget fails the run before
-    re-import instead of filling the host disk."""
-    from fsdantic import Fsdantic
-
+    anything is applied instead of filling the host disk."""
     from cairn.core.exceptions import ResourceLimitError
 
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
-    try:
-        executor = BwrapExecutor(
-            agent_id="budget",
-            workdir=tmp_path / "work",
-            agent_fs=agent,
-            stable=stable,
-            settings=ExecutorSettings(
-                bwrap_path=BWRAP,
-                python_path=SANDBOX_PYTHON,
-                max_execution_time=30.0,
-                max_memory_bytes=512 * 1024 * 1024,
-                max_workspace_bytes=1024 * 1024,
-            ),
-        )
-        code = textwrap.dedent("""
-            with open("big.txt", "w") as fh:
-                fh.write("x" * (2 * 1024 * 1024))
-        """)
-        with pytest.raises(ResourceLimitError) as excinfo:
-            await executor.run(code=code, task="budget")
-        assert excinfo.value.error_code == "WORKSPACE_BUDGET_EXCEEDED"
-    finally:
-        await agent.close()
-        await stable.close()
+    project = tmp_path / "project"
+    project.mkdir(parents=True, exist_ok=True)
+    executor = BwrapExecutor(
+        agent_id="budget",
+        workdir=tmp_path / "work",
+        project_root=project,
+        settings=ExecutorSettings(
+            bwrap_path=BWRAP,
+            python_path=SANDBOX_PYTHON,
+            max_execution_time=30.0,
+            max_memory_bytes=512 * 1024 * 1024,
+            max_workspace_bytes=1024 * 1024,
+        ),
+    )
+    code = textwrap.dedent("""
+        with open("big.txt", "w") as fh:
+            fh.write("x" * (2 * 1024 * 1024))
+    """)
+    with pytest.raises(ResourceLimitError) as excinfo:
+        await executor.run(code=code, task="budget")
+    assert excinfo.value.error_code == "WORKSPACE_BUDGET_EXCEEDED"
 
 
 @pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
@@ -264,19 +244,19 @@ async def test_sandbox_tty_unopenable_under_pty(tmp_path: Path) -> None:
     helper.write_text(
         textwrap.dedent("""
             import asyncio, os
-            from fsdantic import Fsdantic
+            from pathlib import Path
             from cairn.runtime.sandbox import BwrapExecutor
             from cairn.runtime.settings import ExecutorSettings
 
             async def main() -> None:
                 os.dup2(int(os.environ["PTY_FD"]), 0)
-                s = await Fsdantic.open(path=os.environ["STABLE"])
-                a = await Fsdantic.open(path=os.environ["AGENT"])
+                project = Path(os.environ["PROJECT"])
+                project.mkdir(parents=True, exist_ok=True)
+                workdir = Path(os.environ["WORK"])
                 e = BwrapExecutor(
                     agent_id="p",
-                    workdir=os.environ["WORK"],
-                    agent_fs=a,
-                    stable=s,
+                    workdir=workdir,
+                    project_root=project,
                     settings=ExecutorSettings(
                         bwrap_path=os.environ["BWRAP"],
                         python_path=os.environ["PYTHON"],
@@ -285,11 +265,9 @@ async def test_sandbox_tty_unopenable_under_pty(tmp_path: Path) -> None:
                     ),
                 )
                 await e.run(code=os.environ["CODE"], task="pty")
-                content = await a.files.read("out.txt")
+                content = (workdir / "out.txt").read_text(encoding="utf-8")
                 with open(os.environ["RESULT"], "w", encoding="utf-8") as fh:
                     fh.write(content)
-                await a.close()
-                await s.close()
 
             asyncio.run(main())
         """),
@@ -314,8 +292,7 @@ async def test_sandbox_tty_unopenable_under_pty(tmp_path: Path) -> None:
         env={
             **os.environ,
             "PTY_FD": str(slave_fd),
-            "STABLE": str(tmp_path / "stable.db"),
-            "AGENT": str(tmp_path / "agent.db"),
+            "PROJECT": str(tmp_path / "project"),
             "WORK": str(tmp_path / "work"),
             "RESULT": str(result_path),
             "BWRAP": BWRAP or "",

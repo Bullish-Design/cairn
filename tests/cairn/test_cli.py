@@ -165,8 +165,6 @@ def test_cli_inspection_commands_open_readonly(tmp_path: Any, monkeypatch: Any) 
         ["files", "read", "my", "file.txt"],
         ["files", "search", "my", "**/*"],
         ["files", "tree", "my"],
-        ["preview", "changes", "agent-1"],
-        ["preview", "file", "agent-1", "overlay.txt"],
     ]
     for cmd in inspection_cmds:
         calls.clear()
@@ -187,21 +185,11 @@ def test_cli_inspection_commands_open_readonly(tmp_path: Any, monkeypatch: Any) 
         assert all(call.get("readonly") is not True for call in calls), f"{cmd} should be read-write: {calls}"
 
 
-def test_cli_preview_changes_requires_stable(tmp_path: Any) -> None:
-    """preview changes must error cleanly when stable.db is missing instead
-    of silently creating it (read-only open of a nonexistent DB)."""
+def test_cli_preview_changes_requires_workspace(tmp_path: Any) -> None:
+    """preview changes must error cleanly when the agent's disposable
+    workspace is missing instead of crashing (no agent db / no stable.db)."""
     project_root = tmp_path / "project"
-    agentfs_dir = project_root / ".agentfs"
-    agentfs_dir.mkdir(parents=True, exist_ok=True)
-
-    from fsdantic import Fsdantic
-
-    async def _seed() -> None:
-        agent = await Fsdantic.open(path=str(agentfs_dir / "agent-1.db"))
-        await agent.files.write("overlay.txt", "overlay")
-        await agent.close()
-
-    asyncio.run(_seed())
+    (project_root / ".agentfs").mkdir(parents=True, exist_ok=True)
 
     result = runner.invoke(
         typer_cli.app,
@@ -209,7 +197,7 @@ def test_cli_preview_changes_requires_stable(tmp_path: Any) -> None:
     )
 
     assert result.exit_code == 1
-    assert "stable.db missing" in result.stdout
+    assert "Workspace not found for agent" in result.stdout
 
 
 def test_status_does_not_start_a_worker(tmp_path: Path, monkeypatch: Any) -> None:

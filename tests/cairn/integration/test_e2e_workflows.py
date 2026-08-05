@@ -15,12 +15,19 @@ from cairn.runtime.settings import OrchestratorSettings
 
 
 class StubExecutor:
-    def __init__(self, filename: str, summary: str, *, should_fail: bool = False, **kwargs: object) -> None:
+    def __init__(
+        self,
+        filename: str,
+        summary: str,
+        *,
+        should_fail: bool = False,
+        **kwargs: object,
+    ) -> None:
         self.filename = filename
         self.summary = summary
         self.should_fail = should_fail
         self.workdir: Path | None = kwargs.get("workdir")  # type: ignore[assignment]
-        self.agent_fs: object | None = kwargs.get("agent_fs")
+        self.project_root: Path | None = kwargs.get("project_root")  # type: ignore[assignment]
 
     async def run(self, *, code: str, task: str) -> SandboxResult:
         _ = code
@@ -36,8 +43,6 @@ class StubExecutor:
             json.dumps({"summary": self.summary, "changed_files": [self.filename], "submitted_at": 1.0}),
             encoding="utf-8",
         )
-        assert self.agent_fs is not None
-        await self.agent_fs.files.write(self.filename, "hello")  # type: ignore[union-attr]
         return SandboxResult(
             submission={"summary": self.summary, "changed_files": [self.filename], "submitted_at": 1.0},
             changes={"written": [self.filename], "deleted": []},
@@ -96,8 +101,8 @@ async def test_complete_agent_lifecycle_accept(tmp_path: Path) -> None:
 
         await orch.accept_agent(agent_id)
 
-        assert orch.stable is not None
-        assert await orch.stable.files.read("hello.py") == "hello"
+        # The accepted work lands in the canonical working tree.
+        assert (orch.project_root / "hello.py").read_text(encoding="utf-8") == "hello"
     finally:
         await orch.shutdown()
 

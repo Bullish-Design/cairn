@@ -9,7 +9,6 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
-from fsdantic import Fsdantic
 
 from cairn.core.exceptions import ResourceLimitError
 from cairn.orchestrator.orchestrator import CairnOrchestrator
@@ -119,8 +118,8 @@ async def test_execution_timeout_marks_agent_errored(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_memory_limit_kills_oversized_task(tmp_path: Path) -> None:
-    stable = await Fsdantic.open(path=str(tmp_path / "stable.db"))
-    agent = await Fsdantic.open(path=str(tmp_path / "agent.db"))
+    project = tmp_path / "project"
+    project.mkdir(parents=True, exist_ok=True)
 
     settings = ExecutorSettings(
         bwrap_path=BWRAP,
@@ -131,16 +130,11 @@ async def test_memory_limit_kills_oversized_task(tmp_path: Path) -> None:
     executor = BwrapExecutor(
         agent_id="agent-memory",
         workdir=tmp_path / "work",
-        agent_fs=agent,
-        stable=stable,
+        project_root=project,
         settings=settings,
     )
 
     # A 300 MB allocation far exceeds the 64 MB RLIMIT_DATA budget.
     code = "data = [0] * (300 * 1024 * 1024 // 8)\nsubmit_result(summary='done', changed_files=[])\n"
-    try:
-        with pytest.raises(SandboxExecutionError):
-            await executor.run(code=code, task="memory")
-    finally:
-        await agent.close()
-        await stable.close()
+    with pytest.raises(SandboxExecutionError):
+        await executor.run(code=code, task="memory")

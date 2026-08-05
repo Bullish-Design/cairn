@@ -23,7 +23,6 @@ from cairn.runtime.agent import AgentContext, AgentState
 from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError, SandboxResult
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
 from cairn.utils.retry import RetryStrategy, with_retry
-from cairn.watcher.watcher import FileWatcher
 
 __all__ = [
     "AgentContext",
@@ -35,7 +34,6 @@ __all__ = [
     "CodeProviderError",
     "ExecutorSettings",
     "FileCodeProvider",
-    "FileWatcher",
     "InlineCodeProvider",
     "OrchestratorSettings",
     "PathsSettings",
