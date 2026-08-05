@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
 RUN_KEY = "run"
+ACCEPTING_KEY_PREFIX = "accepting:"
 
 LIFECYCLE_MIRROR_NAME = "lifecycle.json"
 
@@ -121,12 +122,30 @@ class RunRecord(VersionedKVRecord):
 
 
 class UndoRecord(VersionedKVRecord):
-    """Pre-accept snapshot of the working tree for one agent, enabling `cairn undo`."""
+    """Pre-accept snapshot of the working tree for one agent, enabling `cairn undo`.
+
+    ``applied_digests`` records the post-accept content digests of the
+    written paths so ``undo`` can validate that the accepted state is still
+    in the tree before reverting (it never overwrites later human edits).
+    """
 
     agent_id: str
     restore_paths: list[str] = Field(default_factory=list)
     delete_paths: list[str] = Field(default_factory=list)
     created_at: float = 0.0
+    applied_digests: dict[str, str] = Field(default_factory=dict)
+
+
+class AcceptingRecord(VersionedKVRecord):
+    """Durable transaction journal for an in-flight accept.
+
+    Written before any tree mutation and removed after the apply completes;
+    a leftover record on startup means the process died mid-apply, and
+    recovery rolls the tree back via the undo snapshot (fail-safe).
+    """
+
+    agent_id: str
+    started_at: float = 0.0
 
 
 class LifecycleStore:

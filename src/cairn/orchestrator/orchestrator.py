@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -50,9 +51,11 @@ from cairn.core.exceptions import (
 )
 from cairn.core.types import AgentSummary
 from cairn.orchestrator.lifecycle import (
+    ACCEPTING_KEY_PREFIX,
     LIFECYCLE_MIRROR_NAME,
     RUN_KEY,
     SUBMISSION_KEY,
+    AcceptingRecord,
     LifecycleRecord,
     LifecycleStore,
     RunRecord,
@@ -64,6 +67,7 @@ from cairn.orchestrator.signals import SignalHandler
 from cairn.providers.providers import CodeProvider, FileCodeProvider
 from cairn.runtime import repo
 from cairn.runtime.agent import AgentContext, AgentState
+from cairn.runtime.integration import IntegrationLock
 from cairn.runtime.sandbox import (
     SANDBOX_DIR_NAME,
     BwrapExecutor,
@@ -152,6 +156,7 @@ class CairnOrchestrator:
         self.lifecycle = LifecycleStore(self.bin)
 
         await self.recover_from_lifecycle_store()
+        await self._recover_interrupted_accepts()
         await self._mirror_lifecycle()
         if self.config.start_worker_on_init:
             self._ensure_worker()
@@ -484,11 +489,13 @@ class CairnOrchestrator:
         """Apply an agent's computed changeset to the actual working tree.
 
         The real Git working tree is the canonical source of truth (review
-        §4.2).  Unless ``force``, the base every touched path had at run
-        start is revalidated against the current tree *before* anything is
-        applied; any discrepancy — including a missing run record — fails the
-        gate closed with ``ACCEPT_STALE_BASE``.  Returns ``{"files_written":
-        n, "files_deleted": n}``.
+        §4.2).  The whole mutation runs under one project integration lock:
+        revalidate the base every touched path had at run start (unless
+        ``force``; any discrepancy — including a missing run record — fails
+        the gate closed with ``ACCEPT_STALE_BASE``), write a durable
+        ``ACCEPTING`` journal entry, snapshot pre-apply content for undo, and
+        apply.  A crash mid-apply is rolled back on the next startup from the
+        snapshot.  Returns ``{"files_written": n, "files_deleted": n}``.
         """
         ctx = self._get_agent(agent_id)
         if ctx.state is not AgentState.REVIEWING:
@@ -511,28 +518,144 @@ class CairnOrchestrator:
                 context={"agent_id": agent_id, "reason": "missing run record"},
             )
 
-        if not force:
-            stale = await self._detect_stale_paths(run)
-            if stale:
-                raise WorkspaceMergeError(
-                    format_agent_error(
-                        "The working tree changed since this agent started; accepting would discard those changes",
-                        agent_id=agent_id,
-                        state=ctx.state.value,
-                        stale_paths=stale,
-                    ),
-                    error_code="ACCEPT_STALE_BASE",
-                    context={"agent_id": agent_id, "stale_paths": stale},
-                )
+        async with IntegrationLock(self.agentfs_dir / "integration.lock"):
+            if not force:
+                stale = await self._detect_stale_paths(run)
+                if stale:
+                    raise WorkspaceMergeError(
+                        format_agent_error(
+                            "The working tree changed since this agent started; accepting would discard those changes",
+                            agent_id=agent_id,
+                            state=ctx.state.value,
+                            stale_paths=stale,
+                        ),
+                        error_code="ACCEPT_STALE_BASE",
+                        context={"agent_id": agent_id, "stale_paths": stale},
+                    )
 
-        await self._snapshot_for_undo(ctx, run)
-        stats = await self._apply_to_tree(ctx, run)
+            await self._begin_accept(ctx)
+            try:
+                await self._snapshot_for_undo(ctx, run)
+                stats, applied_digests = await self._apply_to_tree(ctx, run)
+            except BaseException:
+                await self._abort_accept(ctx)
+                raise
+            await self._record_applied_state(ctx, applied_digests)
+            await self._commit_accept(ctx)
 
         ctx.transition(AgentState.ACCEPTED)
         await self._save_lifecycle_record(ctx)
         await self.trash_agent(agent_id)
         await self._record_accept_stats(agent_id, stats)
         return stats
+
+    # ------------------------------------------------------------------
+    # Durable accept transaction journal (review §3.2)
+    # ------------------------------------------------------------------
+
+    async def _begin_accept(self, ctx: AgentContext) -> None:
+        if self.bin is None:
+            return
+        journal = self.bin.kv.repository(prefix=ACCEPTING_KEY_PREFIX, model_type=AcceptingRecord)
+        await journal.save(
+            ctx.agent_id,
+            AcceptingRecord(agent_id=ctx.agent_id, started_at=time.time(), updated_at=time.time()),
+        )
+
+    async def _abort_accept(self, ctx: AgentContext) -> None:
+        if self.bin is None:
+            return
+        journal = self.bin.kv.repository(prefix=ACCEPTING_KEY_PREFIX, model_type=AcceptingRecord)
+        await journal.delete(ctx.agent_id)
+
+    async def _commit_accept(self, ctx: AgentContext) -> None:
+        if self.bin is None:
+            return
+        journal = self.bin.kv.repository(prefix=ACCEPTING_KEY_PREFIX, model_type=AcceptingRecord)
+        await journal.delete(ctx.agent_id)
+
+    async def _record_applied_state(self, ctx: AgentContext, applied_digests: dict[str, str]) -> None:
+        """Store the post-apply digests on the undo record so `cairn undo` can
+        validate that the accepted state is still present before reverting."""
+        if self.bin is None:
+            return
+        repo = self.bin.kv.repository(prefix="", model_type=UndoRecord)
+        undo = await repo.load(f"undo:{ctx.agent_id}")
+        if undo is None:
+            return
+        undo.applied_digests = applied_digests
+        await repo.save(f"undo:{ctx.agent_id}", undo)
+
+    async def _recover_interrupted_accepts(self) -> None:
+        """Roll back any accept that died mid-apply (durable journal recovery).
+
+        The tree is restored to its pre-apply state via the undo snapshot and
+        the agent is failed explicitly; the journal entry is consumed.  This
+        is fail-safe: the snapshot was written before any tree mutation, so
+        a crash before the snapshot leaves nothing to roll back.
+        """
+        if self.bin is None or self.lifecycle is None:
+            return
+        journal = self.bin.kv.repository(prefix=ACCEPTING_KEY_PREFIX, model_type=AcceptingRecord)
+        for record in await journal.list_all():
+            agent_id = record.agent_id
+            logger.warning(
+                "Recovering interrupted accept (journal rollback)",
+                extra={"agent_id": agent_id},
+            )
+            try:
+                await self._rollback_accept(agent_id)
+            except Exception as exc:  # noqa: BLE001 - keep going; surface via the record
+                logger.error(
+                    "Failed to roll back interrupted accept",
+                    extra={"agent_id": agent_id, "error": str(exc)},
+                )
+            with suppress(Exception):
+                await journal.delete(agent_id)
+
+            lifecycle = await self.lifecycle.load(agent_id)
+            if lifecycle is not None and lifecycle.state is AgentState.REVIEWING:
+                lifecycle.error = format_agent_error(
+                    "Accept interrupted by restart; working tree rolled back",
+                    agent_id=agent_id,
+                    state=AgentState.ERRORED.value,
+                )
+                lifecycle.state = AgentState.ERRORED
+                lifecycle.state_changed_at = time.time()
+                with suppress(Exception):
+                    await self.lifecycle.save(lifecycle)
+
+    async def _rollback_accept(self, agent_id: str) -> None:
+        """Restore the tree from the undo snapshot; consume the undo record."""
+        if self.bin is None:
+            return
+        repo = self.bin.kv.repository(prefix="", model_type=UndoRecord)
+        undo = await repo.load(f"undo:{agent_id}")
+        if undo is None:
+            return  # nothing was snapshotted (crash before any mutation)
+        prefix = f"undo/{agent_id}/"
+        restore_contents: list[tuple[str, bytes]] = []
+        for rel in undo.restore_paths:
+            content = await self.bin.files.read(prefix + rel, mode="binary")
+            if not isinstance(content, bytes):
+                content = content.encode("utf-8")
+            restore_contents.append((rel, content))
+        await asyncio.to_thread(self._rollback_to_tree_sync, restore_contents, undo.delete_paths)
+        with suppress(Exception):
+            await repo.delete(f"undo:{agent_id}")
+
+    def _rollback_to_tree_sync(self, restore_contents: list[tuple[str, bytes]], delete_paths: list[str]) -> None:
+        """Blocking tree restore used by journal rollback recovery."""
+        for rel, content in restore_contents:
+            target = self.project_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "wb") as handle:
+                handle.write(content)
+        for rel in delete_paths:
+            target = self.project_root / rel
+            with suppress(OSError):
+                if target.is_symlink() or target.is_file():
+                    target.unlink()
 
     async def _load_run_record(self, agent_fs: Workspace) -> RunRecord | None:
         """Load the agent's run record from its workspace, if present."""
@@ -592,15 +715,18 @@ class CairnOrchestrator:
                 context={"path": rel},
             )
 
-    async def _apply_to_tree(self, ctx: AgentContext, run: RunRecord) -> dict[str, int]:
+    async def _apply_to_tree(self, ctx: AgentContext, run: RunRecord) -> tuple[dict[str, int], dict[str, str]]:
         """Apply the agent's computed changeset from its disposable workspace
         to the actual working tree.
 
         The changeset (``written``/``deleted``/``executable``/``directories``/
         ``mode_changed``) was computed by the executor from the workspace
-        diff — never trusted from the agent's submission prose.  Every host
-        read is no-follow and every path is validated beneath the project
-        root.
+        diff — never trusted from the agent's submission prose.  The apply is
+        strict: any failure raises (the durable ``ACCEPTING`` journal lets
+        recovery roll the tree back), never a silent partial success (review
+        §2.7b).  Returns ``(stats, applied_digests)`` where
+        ``applied_digests`` maps written paths to their post-apply content
+        digests (used by undo to validate the accepted state).
         """
         workdir = self.cairn_home / "workspaces" / ctx.agent_id
         if not workdir.is_dir():
@@ -610,37 +736,43 @@ class CairnOrchestrator:
                 context={"agent_id": ctx.agent_id},
             )
 
-        stats = await asyncio.to_thread(self._apply_to_tree_sync, ctx, run, workdir)
+        stats, applied_digests = await asyncio.to_thread(self._apply_to_tree_sync, ctx, run, workdir)
         logger.info(
             "Applied agent changeset to working tree",
             extra={"agent_id": ctx.agent_id, **stats},
         )
-        return stats
+        return stats, applied_digests
 
-    def _apply_to_tree_sync(self, ctx: AgentContext, run: RunRecord, workdir: Path) -> dict[str, int]:
-        """Blocking apply of the computed changeset onto the working tree."""
+    def _apply_to_tree_sync(
+        self, ctx: AgentContext, run: RunRecord, workdir: Path
+    ) -> tuple[dict[str, int], dict[str, str]]:
+        """Blocking strict apply of the computed changeset onto the tree."""
         written = files_deleted = 0
+        applied_digests: dict[str, str] = {}
+        failures: list[str] = []
         for rel in run.written:
             self._validate_rel(rel)
             source = workdir / rel
             target = self.project_root / rel
             try:
                 st = source.lstat()
-            except OSError:
-                continue  # vanished between diff and apply
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if stat.S_ISLNK(st.st_mode):
-                # Recreate the symlink as-is; never dereference it.
-                if target.is_symlink() or target.exists():
-                    target.unlink()
-                os.symlink(os.readlink(source), target)
-            elif stat.S_ISREG(st.st_mode):
-                with open(source, "rb") as fin, open(target, "wb") as fout:
-                    shutil.copyfileobj(fin, fout, length=1024 * 1024)
-                os.chmod(target, stat.S_IMODE(st.st_mode))
-            else:
-                continue
-            written += 1
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if stat.S_ISLNK(st.st_mode):
+                    # Recreate the symlink as-is; never dereference it.
+                    if target.is_symlink() or target.exists():
+                        target.unlink()
+                    os.symlink(os.readlink(source), target)
+                elif stat.S_ISREG(st.st_mode):
+                    with open(source, "rb") as fin, open(target, "wb") as fout:
+                        shutil.copyfileobj(fin, fout, length=1024 * 1024)
+                    os.chmod(target, stat.S_IMODE(st.st_mode))
+                    applied_digests[rel] = self._sha256_file(target)
+                else:
+                    failures.append(f"{rel}: unsupported workspace entry type")
+                    continue
+                written += 1
+            except OSError as exc:
+                failures.append(f"{rel}: {exc}")
 
         for rel in run.deleted:
             self._validate_rel(rel)
@@ -649,8 +781,8 @@ class CairnOrchestrator:
                 if target.is_symlink() or target.is_file():
                     target.unlink()
                     files_deleted += 1
-            except OSError:
-                continue
+            except OSError as exc:
+                failures.append(f"{rel}: {exc}")
 
         for rel in run.mode_changed:
             self._validate_rel(rel)
@@ -659,8 +791,8 @@ class CairnOrchestrator:
             try:
                 if source.is_file() and not source.is_symlink() and target.is_file() and not target.is_symlink():
                     os.chmod(target, stat.S_IMODE(source.lstat().st_mode))
-            except OSError:
-                continue
+            except OSError as exc:
+                failures.append(f"{rel}: {exc}")
 
         for rel in run.executable:
             self._validate_rel(rel)
@@ -668,17 +800,37 @@ class CairnOrchestrator:
             try:
                 if target.is_file() and not target.is_symlink():
                     target.chmod(target.stat().st_mode | 0o111)
-            except OSError:
-                continue
+            except OSError as exc:
+                failures.append(f"{rel}: {exc}")
 
         for rel in run.directories:
             self._validate_rel(rel)
             try:
                 (self.project_root / rel).mkdir(parents=True, exist_ok=True)
-            except OSError:
-                continue
+            except OSError as exc:
+                failures.append(f"{rel}: {exc}")
 
-        return {"files_written": written, "files_deleted": files_deleted}
+        if failures:
+            raise WorkspaceMergeError(
+                format_agent_error(
+                    "Applying the changeset failed; the tree was left untouched by this accept (rollback via journal recovery)",
+                    agent_id=ctx.agent_id,
+                    state=ctx.state.value,
+                    failures=failures,
+                ),
+                error_code="WORKSPACE_MERGE_FAILED",
+                context={"agent_id": ctx.agent_id, "failures": failures, "failure_count": len(failures)},
+            )
+
+        return {"files_written": written, "files_deleted": files_deleted}, applied_digests
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     async def reject_agent(self, agent_id: str) -> None:
         ctx = self._get_agent(agent_id)
@@ -1141,7 +1293,15 @@ class CairnOrchestrator:
         return snapshots
 
     async def undo_accept(self, agent_id: str) -> dict[str, int]:
-        """Restore the working tree to its pre-accept state for one agent."""
+        """Restore the working tree to its pre-accept state for one agent.
+
+        Runs under the same project integration lock as accept and validates
+        that the accepted state is still present before reverting: if any
+        touched path has been changed since the accept, undo refuses
+        (``UNDO_STALE_BASE``) and keeps the undo record — it never silently
+        overwrites later human edits or reports success for a partial undo
+        (review §3.2).
+        """
         if self.bin is None:
             raise RuntimeError("Bin workspace not initialized")
         repo = self.bin.kv.repository(prefix="", model_type=UndoRecord)
@@ -1151,22 +1311,59 @@ class CairnOrchestrator:
                 f"No undo record for {agent_id} (already expired or never accepted)",
                 error_code="UNDO_NOT_FOUND",
             )
-        prefix = f"undo/{agent_id}/"
-        for rel in undo.restore_paths:
+        for rel in undo.restore_paths + undo.delete_paths:
             self._validate_rel(rel)
 
-        restore_contents: list[tuple[str, bytes]] = []
-        for rel in undo.restore_paths:
-            content = await self.bin.files.read(prefix + rel, mode="binary")
-            if not isinstance(content, bytes):
-                content = content.encode("utf-8")
-            restore_contents.append((rel, content))
+        async with IntegrationLock(self.agentfs_dir / "integration.lock"):
+            drifted = await self._detect_undo_drift(undo)
+            if drifted:
+                raise WorkspaceMergeError(
+                    format_agent_error(
+                        "The tree changed since this accept; undo would discard those changes",
+                        agent_id=agent_id,
+                        state="accepted",
+                        stale_paths=drifted,
+                    ),
+                    error_code="UNDO_STALE_BASE",
+                    context={"agent_id": agent_id, "stale_paths": drifted},
+                )
 
-        restored, deleted = await asyncio.to_thread(
-            self._undo_to_tree_sync, undo.restore_paths, undo.delete_paths, restore_contents
-        )
-        await repo.delete(f"undo:{agent_id}")
-        return {"restored": restored, "deleted": deleted}
+            prefix = f"undo/{agent_id}/"
+            restore_contents: list[tuple[str, bytes]] = []
+            for rel in undo.restore_paths:
+                content = await self.bin.files.read(prefix + rel, mode="binary")
+                if not isinstance(content, bytes):
+                    content = content.encode("utf-8")
+                restore_contents.append((rel, content))
+
+            restored, deleted = await asyncio.to_thread(
+                self._undo_to_tree_sync, undo.restore_paths, undo.delete_paths, restore_contents
+            )
+            await repo.delete(f"undo:{agent_id}")
+            return {"restored": restored, "deleted": deleted}
+
+    async def _detect_undo_drift(self, undo: UndoRecord) -> list[str]:
+        """Paths whose current tree state differs from the accepted state.
+
+        ``applied_digests`` records the post-accept content digests of the
+        written paths; a delete path's accepted state is absence.  Records
+        without applied digests (pre-M5) are treated as unvalidated and pass.
+        """
+        if not undo.applied_digests:
+            return []
+        current = await asyncio.to_thread(repo.capture_manifest, self.project_root)
+        drifted: list[str] = []
+        for rel in undo.restore_paths:
+            expected = undo.applied_digests.get(rel)
+            if expected is None:
+                continue
+            entry = current.entry_for(rel)
+            if entry is None or entry.kind != "file" or entry.digest != expected:
+                drifted.append(rel)
+        for rel in undo.delete_paths:
+            if current.entry_for(rel) is not None:
+                drifted.append(rel)
+        return sorted(set(drifted))
 
     def _undo_to_tree_sync(
         self,

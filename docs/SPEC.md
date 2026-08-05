@@ -241,11 +241,24 @@ The computed changeset from the run record is applied to the actual working
 **tree** — not a database: written paths are copied from the disposable
 workspace (symlinks recreated as symlinks, modes preserved), deleted paths are
 removed, `mode_changed` permissions are applied, executable bits and empty
-directories are recreated.  Before anything is applied the base is revalidated
-against a fresh manifest of the tree; any touched path that changed (including
-absent-at-start paths that now exist, and a missing run record) fails the gate
-closed with `ACCEPT_STALE_BASE`.  Pre-apply content of every touched path is
-snapshotted into `bin.db` under `undo/{agent_id}/` for `cairn undo`.
+directories are recreated.  The whole mutation runs under one per-project
+integration lock (``flock`` on ``.agentfs/integration.lock``):
+
+1. revalidate every touched base entry against a fresh manifest of the tree
+   (any discrepancy — including a missing run record — fails the gate closed
+   with `ACCEPT_STALE_BASE`);
+2. write a durable `ACCEPTING` journal entry in `bin.db`;
+3. snapshot pre-apply content of every touched path into `bin.db` under
+   `undo/{agent_id}/` (with post-apply digests recorded for undo validation);
+4. apply strictly — any failure raises `WORKSPACE_MERGE_FAILED` and the
+   journal is aborted; a process crash mid-apply is rolled back from the
+   snapshot on the next startup (the tree never stays half-applied).
+
+`cairn undo <agent-id>` runs under the same lock and first validates that the
+accepted state is still present (via the post-apply digests); if the tree was
+changed since the accept it refuses with `UNDO_STALE_BASE` and keeps the undo
+record — it never overwrites later human edits and never reports success for
+a partial undo.
 
 ### Sandbox runtime configuration (NixOS/devenv)
 

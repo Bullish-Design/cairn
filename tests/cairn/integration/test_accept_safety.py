@@ -17,7 +17,7 @@ import pytest
 from fsdantic import Fsdantic
 
 from cairn.core.exceptions import AgentNotFoundError, WorkspaceMergeError
-from cairn.orchestrator.lifecycle import RUN_KEY, LifecycleStore, RunRecord
+from cairn.orchestrator.lifecycle import RUN_KEY, LifecycleStore, RunRecord, UndoRecord
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
 from cairn.runtime.agent import AgentContext, AgentState
@@ -65,7 +65,7 @@ async def _setup_reviewing_agent(
     orch.agentfs_dir.mkdir(parents=True)
     (orch.cairn_home / "workspaces").mkdir(parents=True)
 
-    bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
+    bin_ws = await Fsdantic.open(path=str(orch.agentfs_dir / "bin.db"))
     orch.bin = bin_ws
     orch.lifecycle = LifecycleStore(bin_ws)
 
@@ -209,7 +209,7 @@ async def test_undo_missing_record_raises(tmp_path: Path) -> None:
     """P2.3: undo for an agent with no snapshot raises UNDO_NOT_FOUND."""
     orch = CairnOrchestrator(project_root=tmp_path / "project", cairn_home=tmp_path / "home")
     orch.agentfs_dir.mkdir(parents=True)
-    bin_ws = await Fsdantic.open(path=str(tmp_path / "bin.db"))
+    bin_ws = await Fsdantic.open(path=str(orch.agentfs_dir / "bin.db"))
     orch.bin = bin_ws
     try:
         with pytest.raises(AgentNotFoundError):
@@ -409,5 +409,86 @@ async def test_accept_applies_executable_bit_change(tmp_path: Path) -> None:
 
         assert stats == {"files_written": 0, "files_deleted": 0}
         assert (project / "run.sh").stat().st_mode & 0o111
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
+async def test_undo_refused_when_tree_changed_after_accept(tmp_path: Path) -> None:
+    """Review §3.2: undo must not silently overwrite later human edits.  It
+    validates that the accepted state is still present and refuses
+    (UNDO_STALE_BASE), keeping the undo record for later resolution."""
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"a.txt": "v1\n"},
+        agent_files={"a.txt": "agent version\n"},
+        written=["a.txt"],
+    )
+    try:
+        await orch.accept_agent(agent_id)
+        assert (project / "a.txt").read_text(encoding="utf-8") == "agent version\n"
+
+        # A human edits the accepted file afterwards.
+        (project / "a.txt").write_text("human after accept\n", encoding="utf-8")
+
+        from cairn.core.exceptions import WorkspaceMergeError
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.undo_accept(agent_id)
+        assert excinfo.value.error_code == "UNDO_STALE_BASE"
+        assert "a.txt" in excinfo.value.context.get("stale_paths", [])
+
+        # The undo record survives the refusal; the human edit is untouched.
+        assert (project / "a.txt").read_text(encoding="utf-8") == "human after accept\n"
+        undo_repo = bin_ws.kv.repository(prefix="", model_type=UndoRecord)
+        assert await undo_repo.load(f"undo:{agent_id}") is not None
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
+async def test_interrupted_accept_rolls_back_on_restart(tmp_path: Path) -> None:
+    """Review §3.2: a leftover ACCEPTING journal entry (process died mid-apply)
+    rolls the tree back from the undo snapshot and fails the agent on the next
+    initialize — the tree never stays half-applied."""
+    from cairn.orchestrator.lifecycle import ACCEPTING_KEY_PREFIX, AcceptingRecord
+
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"a.txt": "v1\n"},
+        agent_files={"a.txt": "agent version\n"},
+        written=["a.txt"],
+    )
+    try:
+        # The agent has a canonical lifecycle record in REVIEWING (as after a
+        # real run).
+        ctx = orch.active_agents[agent_id]
+        await orch._save_lifecycle_record(ctx)
+
+        # Simulate: the accept wrote the journal, snapshotted, applied one
+        # file, and then the process died before committing.
+        await orch._begin_accept(ctx)
+        run = await orch._load_run_record(ctx.agent_fs)
+        await orch._snapshot_for_undo(ctx, run)
+        (project / "a.txt").write_text("agent version\n", encoding="utf-8")
+
+        # The journal entry survives (as on a crash).
+        journal = bin_ws.kv.repository(prefix=ACCEPTING_KEY_PREFIX, model_type=AcceptingRecord)
+        assert await journal.load(agent_id) is not None
+
+        # A fresh orchestrator over the same project/home recovers on init.
+        orch2 = CairnOrchestrator(project_root=orch.project_root, cairn_home=orch.cairn_home)
+        await orch2.initialize()
+        try:
+            # The tree is rolled back to its pre-apply state.
+            assert (project / "a.txt").read_text(encoding="utf-8") == "v1\n"
+            # The journal entry is consumed.
+            assert await journal.load(agent_id) is None
+            # The agent is marked ERRORED, not stuck in REVIEWING.
+            record = await orch2.lifecycle.load(agent_id)
+            assert record is not None and record.state is AgentState.ERRORED
+            assert "rolled back" in (record.error or "")
+        finally:
+            await orch2.shutdown()
     finally:
         await _safe_close(bin_ws)
