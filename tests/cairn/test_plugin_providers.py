@@ -13,22 +13,26 @@ for rel_path in (
 ):
     sys.path.append(str(ROOT / rel_path))
 
+from typing import Self
+
 from cairn_git.cache import GitReference
 from cairn_git.provider import GitCodeProvider
 from cairn_llm.provider import LLMCodeProvider
 from cairn_registry.provider import RegistryCodeProvider
 
+from cairn.core.exceptions import CodeProviderError
+
 
 @pytest.mark.asyncio
-async def test_llm_provider_generates_prompt() -> None:
+async def test_llm_provider_output_is_compilable_python() -> None:
+    """Review §2.2: get_code must return executable Python, not the prompt
+    template, and validate_code must enforce real syntax validity."""
     provider = LLMCodeProvider()
     code = await provider.get_code("Add docstrings", {})
 
-    assert "from grail" not in code
-    assert "@external" not in code
-    assert "submit_result(" in code
-    assert "Task: Add docstrings" in code
-    assert await provider.validate_code(code) == (True, None)
+    compile(code, "task.py", "exec")  # must not raise SyntaxError
+    valid, reason = await provider.validate_code(code)
+    assert valid is True, reason
 
 
 @pytest.mark.asyncio
@@ -72,3 +76,83 @@ async def test_registry_provider_fetches_code(monkeypatch: pytest.MonkeyPatch) -
 
     assert code == "registry code"
     assert calls == [("https://registry.example.com", "scripts/format.py")]
+
+
+@pytest.mark.asyncio
+async def test_git_provider_refuses_traversal_fragments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Review §3.5: the file fragment must be confined beneath the cloned
+    repo; ``../`` fragments must not read host files."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "ok.py").write_text("x = 1", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("HOST_FILE", encoding="utf-8")
+
+    def fake_parse(_: str) -> GitReference:
+        return GitReference(repo_url="https://example.com/repo", file_path="../outside.py", ref=None)
+
+    def fake_cache(_: GitReference, __: Path) -> Path:
+        return repo_dir
+
+    monkeypatch.setattr("cairn_git.provider.parse_git_reference", fake_parse)
+    monkeypatch.setattr("cairn_git.provider.ensure_repo_cache", fake_cache)
+
+    provider = GitCodeProvider(cache_dir=tmp_path / "cache")
+    with pytest.raises(CodeProviderError):
+        await provider.get_code("git://example.com/repo#../outside.py", {})
+
+
+@pytest.mark.asyncio
+async def test_git_clone_runs_with_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review §3.5: git subprocesses must run with a timeout so a hung remote
+    cannot block the async provider forever."""
+    import cairn_git.cache as git_cache
+
+    captured: dict[str, object] = {}
+
+    def fake_run(args: list[str], **kwargs: object) -> None:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(git_cache.subprocess, "run", fake_run)
+
+    git_cache._run_git(["clone", "--depth", "1", "https://example.com/repo", "/tmp/repo"])
+
+    assert captured["args"][0] == "git"
+    assert captured["kwargs"].get("timeout") is not None
+
+
+@pytest.mark.asyncio
+async def test_registry_client_fetch_has_timeout_and_size_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review §3.5: registry fetches must carry a timeout and must not read
+    unbounded response bodies into orchestrator memory."""
+    import cairn_registry.client as reg_client
+
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self, *args: object, **kwargs: object) -> bytes:
+            return self._payload
+
+    class FakeOpener:
+        def __call__(self, url: str, *args: object, **kwargs: object) -> FakeResponse:
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return FakeResponse(b"x" * (8 * 1024 * 1024))  # 8 MB, over any sane cap
+
+    monkeypatch.setattr(reg_client.urllib.request, "urlopen", FakeOpener())
+
+    client = reg_client.RegistryClient(base_url="https://registry.example.com")
+    with pytest.raises(CodeProviderError):
+        client.fetch_code("scripts/format.py")
+
+    assert captured["kwargs"].get("timeout") is not None

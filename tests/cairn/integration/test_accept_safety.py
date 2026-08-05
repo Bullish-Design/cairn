@@ -9,7 +9,7 @@ import pytest
 from fsdantic import Fsdantic
 
 from cairn.core.exceptions import WorkspaceMergeError
-from cairn.orchestrator.lifecycle import LifecycleStore
+from cairn.orchestrator.lifecycle import RUN_KEY, LifecycleStore, RunRecord
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
 from cairn.runtime.agent import AgentContext, AgentState
@@ -166,3 +166,64 @@ async def test_undo_missing_record_raises(tmp_path: Path) -> None:
             await orch.undo_accept("agent-never-accepted")
     finally:
         await _safe_close(bin_ws, stable)
+
+
+@pytest.mark.integration
+async def test_accept_refused_when_base_path_deleted(tmp_path: Path) -> None:
+    """Review §2.6: a human deleting a file the agent rewrote must fail the
+    gate closed (delete/write collision), not silently resurrect the file."""
+    orch, agent_id, stable, bin_ws = await _setup_reviewing_agent(tmp_path, stable_content=b"v1\n")
+    try:
+        # Human deletes the file while the agent is in review.
+        await stable.files.remove("a.txt")
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.accept_agent(agent_id)
+        assert excinfo.value.error_code == "ACCEPT_STALE_BASE"
+        assert "a.txt" in excinfo.value.context.get("stale_paths", [])
+
+        # The refusal must leave stable untouched.
+        assert await stable.files.exists("a.txt") is False
+    finally:
+        await _safe_close(stable, bin_ws)
+
+
+@pytest.mark.integration
+async def test_accept_refused_when_path_created_after_agent(tmp_path: Path) -> None:
+    """Review §2.6: a human creating a path the agent also created must fail
+    the gate closed (create/create collision), not overwrite the human's file."""
+    orch, agent_id, stable, bin_ws = await _setup_reviewing_agent(tmp_path, stable_content=b"v1\n")
+    try:
+        ctx = orch.active_agents[agent_id]
+        # Agent created new.txt in the sandbox (absent at run start).
+        await ctx.agent_fs.files.write("new.txt", b"agent created\n", mode="binary")
+        # Human creates the same path while the agent was running.
+        await stable.files.write("new.txt", b"human created\n", mode="binary")
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.accept_agent(agent_id)
+        assert excinfo.value.error_code == "ACCEPT_STALE_BASE"
+        assert "new.txt" in excinfo.value.context.get("stale_paths", [])
+
+        # The refusal must leave the human's file untouched.
+        assert await stable.files.read("new.txt", mode="binary") == b"human created\n"
+    finally:
+        await _safe_close(stable, bin_ws)
+
+
+@pytest.mark.integration
+async def test_accept_fails_closed_when_run_record_missing(tmp_path: Path) -> None:
+    """Review §2.6: acceptance without a run record must fail closed.  The run
+    record is the only ground truth for what the agent touched; without it the
+    gate cannot revalidate the base and must refuse rather than merge blindly."""
+    orch, agent_id, stable, bin_ws = await _setup_reviewing_agent(tmp_path, stable_content=b"v1\n")
+    try:
+        ctx = orch.active_agents[agent_id]
+        repo = ctx.agent_fs.kv.repository(prefix="", model_type=RunRecord)
+        await repo.delete(RUN_KEY)
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.accept_agent(agent_id)
+        assert excinfo.value.error_code == "ACCEPT_STALE_BASE"
+    finally:
+        await _safe_close(stable, bin_ws)

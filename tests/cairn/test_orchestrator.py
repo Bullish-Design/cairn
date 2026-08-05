@@ -351,6 +351,42 @@ async def test_accept_agent_merges_overlay_and_cleans(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_change_claim_is_flagged_as_mismatch(tmp_path: Path) -> None:
+    """Review §2.7a: an agent claiming ``changed_files=[]`` while actually
+    changing files must be flagged.  The mismatch check previously gated on a
+    non-empty claim, so an empty claim was never cross-checked against the
+    computed changeset."""
+    agent_id = "agent-lie"
+    orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)
+
+    ctx = AgentContext(
+        agent_id=agent_id,
+        task="lie",
+        priority=TaskPriority.NORMAL,
+        state=AgentState.EXECUTING,
+        agent_db_path=agent_db_path,
+        agent_fs=agent_ws,
+    )
+    orch.active_agents[ctx.agent_id] = ctx
+
+    try:
+        result = SandboxResult(
+            submission={"summary": "I did nothing", "changed_files": [], "submitted_at": 1.0},
+            changes={"written": ["x.py", "y.py"], "deleted": []},
+            log="",
+            base_hashes={},
+            exit_code=0,
+        )
+        await orch._record_run(ctx, result)
+
+        assert ctx.claim_mismatch is True
+    finally:
+        await _safe_close(agent_ws)
+        await _safe_close(bin_ws)
+        await _safe_close(stable)
+
+
+@pytest.mark.asyncio
 async def test_reject_agent_requires_reviewing_state(tmp_path: Path) -> None:
     agent_id = "agent-reject-invalid"
     orch, stable, bin_ws, agent_ws, agent_db_path = await _setup_orchestrator_with_agent_db(tmp_path, agent_id)

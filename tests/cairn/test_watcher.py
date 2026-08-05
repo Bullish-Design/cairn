@@ -103,3 +103,71 @@ async def test_watcher_skips_oversized_file(tmp_path: Path, monkeypatch: pytest.
         assert await workspace.files.read("small.txt") == "ok"
     finally:
         await workspace.close()
+
+
+def test_project_filter_honors_gitignore(tmp_path: Path) -> None:
+    """Review §2.4a: gitignored files (e.g. .env, id_rsa, secrets.yaml) must
+    be excluded from the source set."""
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+    (project_root / ".gitignore").write_text(".env\nid_rsa\nsecrets.yaml\n", encoding="utf-8")
+    for name in (".env", "id_rsa", "secrets.yaml", "ok.txt"):
+        (project_root / name).write_text("SECRET", encoding="utf-8")
+
+    f = ProjectFilter(project_root)
+
+    assert f.allows(project_root / ".env") is False
+    assert f.allows(project_root / "id_rsa") is False
+    assert f.allows(project_root / "secrets.yaml") is False
+    # Non-ignored files are still in scope.
+    assert f.allows(project_root / "ok.txt") is True
+
+
+@pytest.mark.asyncio
+async def test_handle_change_never_follows_repo_symlinks(tmp_path: Path) -> None:
+    """Review §2.4b: the live watcher must never ingest content through a repo
+    symlink that points outside the project."""
+    workspace = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+    secret = tmp_path / "host_secret.txt"
+    secret.write_text("HOST_SECRET", encoding="utf-8")
+
+    try:
+        watcher = FileWatcher(project_root=project_root, workspace=workspace)
+        link = project_root / "leak.txt"
+        link.symlink_to(secret)
+
+        await watcher.handle_change(Change.added, link)
+
+        assert await workspace.files.exists("leak.txt") is False
+    finally:
+        await workspace.close()
+
+
+@pytest.mark.asyncio
+async def test_initial_sync_reconciles_offline_deletions(tmp_path: Path) -> None:
+    """Review §2.5: startup sync must reconcile, not just add.  A file deleted
+    from disk while Cairn was offline must not survive in stable."""
+    workspace = await Fsdantic.open(path=str(tmp_path / "stable.db"))
+    project_root = tmp_path / "project"
+    project_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        watcher = FileWatcher(project_root=project_root, workspace=workspace)
+
+        (project_root / "keep.txt").write_text("keep", encoding="utf-8")
+        (project_root / "gone.txt").write_text("gone", encoding="utf-8")
+        # Simulate a previous run: both files were already in stable.
+        await workspace.files.write("keep.txt", "keep")
+        await workspace.files.write("gone.txt", "gone")
+
+        # While Cairn was offline, gone.txt was deleted from disk.
+        (project_root / "gone.txt").unlink()
+
+        await watcher.initial_sync()
+
+        assert await workspace.files.exists("gone.txt") is False
+        assert await workspace.files.exists("keep.txt") is True
+    finally:
+        await workspace.close()
