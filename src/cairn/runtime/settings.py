@@ -29,7 +29,6 @@ class OrchestratorSettings(BaseSettings):
     max_concurrent_agents: int = 5
     max_queue_size: int = Field(default=DEFAULT_MAX_QUEUE_SIZE, description="Maximum queued tasks")
     workspace_cache_size: int = Field(default=MAX_WORKSPACE_CACHE_SIZE, description="Workspace cache size")
-    enable_signal_polling: bool = True
     extra_ignore_dirs: list[str] = Field(
         default_factory=list, description="Additional directory names to exclude from the repository snapshot"
     )

@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fsdantic import VersionedKVRecord, Workspace
 from fsdantic.exceptions import KVConflictError
@@ -36,6 +36,7 @@ AGENT_KEY_PREFIX = "agent:"
 SUBMISSION_KEY = "submission"
 RUN_KEY = "run"
 ACCEPTING_KEY_PREFIX = "accepting:"
+COMMAND_KEY_PREFIX = "cmd:"
 
 LIFECYCLE_MIRROR_NAME = "lifecycle.json"
 
@@ -146,6 +147,24 @@ class AcceptingRecord(VersionedKVRecord):
 
     agent_id: str
     started_at: float = 0.0
+
+
+class CommandRecord(VersionedKVRecord):
+    """Idempotency + result record for one transport command (review §3.1).
+
+    Keyed by the client-generated ``command_id``: a retried request with the
+    same id returns the recorded result instead of re-executing; a "pending"
+    record on startup was in flight when the daemon died and is failed by
+    recovery.
+    """
+
+    command_id: str
+    command_type: str
+    status: Literal["pending", "done", "failed"] = "pending"
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    created_at: float = 0.0
+    completed_at: float | None = None
 
 
 class LifecycleStore:

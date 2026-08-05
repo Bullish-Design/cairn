@@ -12,21 +12,24 @@ import asyncio
 import json
 import signal
 import sys
-import time
 from contextlib import suppress
 from pathlib import Path
 
 from cairn.cli.commands import (
     CairnCommand,
+    CommandType,
     parse_command_payload,
 )
 from cairn.core.exceptions import AgentNotFoundError
-from cairn.core.exceptions import TimeoutError as CairnTimeoutError
-from cairn.orchestrator.daemon import daemon_pidfile, read_daemon_pid
-from cairn.orchestrator.lifecycle import LifecycleRecord, open_lifecycle_readonly
+from cairn.orchestrator.daemon import (
+    read_daemon_pid,
+    remove_daemon_pid,
+    write_daemon_pid,
+)
+from cairn.orchestrator.lifecycle import open_lifecycle_readonly
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import TaskPriority
-from cairn.orchestrator.signals import write_signal
+from cairn.orchestrator.transport import daemon_running, send_request
 from cairn.providers.providers import CodeProvider, resolve_code_provider
 from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings, PathsSettings
@@ -47,11 +50,6 @@ def _resolve_settings(args: argparse.Namespace) -> tuple[PathsSettings, Orchestr
                 args.max_concurrent_agents
                 if args.max_concurrent_agents is not None
                 else orchestrator_settings.max_concurrent_agents
-            ),
-            enable_signal_polling=(
-                args.enable_signal_polling
-                if args.enable_signal_polling is not None
-                else orchestrator_settings.enable_signal_polling
             ),
         ),
         ExecutorSettings(
@@ -88,39 +86,46 @@ async def _run_up(args: argparse.Namespace) -> int:
     path_settings, orchestrator_settings, executor_settings = _resolve_settings(args)
     cairn_home = _resolve_cairn_home(args)
     provider = _resolve_provider(args)
-    with daemon_pidfile(cairn_home):
-        orchestrator = CairnOrchestrator(
-            project_root=path_settings.project_root or ".",
-            cairn_home=cairn_home,
-            config=orchestrator_settings,
-            executor_settings=executor_settings,
-            code_provider=provider,
+    orchestrator = CairnOrchestrator(
+        project_root=path_settings.project_root or ".",
+        cairn_home=cairn_home,
+        config=orchestrator_settings,
+        executor_settings=executor_settings,
+        code_provider=provider,
+    )
+    try:
+        await orchestrator.initialize()  # binds the control socket (ownership)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    write_daemon_pid(cairn_home)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    runner = asyncio.create_task(orchestrator.run())
+    try:
+        await asyncio.wait(
+            [runner, asyncio.create_task(stop.wait())],
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        await orchestrator.initialize()
-
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set)
-
-        runner = asyncio.create_task(orchestrator.run())
-        try:
-            await asyncio.wait(
-                [runner, asyncio.create_task(stop.wait())],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        finally:
-            runner.cancel()
-            with suppress(asyncio.CancelledError):
-                await runner
-            await orchestrator.shutdown()
+    finally:
+        runner.cancel()
+        with suppress(asyncio.CancelledError):
+            await runner
+        await orchestrator.shutdown()
+        remove_daemon_pid(cairn_home)
     return 0
 
 
 async def _dispatch_mutation(args: argparse.Namespace, command: CairnCommand) -> int:
+    """Send a mutating command over the daemon transport and await its
+    result synchronously (review §3.1 — no signal files, no stale polls)."""
     cairn_home = _resolve_cairn_home(args)
 
-    if read_daemon_pid(cairn_home) is None:
+    if not daemon_running(cairn_home):
         print(
             "No Cairn daemon is running.\n"
             "  Start one with:  cairn up\n"
@@ -129,8 +134,25 @@ async def _dispatch_mutation(args: argparse.Namespace, command: CairnCommand) ->
         )
         return 2
 
-    path = write_signal(cairn_home, command)
-    print(f"submitted {command.type.value} ({path.name})")
+    try:
+        response = await send_request(cairn_home, command, timeout=getattr(args, "timeout", 60.0))
+    except (ConnectionError, TimeoutError, OSError) as exc:
+        print(f"{command.type.value} failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not response.ok:
+        print(f"{command.type.value} failed: {response.error}", file=sys.stderr)
+        return 1
+
+    result = response.result or {}
+    if command.type in (CommandType.ACCEPT, CommandType.UNDO):
+        print(
+            f"{command.type.value} {args.agent_id}: "
+            f"{result.get('files_written', result.get('restored', 0))} file(s) written, "
+            f"{result.get('files_deleted', result.get('deleted', 0))} deletion(s) applied"
+        )
+    else:
+        print(f"submitted {command.type.value}")
     return 0
 
 
@@ -196,55 +218,9 @@ async def _run_status(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _poll_until(
-    args: argparse.Namespace,
-    agent_id: str,
-    states: set[AgentState],
-    *,
-    timeout: float,
-) -> LifecycleRecord:
-    """Poll the read-only lifecycle store until the agent settles."""
-    cairn_home = _resolve_cairn_home(args)
-    deadline = time.monotonic() + timeout
-    async with open_lifecycle_readonly(cairn_home) as store:
-        while True:
-            record = await store.load(agent_id)
-            if record is not None and record.state in states:
-                return record
-            if time.monotonic() >= deadline:
-                raise CairnTimeoutError(
-                    f"Agent {agent_id} did not reach {[s.value for s in states]} within {timeout}s",
-                    error_code="AGENT_WAIT_TIMEOUT",
-                    context={"agent_id": agent_id, "timeout_seconds": timeout},
-                )
-            await asyncio.sleep(0.1)
-
-
 async def _run_accept(args: argparse.Namespace) -> int:
     command = parse_command_payload("accept", {"agent_id": args.agent_id, "force": args.force})
-    rc = await _dispatch_mutation(args, command)
-    if rc != 0:
-        return rc
-    record = await _poll_until(args, args.agent_id, {AgentState.ACCEPTED, AgentState.ERRORED}, timeout=args.timeout)
-    if record.state is AgentState.ERRORED:
-        print(f"accept failed: {record.error}", file=sys.stderr)
-        return 1
-    # accept_stats land in the mirror a moment after the state flips (the
-    # daemon writes the record, then the stats, then the mirror); give the
-    # stats a short grace window before reporting.
-    cairn_home = _resolve_cairn_home(args)
-    grace_deadline = time.monotonic() + 2.0
-    while record.accept_stats is None and time.monotonic() < grace_deadline:
-        await asyncio.sleep(0.1)
-        async with open_lifecycle_readonly(cairn_home) as store:
-            record = await store.load(args.agent_id) or record
-    stats = record.accept_stats or {}
-    print(
-        f"accepted {args.agent_id}: "
-        f"{stats.get('files_merged', 0)} file(s) merged, "
-        f"{stats.get('tombstones_applied', 0)} deletion(s) applied"
-    )
-    return 0
+    return await _dispatch_mutation(args, command)
 
 
 async def _run_logs(args: argparse.Namespace) -> int:
@@ -275,15 +251,7 @@ async def _run_undo(args: argparse.Namespace) -> int:
 
 async def _run_reject(args: argparse.Namespace) -> int:
     command = parse_command_payload("reject", {"agent_id": args.agent_id})
-    rc = await _dispatch_mutation(args, command)
-    if rc != 0:
-        return rc
-    record = await _poll_until(args, args.agent_id, {AgentState.REJECTED, AgentState.ERRORED}, timeout=args.timeout)
-    if record.state is AgentState.ERRORED:
-        print(f"reject failed: {record.error}", file=sys.stderr)
-        return 1
-    print(f"rejected {args.agent_id}")
-    return 0
+    return await _dispatch_mutation(args, command)
 
 
 async def _run_inline(args: argparse.Namespace) -> int:
@@ -317,7 +285,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-root", default=None)
     parser.add_argument("--cairn-home", default=None)
     parser.add_argument("--max-concurrent-agents", type=int, default=None)
-    parser.add_argument("--enable-signal-polling", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--max-execution-time", type=float, default=None)
     parser.add_argument("--max-memory-bytes", type=int, default=None)
     parser.add_argument("--max-recursion-depth", type=int, default=None)

@@ -5,7 +5,6 @@ from importlib.metadata import PackageNotFoundError, version
 from cairn.core.exceptions import CodeProviderError
 from cairn.orchestrator.orchestrator import CairnOrchestrator
 from cairn.orchestrator.queue import QueuedTask, TaskPriority, TaskQueue
-from cairn.orchestrator.signals import SignalHandler
 from cairn.providers.providers import (
     CodeProvider,
     FileCodeProvider,
@@ -41,7 +40,6 @@ __all__ = [
     "RetryStrategy",
     "SandboxExecutionError",
     "SandboxResult",
-    "SignalHandler",
     "TaskPriority",
     "TaskQueue",
     "WorkspaceInspector",

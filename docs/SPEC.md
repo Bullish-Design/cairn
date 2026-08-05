@@ -135,8 +135,9 @@ $CAIRN_HOME/ (default ~/.cairn)
 │       │   ├── submission.json  # submit_result payload
 │       │   └── run.log          # Sandbox stdout/stderr
 │       └── ...                  # Materialized copy of the working tree
-├── signals/
 └── state/
+    ├── orchestrator.sock   # daemon control socket (ownership + transport)
+    └── lifecycle.json      # CLI read path
 ```
 
 4. **Repository snapshot (no live mirror)**
@@ -151,9 +152,9 @@ $CAIRN_HOME/ (default ~/.cairn)
      fails the gate closed.
 
 5. **Daemon ownership (P1.4)**
-   - The daemon owns the metadata databases.  The CLI never constructs an
-     orchestrator: mutations go through signal files, queries read the lifecycle
-     mirror.
+   - The daemon owns the metadata databases and the control socket.  The CLI
+     never constructs an orchestrator: mutations are sent over the Unix-socket
+     transport (see the transport contract), queries read the lifecycle mirror.
 
 ## Repository manifest contracts (`cairn.runtime.repo`)
 
@@ -333,8 +334,7 @@ agent:{agent_id} -> {
 ### Responsibilities
 
 - accept normalized `CairnCommand` ingress and dispatch to command handlers (`queue/accept/reject/status/list_agents/undo`),
-- treat CLI and signal files as transport adapters that both parse into the same command model before dispatch,
-- optionally monitor signal files (`spawn/queue/accept/reject/undo`) when signal polling is enabled,
+- treat the CLI transport and the command model as the single dispatch path (every request parses into the same command model before dispatch),
 - enqueue tasks into a priority queue,
 - run a long-lived worker loop that acquires an `asyncio.Semaphore(max_concurrent_agents)` slot before starting each task; the loop survives per-iteration failures (backoff) and is restarted by a supervisor if it exits unexpectedly,
 - release the semaphore slot in one completion `finally` path,
@@ -354,9 +354,10 @@ agent:{agent_id} -> {
 
 ### CLI contract (thin client, P1.4)
 
-The daemon owns the databases.  The CLI is a thin client: it never constructs
-an orchestrator.  Mutating commands write a signal file for the daemon to pick
-up; query commands read the daemon's lifecycle mirror (`$CAIRN_HOME/state/lifecycle.json`)
+The daemon owns the databases and the control socket.  The CLI is a thin
+client: it never constructs an orchestrator.  Mutating commands are sent over
+the Unix-socket transport and return their result synchronously; query
+commands read the daemon's lifecycle mirror (`$CAIRN_HOME/state/lifecycle.json`)
 read-only — pyturso 0.7.2 locks database files exclusively even for read-only
 opens, so the CLI cannot open `bin.db` while the daemon holds it.
 
@@ -364,18 +365,17 @@ opens, so the CLI cannot open `bin.db` while the daemon holds it.
   second `cairn up` in the same `CAIRN_HOME` is refused)
 - `cairn run <task> [--timeout N]` - Run a single task inline to completion
   (no daemon; refused while a daemon is running)
-- `cairn spawn <reference>` - High-priority task; writes a `spawn` signal
-- `cairn queue <reference>` - Normal-priority task; writes a `queue` signal
+- `cairn spawn <reference>` - High-priority task; sends a `spawn` request
+- `cairn queue <reference>` - Normal-priority task; sends a `queue` request
 - `cairn list-agents` - Read the lifecycle mirror
 - `cairn status <agent-id>` - Read the lifecycle mirror; exit 1 + friendly
   message for unknown agents (no traceback)
-- `cairn accept <agent-id> [--timeout N] [--force]` - Write an `accept` signal, then poll
-  the mirror until the accept settles.  Without `--force`, accept revalidates every touched
+- `cairn accept <agent-id> [--timeout N] [--force]` - Send an `accept` request and
+  return the result synchronously.  Without `--force`, accept revalidates every touched
   base entry against the current working tree and is refused (`ACCEPT_STALE_BASE`) on any
   discrepancy, including a missing run record.
-- `cairn reject <agent-id> [--timeout N]` - Write a `reject` signal, then poll
-  the mirror until the reject settles
-- `cairn undo <agent-id>` - Write an `undo` signal; the daemon restores the working tree
+- `cairn reject <agent-id> [--timeout N]` - Send a `reject` request and return the result
+- `cairn undo <agent-id>` - Send an `undo` request; the daemon restores the working tree
   to its pre-accept state for that agent (the snapshot lives in the bin
   workspace under `undo/{agent_id}/` and is retained on the lifecycle cleanup
   schedule)
@@ -387,19 +387,26 @@ Mutating commands exit 2 with guidance when no daemon is running.
 - With `GitCodeProvider`: `reference` is a git URL with path (e.g., `git://github.com/org/repo:script.py`)
 - With `RegistryCodeProvider`: `reference` is a registry URL (e.g., `registry://org/script-name:version`)
 
-### Signal adapter contract (P1.4/P1.5)
+### Transport contract (P1.4/P1.5, review §3.1)
 
-Signals are the transport for CLI→daemon mutation commands.  The CLI writes
-`$CAIRN_HOME/signals/{type}-{signal_id}.json` atomically (temp name + rename,
-so the watcher never sees a partial file).  The daemon watches the directory
-and also runs a periodic sweep (`SIGNAL_SWEEP_INTERVAL_SECONDS`) as a backstop
-so a signal written during startup is not lost.
+The CLI↔daemon boundary is a **Unix-domain socket with a persisted command
+table** — not signal files:
 
-Processing claims a file by renaming it to `*.processing` (atomic — two
-observers cannot both claim it), then dispatches.  Successful signals are
-removed; failed signals are quarantined to `$CAIRN_HOME/signals/failed/` with
-an `.error.txt` sidecar so failures are inspectable rather than silently
-deleted.
+- The daemon binds `$CAIRN_HOME/state/orchestrator.sock`; the socket bind is
+  the daemon-ownership primitive (a second daemon cannot bind a live socket;
+  a stale socket file from a crash is detected by a failed connect probe and
+  unlinked before rebinding).  The pidfile is informational only.
+- Mutating commands are sent as a single JSON request carrying a
+  client-generated `command_id`; the daemon responds with the result payload
+  or the error — synchronous feedback, no polling, no five-minute stale
+  accepts.
+- Every dispatch is recorded in `bin.db` (`CommandRecord`): a retried
+  `command_id` returns the recorded result instead of re-executing
+  (idempotent dispatch), and a "pending" record on startup was in flight
+  when the daemon died and is failed by recovery.
+- All state/mirror files are written with a unique temporary file + `fsync`
+  + `os.replace`, so concurrent producers can never collide on a fixed
+  `.tmp` name (review §3.8).
 
 ## Documentation boundaries
 
@@ -417,6 +424,6 @@ one-release deprecated alias.
 ## CLI entry points
 
 Both `cairn` (argparse) and `cairn-cli` (Typer) implement the thin-client
-contract: daemon commands write signals / read the lifecycle mirror, and
-neither constructs an orchestrator for a subcommand.  `cairn-cli agent up|run|
+contract: daemon commands send requests over the transport / read the
+lifecycle mirror, and neither constructs an orchestrator for a subcommand.  `cairn-cli agent up|run|
 queue|spawn|accept|reject|status|list|undo|logs` mirror the `cairn` commands.

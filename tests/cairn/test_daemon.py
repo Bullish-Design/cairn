@@ -6,42 +6,116 @@ from pathlib import Path
 
 import pytest
 
-from cairn.orchestrator.daemon import daemon_pidfile, pidfile_path, read_daemon_pid
+from cairn.orchestrator.daemon import (
+    pidfile_path,
+    read_daemon_pid,
+    remove_daemon_pid,
+    write_daemon_pid,
+)
+from cairn.orchestrator.transport import OrchestratorTransport, daemon_running, socket_path
 
 
 def test_pidfile_path_under_state(tmp_path: Path) -> None:
     assert pidfile_path(tmp_path) == tmp_path / "state" / "orchestrator.pid"
 
 
+def test_socket_path_under_state(tmp_path: Path) -> None:
+    assert socket_path(tmp_path) == tmp_path / "state" / "orchestrator.sock"
+
+
 def test_read_daemon_pid_absent(tmp_path: Path) -> None:
     assert read_daemon_pid(tmp_path) is None
 
 
-def test_read_daemon_pid_dead_process(tmp_path: Path) -> None:
-    """A pidfile naming a dead pid is treated as absent."""
+def test_read_daemon_pid_without_live_socket(tmp_path: Path) -> None:
+    """A pidfile alone (no live control socket) is not trusted: ownership is
+    the socket, so a stale pidfile (dead process, or leftover after a crash)
+    reads as no daemon (review §3.7 — no PID-reuse/check-then-replace races)."""
     path = pidfile_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"pid": 2**22}), encoding="utf-8")  # implausibly large -> no such process
+    path.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
     assert read_daemon_pid(tmp_path) is None
+    assert daemon_running(tmp_path) is False
 
 
-def test_daemon_pidfile_roundtrip(tmp_path: Path) -> None:
-    with daemon_pidfile(tmp_path) as path:
-        assert path.exists()
+@pytest.mark.asyncio
+async def test_daemon_running_and_pid_roundtrip(tmp_path: Path) -> None:
+    """A live control socket means a daemon is running; the informational
+    pidfile is then readable."""
+    transport = OrchestratorTransport(
+        socket_path(tmp_path),
+        handler=_ok_handler,
+        command_table=_FakeTable(),
+    )
+    await transport.start()
+    try:
+        assert daemon_running(tmp_path) is True
+        write_daemon_pid(tmp_path)
         assert read_daemon_pid(tmp_path) == os.getpid()
-    assert path.exists() is False
+    finally:
+        await transport.close()
+        remove_daemon_pid(tmp_path)
+    assert daemon_running(tmp_path) is False
     assert read_daemon_pid(tmp_path) is None
 
 
-def test_daemon_pidfile_second_claim_raises(tmp_path: Path) -> None:
-    """A pidfile held by another live process raises."""
-    path = pidfile_path(tmp_path)
+@pytest.mark.asyncio
+async def test_second_daemon_cannot_bind_live_socket(tmp_path: Path) -> None:
+    """Ownership is the socket bind: while one daemon listens, a second bind
+    is refused; after close, a fresh daemon can bind."""
+    transport = OrchestratorTransport(socket_path(tmp_path), handler=_ok_handler, command_table=_FakeTable())
+    await transport.start()
+    try:
+        second = OrchestratorTransport(socket_path(tmp_path), handler=_ok_handler, command_table=_FakeTable())
+        with pytest.raises(RuntimeError, match="already running"):
+            await second.start()
+    finally:
+        await transport.close()
+
+    assert socket_path(tmp_path).exists() is False
+    transport2 = OrchestratorTransport(socket_path(tmp_path), handler=_ok_handler, command_table=_FakeTable())
+    await transport2.start()
+    try:
+        assert daemon_running(tmp_path) is True
+    finally:
+        await transport2.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_socket_file_is_reclaimed(tmp_path: Path) -> None:
+    """A socket file left behind by a crashed daemon (no listener) does not
+    block a new daemon: it is detected and unlinked before binding."""
+    path = socket_path(tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # os.getppid() is a live process (our parent) that is not us.
-    path.write_text(json.dumps({"pid": os.getppid()}), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="already running"), daemon_pidfile(tmp_path):
-        pytest.fail("should not be reachable")
-    # After the foreign pidfile is removed, claiming works again.
-    path.unlink()
-    with daemon_pidfile(tmp_path):
-        pass
+    path.touch()  # leftover file, nothing listening
+
+    transport = OrchestratorTransport(path, handler=_ok_handler, command_table=_FakeTable())
+    await transport.start()
+    try:
+        assert daemon_running(tmp_path) is True
+    finally:
+        await transport.close()
+
+
+async def _ok_handler(command: object) -> dict:
+    return {"ok": True}
+
+
+class _FakeTable:
+    async def begin(self, command_id: str, command_type: str) -> bool:
+        return True
+
+    async def load(self, command_id: str):
+        return None
+
+    async def complete(self, command_id: str, result: dict) -> None:
+        return None
+
+    async def fail(self, command_id: str, error: str) -> None:
+        return None
+
+    async def list_pending(self):
+        return []
+
+    async def recover_inflight(self) -> int:
+        return 0

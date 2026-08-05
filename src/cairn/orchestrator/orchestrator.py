@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import stat
+import tempfile
 import time
 import uuid
 from collections.abc import Callable
@@ -63,7 +64,7 @@ from cairn.orchestrator.lifecycle import (
     UndoRecord,
 )
 from cairn.orchestrator.queue import TaskPriority, TaskQueue
-from cairn.orchestrator.signals import SignalHandler
+from cairn.orchestrator.transport import CommandTable, OrchestratorTransport, socket_path
 from cairn.providers.providers import CodeProvider, FileCodeProvider
 from cairn.runtime import repo
 from cairn.runtime.agent import AgentContext, AgentState
@@ -135,7 +136,8 @@ class CairnOrchestrator:
         self.code_provider = code_provider or FileCodeProvider(base_path=self.project_root)
         self.executor_factory = executor_factory or BwrapExecutor
 
-        self.signals: SignalHandler | None = None
+        self.transport: OrchestratorTransport | None = None
+        self.command_table: CommandTable | None = None
         self.lifecycle: LifecycleStore | None = None
         self.state_file = self.cairn_home / "state" / "orchestrator.json"
         self._last_persist = 0.0
@@ -144,7 +146,7 @@ class CairnOrchestrator:
 
     async def initialize(self) -> None:
         self.agentfs_dir.mkdir(parents=True, exist_ok=True)
-        for directory in ("workspaces", "signals", "state"):
+        for directory in ("workspaces", "state"):
             (self.cairn_home / directory).mkdir(parents=True, exist_ok=True)
 
         self.bin = await self.workspace_manager.create_workspace(
@@ -152,8 +154,15 @@ class CairnOrchestrator:
             max_content_bytes=self.config.max_content_bytes,
         )
 
-        self.signals = SignalHandler(self.cairn_home, self, enable_polling=self.config.enable_signal_polling)
         self.lifecycle = LifecycleStore(self.bin)
+        self.command_table = CommandTable(self.bin)
+        await self.command_table.recover_inflight()
+        self.transport = OrchestratorTransport(
+            socket_path(self.cairn_home),
+            self.submit_command,
+            self.command_table,
+        )
+        await self.transport.start()
 
         await self.recover_from_lifecycle_store()
         await self._recover_interrupted_accepts()
@@ -214,11 +223,25 @@ class CairnOrchestrator:
             await agent_fs.close()
 
     def _write_mirror_sync(self, payload: dict) -> None:
+        """Atomically rewrite the lifecycle mirror.
+
+        Uses a unique temporary file + ``fsync`` + ``os.replace`` so
+        concurrent mirror producers (parallel agent transitions) can never
+        truncate/write/rename the same temp path (review §3.8).
+        """
         state_dir = self.cairn_home / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
-        tmp = state_dir / f"{LIFECYCLE_MIRROR_NAME}.tmp"
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(state_dir / LIFECYCLE_MIRROR_NAME)
+        fd, tmp_name = tempfile.mkstemp(dir=state_dir, prefix=f"{LIFECYCLE_MIRROR_NAME}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, state_dir / LIFECYCLE_MIRROR_NAME)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(tmp_name)
+            raise
 
     async def recover_from_lifecycle_store(self) -> None:
         if self.lifecycle is None:
@@ -291,8 +314,8 @@ class CairnOrchestrator:
                     await self.spawn_agent(record.task, TaskPriority(record.priority))
 
     async def run(self) -> None:
-        assert self.signals is not None
-        await self.signals.watch()
+        assert self.transport is not None
+        await self.transport.serve_forever()
 
     async def shutdown(self) -> None:
         if self._worker_task and not self._worker_task.done():
@@ -312,6 +335,9 @@ class CairnOrchestrator:
                     extra={"active_count": len(self._running_tasks)},
                 )
 
+        if self.transport is not None:
+            await self.transport.close()
+            self.transport = None
         await self.workspace_cache.clear()
         await self.workspace_manager.close_all()
 
@@ -1125,9 +1151,17 @@ class CairnOrchestrator:
 
     def _write_state_atomic(self, payload: dict) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.state_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.state_file)
+        fd, tmp_name = tempfile.mkstemp(dir=self.state_file.parent, prefix=self.state_file.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, self.state_file)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(tmp_name)
+            raise
 
     async def cleanup_completed_agents(
         self,

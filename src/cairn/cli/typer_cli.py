@@ -25,14 +25,13 @@ from rich.table import Table
 from rich.tree import Tree
 
 from cairn.cli.commands import (
+    CairnCommand,
     parse_command_payload,
 )
 from cairn.core.exceptions import AgentNotFoundError
-from cairn.core.exceptions import TimeoutError as CairnTimeoutError
 from cairn.orchestrator.daemon import read_daemon_pid
 from cairn.orchestrator.lifecycle import open_lifecycle_readonly
 from cairn.orchestrator.queue import TaskPriority
-from cairn.orchestrator.signals import write_signal
 from cairn.runtime import repo
 from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import PathsSettings
@@ -525,59 +524,51 @@ def agent_status(
 
 def _mutation_required(home: Path) -> None:
     """Refuse a mutating command when no daemon is running."""
-    if read_daemon_pid(home) is None:
+    from cairn.orchestrator.transport import daemon_running
+
+    if not daemon_running(home):
         console.print(
             "[red]No Cairn daemon is running. Start one with `cairn up` (or run inline with `cairn run <task>`).[/red]"
         )
         raise typer.Exit(2)
 
 
-async def _poll_state(home: Path, agent_id: str, states: set[AgentState], timeout: float):
-    import time
+async def _send_mutation(home: Path, command: CairnCommand, timeout: float = 60.0) -> dict:
+    """Send a mutating command over the daemon transport and await its result
+    synchronously (review §3.1)."""
+    from cairn.orchestrator.transport import send_request
 
-    from cairn.orchestrator.lifecycle import LifecycleRecord
-
-    deadline = time.monotonic() + timeout
-    async with open_lifecycle_readonly(home) as store:
-        while True:
-            record: LifecycleRecord | None = await store.load(agent_id)
-            if record is not None and record.state in states:
-                return record
-            if time.monotonic() >= deadline:
-                raise CairnTimeoutError(
-                    f"Agent {agent_id} did not settle within {timeout}s",
-                    error_code="AGENT_WAIT_TIMEOUT",
-                )
-            await asyncio.sleep(0.1)
+    response = await send_request(home, command, timeout=timeout)
+    if not response.ok:
+        console.print(f"[red]{command.type.value} failed: {response.error}[/red]")
+        raise typer.Exit(1)
+    return response.result or {}  # type: ignore[no-any-return]
 
 
 @agent_app.command("accept")
 def agent_accept(
     agent_id: Annotated[str, typer.Argument(help="Agent ID")],
     force: Annotated[
-        bool, typer.Option("--force", help="Accept even if stable changed since the agent started")
+        bool, typer.Option("--force", help="Accept even if the working tree changed since the agent started")
     ] = False,
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for the accept to settle")] = 300.0,
     project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
-    """Accept an agent's changes (signal + poll)."""
+    """Accept an agent's changes (synchronous request/response)."""
 
     async def _accept():
         home = _cairn_home(project_root, cairn_home)
         _mutation_required(home)
         command = parse_command_payload("accept", {"agent_id": agent_id, "force": force})
-        write_signal(home, command)
-
-        record = await _poll_state(home, agent_id, {AgentState.ACCEPTED, AgentState.ERRORED}, timeout)
-        if record.state is AgentState.ERRORED:
-            console.print(f"[red]accept failed: {record.error}[/red]")
-            raise typer.Exit(1)
-        stats = record.accept_stats or {}
+        result = await _send_mutation(home, command, timeout=timeout)
         console.print(f"[green]✓[/green] Accepted {agent_id}")
-        console.print(f"  Merged {stats.get('files_merged', 0)} file(s) into stable")
-        if stats.get("tombstones_applied"):
-            console.print(f"  [yellow]Applied {stats['tombstones_applied']} deletion(s) to stable[/yellow]")
+        console.print(
+            f"  Applied {result.get('files_written', 0)} file(s), "
+            f"{result.get('files_deleted', 0)} deletion(s) to the working tree"
+        )
+
+    asyncio.run(_accept())
 
     asyncio.run(_accept())
 
@@ -589,18 +580,13 @@ def agent_reject(
     project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
-    """Reject an agent's changes (signal + poll)."""
+    """Reject an agent's changes (synchronous request/response)."""
 
     async def _reject():
         home = _cairn_home(project_root, cairn_home)
         _mutation_required(home)
         command = parse_command_payload("reject", {"agent_id": agent_id})
-        write_signal(home, command)
-
-        record = await _poll_state(home, agent_id, {AgentState.REJECTED, AgentState.ERRORED}, timeout)
-        if record.state is AgentState.ERRORED:
-            console.print(f"[red]reject failed: {record.error}[/red]")
-            raise typer.Exit(1)
+        await _send_mutation(home, command, timeout=timeout)
         console.print(f"[green]✓[/green] Rejected {agent_id}")
 
     asyncio.run(_reject())
@@ -612,14 +598,14 @@ def agent_spawn(
     project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
-    """Spawn a high-priority agent task (signal)."""
+    """Spawn a high-priority agent task (synchronous)."""
 
     async def _spawn():
         home = _cairn_home(project_root, cairn_home)
         _mutation_required(home)
         command = parse_command_payload("spawn", {"task": task, "priority": int(TaskPriority.HIGH)})
-        path = write_signal(home, command)
-        console.print(f"[green]✓[/green] Spawned agent task ({path.name})")
+        await _send_mutation(home, command)
+        console.print("[green]✓[/green] Spawned agent task")
 
     asyncio.run(_spawn())
 
@@ -630,14 +616,14 @@ def agent_queue(
     project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
-    """Queue a normal-priority agent task (signal)."""
+    """Queue a normal-priority agent task (synchronous)."""
 
     async def _queue():
         home = _cairn_home(project_root, cairn_home)
         _mutation_required(home)
         command = parse_command_payload("queue", {"task": task, "priority": int(TaskPriority.NORMAL)})
-        path = write_signal(home, command)
-        console.print(f"[green]✓[/green] Queued agent task ({path.name})")
+        await _send_mutation(home, command)
+        console.print("[green]✓[/green] Queued agent task")
 
     asyncio.run(_queue())
 
@@ -648,14 +634,17 @@ def agent_undo(
     project_root: Annotated[Path | None, typer.Option(help="Project root directory")] = None,
     cairn_home: Annotated[Path | None, typer.Option(help="Cairn home directory")] = None,
 ):
-    """Undo an accepted agent's changes to stable (signal)."""
+    """Undo an accepted agent's changes to the working tree (synchronous)."""
 
     async def _undo():
         home = _cairn_home(project_root, cairn_home)
         _mutation_required(home)
         command = parse_command_payload("undo", {"agent_id": agent_id})
-        path = write_signal(home, command)
-        console.print(f"[green]✓[/green] Submitted undo ({path.name})")
+        result = await _send_mutation(home, command)
+        console.print(
+            f"[green]✓[/green] Undone {agent_id}: "
+            f"{result.get('restored', 0)} restored, {result.get('deleted', 0)} deleted"
+        )
 
     asyncio.run(_undo())
 
@@ -735,7 +724,7 @@ def agent_up(
     async def _up():
         import signal
 
-        from cairn.orchestrator.daemon import daemon_pidfile
+        from cairn.orchestrator.daemon import remove_daemon_pid, write_daemon_pid
         from cairn.orchestrator.orchestrator import CairnOrchestrator
         from cairn.providers.providers import resolve_code_provider
         from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings
@@ -743,32 +732,37 @@ def agent_up(
         home = _cairn_home(project_root, cairn_home)
         path_settings = get_paths_settings(project_root, cairn_home)
         provider = resolve_code_provider("file", project_root=path_settings.project_root, base_path=None)
-        with daemon_pidfile(home):
-            orchestrator = CairnOrchestrator(
-                project_root=path_settings.project_root or ".",
-                cairn_home=home,
-                config=OrchestratorSettings(),
-                executor_settings=ExecutorSettings(),
-                code_provider=provider,
+        orchestrator = CairnOrchestrator(
+            project_root=path_settings.project_root or ".",
+            cairn_home=home,
+            config=OrchestratorSettings(),
+            executor_settings=ExecutorSettings(),
+            code_provider=provider,
+        )
+        try:
+            await orchestrator.initialize()  # binds the control socket (ownership)
+        except RuntimeError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        write_daemon_pid(home)
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+
+        runner = asyncio.create_task(orchestrator.run())
+        try:
+            await asyncio.wait(
+                [runner, asyncio.create_task(stop.wait())],
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            await orchestrator.initialize()
-
-            stop = asyncio.Event()
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, stop.set)
-
-            runner = asyncio.create_task(orchestrator.run())
-            try:
-                await asyncio.wait(
-                    [runner, asyncio.create_task(stop.wait())],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-            finally:
-                runner.cancel()
-                with suppress(asyncio.CancelledError):
-                    await runner
-                await orchestrator.shutdown()
+        finally:
+            runner.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner
+            await orchestrator.shutdown()
+            remove_daemon_pid(home)
 
     asyncio.run(_up())
 
