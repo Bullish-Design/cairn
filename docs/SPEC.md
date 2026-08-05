@@ -23,7 +23,6 @@ Cairn runtime contracts are implemented by four concrete layers:
      - `FileCodeProvider` - loads code from Python script files on disk
      - `InlineCodeProvider` - treats reference as code itself
    - Plugin providers (separate packages):
-     - `LLMCodeProvider` (cairn-llm) - generates code from natural language
      - `GitCodeProvider` (cairn-git) - loads code from git repositories
      - `RegistryCodeProvider` (cairn-registry) - fetches code from registries
    - The orchestrator accepts any `CodeProvider` implementation via constructor parameter.
@@ -336,7 +335,6 @@ Mutating commands exit 2 with guidance when no daemon is running.
 
 **Reference interpretation:**
 - With `FileCodeProvider` (default): `reference` is a path to a Python script file
-- With `LLMCodeProvider` (--provider llm): `reference` is natural language task description
 - With `GitCodeProvider`: `reference` is a git URL with path (e.g., `git://github.com/org/repo:script.py`)
 - With `RegistryCodeProvider`: `reference` is a registry URL (e.g., `registry://org/script-name:version`)
 

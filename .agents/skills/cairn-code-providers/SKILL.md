@@ -93,7 +93,6 @@ provider by name:
 ```toml
 # pyproject.toml of a plugin package
 [project.entry-points."cairn.providers"]
-llm = "cairn_llm.provider:LLMCodeProvider"
 git = "cairn_git.provider:GitCodeProvider"
 registry = "cairn_registry.provider:RegistryCodeProvider"
 ```
@@ -115,9 +114,6 @@ cairn queue scripts/refactor.py
 
 # inline provider — the reference IS the code
 cairn spawn "print('hello')" --provider inline
-
-# plugin provider
-cairn spawn "Add docstrings to public functions" --provider llm
 ```
 
 Programmatically, pass a `CodeProvider` instance to the orchestrator:
@@ -135,7 +131,6 @@ orchestrator = CairnOrchestrator(project_root=".", code_provider=FileCodeProvide
 |---|---|---|
 | `file` | Path to a Python script (project-relative or absolute) | `scripts/refactor_imports.py` |
 | `inline` | The code itself | `"print('hi')"` |
-| `llm` (plugin) | Natural-language task description | `"Add docstrings"` |
 | `git` (plugin) | Git URL with path fragment | `git://github.com/org/repo:script.py` |
 | `registry` (plugin) | Registry reference | `registry://org/script:version` |
 

@@ -47,7 +47,7 @@ Everything in `src/cairn/` implements one of these contracts:
      optional `validate_code(code) -> (bool, str | None)`.
    - Built-ins: `FileCodeProvider` (path to a `.py` script), `InlineCodeProvider`
      (reference *is* the code).
-   - Plugins (`cairn-llm`, `cairn-git`, `cairn-registry`) register entry points
+   - Plugins (`cairn-git`, `cairn-registry`) register entry points
      under the `cairn.providers` group and are loaded by name.
 
 2. **Storage** — `cairn.runtime.workspace_manager`, fsdantic `Workspace`

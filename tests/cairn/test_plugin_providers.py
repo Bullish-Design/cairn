@@ -7,7 +7,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 for rel_path in (
-    "extensions/cairn-llm/src",
     "extensions/cairn-git/src",
     "extensions/cairn-registry/src",
 ):
@@ -17,22 +16,9 @@ from typing import Self
 
 from cairn_git.cache import GitReference
 from cairn_git.provider import GitCodeProvider
-from cairn_llm.provider import LLMCodeProvider
 from cairn_registry.provider import RegistryCodeProvider
 
 from cairn.core.exceptions import CodeProviderError
-
-
-@pytest.mark.asyncio
-async def test_llm_provider_output_is_compilable_python() -> None:
-    """Review §2.2: get_code must return executable Python, not the prompt
-    template, and validate_code must enforce real syntax validity."""
-    provider = LLMCodeProvider()
-    code = await provider.get_code("Add docstrings", {})
-
-    compile(code, "task.py", "exec")  # must not raise SyntaxError
-    valid, reason = await provider.validate_code(code)
-    assert valid is True, reason
 
 
 @pytest.mark.asyncio

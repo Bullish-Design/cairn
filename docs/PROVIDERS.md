@@ -26,15 +26,6 @@ cairn spawn "print('hello')" --provider inline
 
 Plugin providers register entry points under `cairn.providers` and are loaded by name.
 
-### `LLMCodeProvider` (`cairn-llm`)
-- Generates `.pym` code from natural language prompts.
-- `reference` is a task description.
-
-Example:
-```bash
-cairn spawn "Add docstrings" --provider llm
-```
-
 ### `GitCodeProvider` (`cairn-git`)
 - Loads `.pym` files from git references.
 - `reference` uses the `git://` scheme and a fragment for the file path.

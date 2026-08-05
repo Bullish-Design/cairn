@@ -129,8 +129,7 @@ ground-truth lists.
 ## Reference interpretation
 
 With `FileCodeProvider` (default) `reference` is a **path to a Python script**
-(project-relative). With `--provider llm` it's a natural-language description;
-`git`/`registry` providers accept their own schemes — see
+(project-relative). `git`/`registry` providers accept their own schemes — see
 [cairn-code-providers](../cairn-code-providers/SKILL.md).
 
 ## Troubleshooting

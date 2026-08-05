@@ -27,7 +27,6 @@ This document provides guidance for AI agents (like Claude, ChatGPT, or Cairn ag
 - **Git** - version control (jj is no longer used; see Git Workflow)
 
 **Optional plugins:**
-- **cairn-llm** - LLM-based code generation via `LLMCodeProvider`
 - **cairn-git** - Git repository code sourcing via `GitCodeProvider`
 - **cairn-registry** - Registry-based code sourcing via `RegistryCodeProvider`
 

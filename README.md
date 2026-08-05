@@ -14,7 +14,6 @@ Cairn provides:
 ## Use Cases
 
 - **File-based task execution** - Run pre-written Python scripts in isolated bwrap sandboxes
-- **LLM code generation** - Generate and execute code from natural language (via `cairn-llm` plugin)
 - **Untrusted user scripts** - Execute user-submitted code safely
 - **Preview environments** - Test code changes in isolation before merging
 - **CI/CD workflows** - Run build/test scripts in sandboxed workspaces
@@ -63,13 +62,6 @@ uv run cairn run scripts/task.py
 # Run a pre-written Python script
 uv run cairn spawn scripts/refactor_imports.py
 uv run cairn queue scripts/add_type_hints.py
-```
-
-**With LLM code provider (requires `cairn-llm` plugin):**
-```bash
-# Generate and execute code from natural language
-uv run cairn spawn "Add docstrings to public functions" --provider llm
-uv run cairn queue "Refactor watcher tests" --provider llm
 ```
 
 ### Inspect state
