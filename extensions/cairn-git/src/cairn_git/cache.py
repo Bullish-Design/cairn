@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
-from pathlib import Path
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from cairn.core.constants import GIT_CLONE_TIMEOUT_SECONDS
 
 
 @dataclass(frozen=True)
@@ -55,4 +57,6 @@ def ensure_repo_cache(reference: GitReference, cache_dir: Path) -> Path:
 
 
 def _run_git(args: list[str]) -> None:
-    subprocess.run(["git", *args], check=True)
+    """Run git with a hard timeout so a hung remote cannot block the async
+    provider forever (review §3.5)."""
+    subprocess.run(["git", *args], check=True, timeout=GIT_CLONE_TIMEOUT_SECONDS)

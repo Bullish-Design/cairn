@@ -26,8 +26,10 @@ Cairn runtime contracts are implemented by four concrete layers:
      - `GitCodeProvider` (cairn-git) - loads code from git repositories
      - `RegistryCodeProvider` (cairn-registry) - fetches code from registries
    - The orchestrator accepts any `CodeProvider` implementation via constructor parameter.
-   - Provider `context` is `{"agent_id": str, "workspace": Workspace, "project_root": Path}` —
-     metadata only; providers never receive a writable mirror of the repository.
+   - Provider `context` is `{"agent_id": str, "workspace": ProjectView, "project_root": Path}` —
+     the workspace entry is a **read-only** snapshot view over the canonical
+     tree (gitignore-aware, no symlink following); providers never receive a
+     writable workspace or database (review §3.5).
 
 2. **Repository snapshot + disposable workspaces (`cairn.runtime.repo`)**
    - The **actual Git working tree is the canonical source of truth**; there is no
@@ -261,6 +263,20 @@ changed since the accept it refuses with `UNDO_STALE_BASE` and keeps the undo
 record — it never overwrites later human edits and never reports success for
 a partial undo.
 
+### Toolchain closure (M8)
+
+The disposable workspace mounts only the stdlib interpreter by default; a
+declarative toolchain extends it read-only via two mechanisms:
+
+- `CAIRN_EXECUTOR_SANDBOX_CLOSURE_PATH` — a file listing Nix store paths (one
+  per line); the executor binds exactly those paths read-only.  Add git, a
+  compiler, or a test runner's store closure here to give agents repo tooling.
+- `ExecutorSettings.runtime_mounts` — explicit `(src, dst)` read-only binds
+  (e.g. a venv or a toolchain directory).
+
+Only the disposable workspace is ever writable; every toolchain bind is
+read-only.
+
 ### Sandbox runtime configuration (NixOS/devenv)
 
 The sandbox runtime is declared in ``devenv.nix`` and consumed via environment
@@ -294,6 +310,23 @@ declared external validation). Syntax errors surface as sandbox tracebacks that
 mark the agent ERRORED.
 
 Validation errors prevent execution and transition agent to ERRORED state.
+
+## Iterative agent driver (review §4.3)
+
+The one-shot script is replaced by an iterative driver contract
+(`cairn.runtime.driver`):
+
+- `WorkspaceCapability` — the narrow capability a driver (or its model
+  client) receives: read/list/search, write/delete **within the bounded
+  workspace only**, and `run` through the sandbox runner.  Paths are
+  validated (no absolute paths, no `..`), and host execution is impossible
+  without a sandbox runner.
+- `IterativeDriver` — the protocol: `run(task, capability, *, step_limit)`
+  returns the submission.  `ScriptedDriver` is the reference implementation
+  (explicit step plan with a hard step limit).
+- Drivers that run inside the sandbox use the sandbox API plus ordinary
+  subprocess execution for tests (plain Python); the capability class is the
+  host-side/embedding view.
 
 ## Orchestrator contracts
 

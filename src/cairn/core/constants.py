@@ -60,6 +60,14 @@ REGEX_TIMEOUT_SECONDS = 1.0
 REGEX_MAX_PATTERN_LENGTH = 1000
 REGEX_MAX_MATCHES = 10000
 
+# Provider network/file policy (review §3.5): bounded timeouts, response
+# size caps, and scheme confinement for plugin code sources.
+GIT_CLONE_TIMEOUT_SECONDS = 60.0
+REGISTRY_FETCH_TIMEOUT_SECONDS = 30.0
+REGISTRY_MAX_RESPONSE_BYTES = 2 * MB
+REGISTRY_ALLOWED_SCHEMES = ("https",)
+REGISTRY_LOCALHOST_SCHEMES = ("http",)
+
 # Agent ID constraints
 AGENT_ID_MAX_LENGTH = 255
 AGENT_ID_ALLOWED_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"

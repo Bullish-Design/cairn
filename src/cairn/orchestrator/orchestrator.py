@@ -68,6 +68,7 @@ from cairn.orchestrator.transport import CommandTable, OrchestratorTransport, so
 from cairn.providers.providers import CodeProvider, FileCodeProvider
 from cairn.runtime import repo
 from cairn.runtime.agent import AgentContext, AgentState
+from cairn.runtime.driver import ProjectView
 from cairn.runtime.integration import IntegrationLock
 from cairn.runtime.sandbox import (
     SANDBOX_DIR_NAME,
@@ -1037,10 +1038,9 @@ class CairnOrchestrator:
 
     async def _generate_code(self, ctx: AgentContext) -> str | None:
         """Fetch and validate provider code for the agent."""
-        agent_fs = await self._get_agent_workspace(ctx)
         context = {
             "agent_id": ctx.agent_id,
-            "workspace": agent_fs,
+            "workspace": ProjectView(self.project_root),
             "project_root": self.project_root,
         }
 

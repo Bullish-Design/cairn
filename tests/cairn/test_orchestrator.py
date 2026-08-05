@@ -192,7 +192,10 @@ async def test_run_agent_transitions_to_reviewing(tmp_path: Path) -> None:
         assert provider.reference == ctx.task
         assert provider.context is not None
         assert provider.context["agent_id"] == ctx.agent_id
-        assert provider.context["workspace"] is agent_ws
+        from cairn.runtime.driver import ProjectView
+
+        # Providers receive a narrow read-only view, never the writable db.
+        assert isinstance(provider.context["workspace"], ProjectView)
         assert provider.context["project_root"] == orch.project_root
     finally:
         await _safe_close(agent_ws)

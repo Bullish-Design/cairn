@@ -380,3 +380,35 @@ async def test_real_sandbox_imports_work_stdlib_only(tmp_path: Path) -> None:
     assert (tmp_path / "work" / "payload.json").read_text(encoding="utf-8") == (
         '{"digest": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"}'
     )
+
+
+def test_toolchain_runtime_mounts_are_bound_readonly(tmp_path: Path) -> None:
+    """M8 toolchain: a declarative toolchain (git, a compiler, a venv) is
+    bound read-only into the sandbox via runtime_mounts, extending the
+    stdlib-only closure — never writable."""
+    settings = ExecutorSettings(
+        bwrap_path="/usr/bin/bwrap",
+        python_path="/usr/bin/python3",
+        sandbox_closure_path=str(tmp_path / "missing.txt"),
+        runtime_mounts=[
+            ("/nix/store/toolchain-git", "/nix/store/toolchain-git"),
+            ("/nix/store/toolchain-pytest", "/nix/store/toolchain-pytest"),
+        ],
+    )
+
+    class _Executor(BwrapExecutor):
+        def __init__(self) -> None:
+            self.settings = settings
+            self.workdir = tmp_path
+            self.agent_id = "agent-toolchain"
+
+    binds = _Executor()._runtime_bind_args()
+    assert "--ro-bind-try" in binds
+    assert "/nix/store/toolchain-git" in binds
+    assert "/nix/store/toolchain-pytest" in binds
+
+    # The toolchain binds are all read-only (--ro-bind-try), never --bind.
+    argv = _Executor()._build_argv()
+    assert "--bind" in argv  # only the workspace is writable
+    assert argv[argv.index("--bind") + 1] == str(tmp_path)
+    assert "--ro-bind-try" in argv
