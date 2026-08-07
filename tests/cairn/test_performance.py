@@ -48,6 +48,12 @@ class BenchmarkCodeProvider:
 
 
 class BenchmarkExecutor:
+    # NOTE: this fake writes files directly and never invokes bwrap. It cannot
+    # observe capture, materialize, diff, or sandbox cost — it exists only to
+    # isolate orchestrator/lifecycle latency. Do NOT use it (or its numbers)
+    # to reason about execution cost; that misreading produced the Flume
+    # proposal (see .scratch/projects/003-flume/). Real-path benchmarks live
+    # in test_performance_execpath.py.
     metrics_by_task: ClassVar[dict[str, dict[str, int]]] = {
         "refactor-small-file": {"peak_memory_bytes": 1_048_576},
     }
