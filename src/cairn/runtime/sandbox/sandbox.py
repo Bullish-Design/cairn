@@ -248,9 +248,7 @@ class BwrapExecutor:
         if self.workdir.exists():
             shutil.rmtree(self.workdir)
         stats = repo.MaterializeStats()
-        repo.materialize_workspace(
-            self.project_root, self.workdir, filter=self._project_filter(), stats=stats
-        )
+        repo.materialize_workspace(self.project_root, self.workdir, filter=self._project_filter(), stats=stats)
         logger.debug(
             "Materialized workspace",
             extra={

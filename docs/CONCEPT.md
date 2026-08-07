@@ -33,6 +33,10 @@ automatic merging.
 
 1. **Copy-on-write over merge complexity**
    Code executes in isolated overlays; integration is explicit accept/reject.
+   Materialization uses a true reflink where the filesystem supports it
+   (btrfs, xfs with reflink, bcachefs) and a plain copy otherwise; the
+   executor reports the observed materialization mode per run, so a degraded
+   mode is measured, not hidden.
 
 2. **Isolation over implicit trust**
    Code executes inside a bubblewrap sandbox with no network, an unprivileged

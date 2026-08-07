@@ -176,9 +176,27 @@ $CAIRN_HOME/ (default ~/.cairn)
 
 ### Disposable workspace
 
-- `materialize_workspace` copies only admissible paths, using copy-on-write
-  reflinks where the filesystem supports them.  Modes, symlinks, and empty
-  directories are preserved byte-for-byte.
+- `materialize_workspace` copies only admissible paths, using a true reflink
+  (`FICLONE`) where the filesystem supports it and a plain copy otherwise
+  (cross-device `EXDEV`, ext4/tmpfs `EOPNOTSUPP`).  Modes, symlinks, and
+  empty directories are preserved byte-for-byte; the observed
+  materialization mode (reflink/mixed/copy) is measured and logged per run
+  so a degraded mode is not hidden.
+
+### Admission rules are host state
+
+- The admission filter (gitignore + excluded dirs/suffixes) is built **once
+  per task from the project tree** and reused for every manifest pass — the
+  base capture, the workspace materialization, and the post-run workspace
+  capture (rebound to the workspace root).  It is never rebuilt from
+  workspace content: task code can write `.gitignore` files, and admission
+  rules it controls would let it steer the computed changeset (e.g. forge
+  deletions of untouched files).
+- Consequence: a task that adds a `.gitignore` does **not** have it applied
+  to that same run's changeset — the base manifest was captured under the
+  old rules, and a diff is only meaningful between two manifests taken
+  under the same admission rules.  The new `.gitignore` takes effect on the
+  next run, once accepted into the tree.
 
 ### Changeset semantics
 

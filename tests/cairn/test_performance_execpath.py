@@ -44,13 +44,21 @@ def test_phase_breakdown(record_property: pytest.RecordProperty, tmp_path: Path,
     project = _make_project(tmp_path / "project", n_files, junk_dirs=True)
     workdir = tmp_path / "ws"
 
-    t = time.perf_counter(); base = repo.capture_manifest(project); t_capture = time.perf_counter() - t
+    t = time.perf_counter()
+    base = repo.capture_manifest(project)
+    t_capture = time.perf_counter() - t
 
     shutil.rmtree(workdir, ignore_errors=True)
-    t = time.perf_counter(); repo.materialize_workspace(project, workdir); t_materialize = time.perf_counter() - t
+    t = time.perf_counter()
+    repo.materialize_workspace(project, workdir)
+    t_materialize = time.perf_counter() - t
 
-    t = time.perf_counter(); current = repo.capture_manifest(workdir); t_capture_ws = time.perf_counter() - t
-    t = time.perf_counter(); repo.diff_manifests(base, current); t_diff = time.perf_counter() - t
+    t = time.perf_counter()
+    current = repo.capture_manifest(workdir)
+    t_capture_ws = time.perf_counter() - t
+    t = time.perf_counter()
+    repo.diff_manifests(base, current)
+    t_diff = time.perf_counter() - t
 
     for name, value in [
         ("capture_base_seconds", t_capture),
@@ -74,9 +82,7 @@ async def test_end_to_end_overhead(record_property: pytest.RecordProperty, tmp_p
     durations = []
     for _ in range(3):
         shutil.rmtree(workdir, ignore_errors=True)
-        executor = BwrapExecutor(
-            agent_id="bench", workdir=workdir, project_root=project, settings=settings
-        )
+        executor = BwrapExecutor(agent_id="bench", workdir=workdir, project_root=project, settings=settings)
         t = time.perf_counter()
         result = await executor.run(code=TRIVIAL_TASK, task="bench")
         durations.append(time.perf_counter() - t)

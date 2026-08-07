@@ -24,7 +24,15 @@ from pathlib import Path
 import pytest
 from pathspec import GitIgnoreSpec
 
-from cairn.runtime.repo import EXCLUDED_SUFFIXES, MaterializeStats, ProjectFilter, _copy_file, capture_manifest, diff_manifests, materialize_workspace
+from cairn.runtime.repo import (
+    EXCLUDED_SUFFIXES,
+    MaterializeStats,
+    ProjectFilter,
+    _copy_file,
+    capture_manifest,
+    diff_manifests,
+    materialize_workspace,
+)
 
 
 def test_project_filter_honors_gitignore(tmp_path: Path) -> None:
@@ -214,6 +222,7 @@ def test_gitignore_negation_under_excluded_dir_matches_git(tmp_path: Path) -> No
 
 def test_reflink_falls_back_cleanly_when_unsupported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An unsupported FICLONE must produce a byte-identical plain copy."""
+
     def boom(*args: object, **kwargs: object) -> None:
         raise OSError(errno.EOPNOTSUPP, "not supported")
 
