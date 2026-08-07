@@ -23,6 +23,7 @@ Nothing in this module ever dereferences a symlink: every entry is read via
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import logging
 import os
@@ -287,6 +288,48 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# ioctl(dst_fd, FICLONE, src_fd) — whole-file reflink. Linux-only; requires
+# both files on one reflink-capable filesystem (btrfs, xfs with reflink=1,
+# bcachefs). Fails EXDEV across devices, EOPNOTSUPP where unsupported.
+_FICLONE = 0x40049409
+
+
+@dataclass
+class MaterializeStats:
+    """Observed materialization mode — degraded modes are measured, not hidden."""
+
+    reflinked: int = 0
+    copied: int = 0
+
+    @property
+    def mode(self) -> str:
+        if self.reflinked and not self.copied:
+            return "reflink"
+        if self.reflinked:
+            return "mixed"
+        return "copy"
+
+
+def _copy_file(src: Path, dst: Path, *, stats: MaterializeStats | None = None) -> None:
+    """Copy one file, preferring a true reflink (FICLONE).
+
+    Falls back to a plain stream copy when the filesystem cannot reflink
+    (ext4, tmpfs) or the files are on different devices.
+    """
+    with src.open("rb") as fin, dst.open("wb") as fout:
+        try:
+            fcntl.ioctl(fout.fileno(), _FICLONE, fin.fileno())
+        except OSError:
+            fout.seek(0)
+            fout.truncate(0)
+            shutil.copyfileobj(fin, fout, length=1024 * 1024)
+            if stats is not None:
+                stats.copied += 1
+        else:
+            if stats is not None:
+                stats.reflinked += 1
+
+
 def _walk_rel(root: str, filter: ProjectFilter):
     """Yield ``(rel, os.DirEntry)`` for admissible paths beneath ``root``.
 
@@ -350,26 +393,12 @@ def capture_manifest(root: Path | str, *, filter: ProjectFilter | None = None) -
     return Manifest(entries=entries)
 
 
-def _copy_file(src: Path, dst: Path) -> None:
-    """Copy one file, preferring copy_file_range (CoW on btrfs/xfs/zfs)."""
-    try:
-        with src.open("rb") as fin, dst.open("wb") as fout:
-            while True:
-                written = os.copy_file_range(fin.fileno(), fout.fileno(), 64 * 1024 * 1024)
-                if written <= 0:
-                    break
-        return
-    except (OSError, NotImplementedError, ValueError):
-        dst.unlink(missing_ok=True)
-    with src.open("rb") as fin, dst.open("wb") as fout:
-        shutil.copyfileobj(fin, fout, length=1024 * 1024)
-
-
 def materialize_workspace(
     src_root: Path | str,
     dst_root: Path | str,
     *,
     filter: ProjectFilter | None = None,
+    stats: MaterializeStats | None = None,
 ) -> int:
     """Create ``dst_root`` as a disposable real copy of ``src_root``.
 
@@ -400,7 +429,7 @@ def materialize_workspace(
             os.chmod(target, stat.S_IMODE(st.st_mode))
         elif stat.S_ISREG(st.st_mode):
             target.parent.mkdir(parents=True, exist_ok=True)
-            _copy_file(Path(entry.path), target)
+            _copy_file(Path(entry.path), target, stats=stats)
             os.chmod(target, stat.S_IMODE(st.st_mode))
             file_count += 1
     return file_count

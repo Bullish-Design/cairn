@@ -16,10 +16,14 @@ adversarial properties the mirror era failed:
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import os
 from pathlib import Path
 
-from cairn.runtime.repo import ProjectFilter, capture_manifest, diff_manifests, materialize_workspace
+import pytest
+
+from cairn.runtime.repo import MaterializeStats, ProjectFilter, _copy_file, capture_manifest, diff_manifests, materialize_workspace
 
 
 def test_project_filter_honors_gitignore(tmp_path: Path) -> None:
@@ -205,3 +209,45 @@ def test_gitignore_negation_under_excluded_dir_matches_git(tmp_path: Path) -> No
     manifest = capture_manifest(tmp_path)
 
     assert "build/important.txt" not in manifest.entries
+
+
+def test_reflink_falls_back_cleanly_when_unsupported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unsupported FICLONE must produce a byte-identical plain copy."""
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EOPNOTSUPP, "not supported")
+
+    monkeypatch.setattr(fcntl, "ioctl", boom)
+
+    src = tmp_path / "a.bin"
+    src.write_bytes(os.urandom(1024 * 64))
+    dst = tmp_path / "b.bin"
+    stats = MaterializeStats()
+    _copy_file(src, dst, stats=stats)
+
+    assert dst.read_bytes() == src.read_bytes()
+    assert stats.mode == "copy"
+
+
+def test_materialize_is_byte_identical_either_way(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reflink and copy paths must be indistinguishable in content."""
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "a.bin").write_bytes(os.urandom(1024 * 32))
+    (project / "src" / "b.txt").write_text("hello", encoding="utf-8")
+
+    reflink_dst = tmp_path / "ws-reflink"
+    copy_dst = tmp_path / "ws-copy"
+
+    materialize_workspace(project, reflink_dst)
+    monkeypatch.setattr(
+        fcntl,
+        "ioctl",
+        lambda *args: (_ for _ in ()).throw(OSError(errno.EOPNOTSUPP, "not supported")),
+    )
+    materialize_workspace(project, copy_dst)
+
+    def digests(root: Path) -> dict[str, str]:
+        manifest = capture_manifest(root)
+        return {rel: entry.digest or "" for rel, entry in manifest.files().items()}
+
+    assert digests(copy_dst) == digests(reflink_dst)

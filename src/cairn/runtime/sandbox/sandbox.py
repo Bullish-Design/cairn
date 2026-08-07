@@ -247,7 +247,19 @@ class BwrapExecutor:
         """(Re)create the disposable workspace from the base manifest state."""
         if self.workdir.exists():
             shutil.rmtree(self.workdir)
-        repo.materialize_workspace(self.project_root, self.workdir, filter=self._project_filter())
+        stats = repo.MaterializeStats()
+        repo.materialize_workspace(
+            self.project_root, self.workdir, filter=self._project_filter(), stats=stats
+        )
+        logger.debug(
+            "Materialized workspace",
+            extra={
+                "agent_id": self.agent_id,
+                "materialize_mode": stats.mode,
+                "reflinked": stats.reflinked,
+                "copied": stats.copied,
+            },
+        )
 
     def _capture_workspace(self) -> repo.Manifest:
         # Deliberately the *project's* rules, rebound to the workspace root.
