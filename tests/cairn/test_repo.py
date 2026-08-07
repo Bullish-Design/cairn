@@ -16,6 +16,7 @@ adversarial properties the mirror era failed:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from cairn.runtime.repo import ProjectFilter, capture_manifest, diff_manifests, materialize_workspace
@@ -158,3 +159,49 @@ def test_capture_and_materialize_respect_nested_gitignore(tmp_path: Path) -> Non
     assert "root.tmp" not in manifest.entries
     assert "src/keep.tmp" in manifest.entries
     assert "src/drop.tmp" not in manifest.entries
+
+
+def test_directory_named_like_excluded_suffix_is_not_recorded_but_is_descended(tmp_path: Path) -> None:
+    """A directory named *.pyc is excluded as an entry (suffix rule) but its
+    contents remain part of the tree — the suffix rule is not hereditary."""
+    d = tmp_path / "foo.pyc"
+    d.mkdir()
+    (d / "bar.py").write_text("x = 1", encoding="utf-8")
+
+    manifest = capture_manifest(tmp_path)
+
+    assert "foo.pyc" not in manifest.entries
+    assert "foo.pyc/bar.py" in manifest.entries
+
+
+def test_excluded_directories_are_pruned_not_merely_filtered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """.git and friends are never scanned — not scanned-then-discarded."""
+    (tmp_path / "keep.py").write_text("x = 1", encoding="utf-8")
+    junk = tmp_path / ".git" / "objects"
+    junk.mkdir(parents=True)
+    for i in range(50):
+        (junk / f"o{i}").write_text("junk", encoding="utf-8")
+
+    scanned: list[str] = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path):
+        scanned.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    manifest = capture_manifest(tmp_path)
+
+    assert "keep.py" in manifest.entries
+    assert not any(".git" in s for s in scanned), "excluded subtree was scanned"
+
+
+def test_gitignore_negation_under_excluded_dir_matches_git(tmp_path: Path) -> None:
+    """git cannot re-include a file under an excluded directory; nor do we."""
+    (tmp_path / ".gitignore").write_text("build/\n!build/important.txt\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "important.txt").write_text("keep", encoding="utf-8")
+
+    manifest = capture_manifest(tmp_path)
+
+    assert "build/important.txt" not in manifest.entries

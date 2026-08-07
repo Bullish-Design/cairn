@@ -173,6 +173,23 @@ class ProjectFilter:
             return False
         return not self._gitignored(rel)
 
+    def allows_dir_rel(self, rel: str) -> bool:
+        """Whether to descend into a directory.
+
+        Uses only *hereditary* exclusions — those that also exclude every
+        descendant. The suffix rule is deliberately omitted: it applies to the
+        path itself, not its children, so a directory named ``foo.pyc`` is not
+        recorded but its contents are still part of the tree.
+        """
+        if rel == "" or rel.startswith("/"):
+            return False
+        parts = rel.split("/")
+        if ".." in parts:
+            return False
+        if any(part in self._excluded_dirs for part in parts):
+            return False
+        return not self._gitignored(rel)
+
     def allows(self, path: Path) -> bool:
         """Admissibility for an absolute path; confined beneath the root.
 
@@ -270,16 +287,34 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _walk(root: Path):
-    """Non-recursive scandir walk that never descends into symlinked dirs."""
-    stack = [root]
+def _walk_rel(root: str, filter: ProjectFilter):
+    """Yield ``(rel, os.DirEntry)`` for admissible paths beneath ``root``.
+
+    Directories failing the hereditary predicate are pruned — their subtrees
+    are never scanned. This is the difference between visiting 6,285 paths and
+    visiting 167 on a repository with VCS metadata and build caches.
+
+    Symlinked directories are never descended (``follow_symlinks=False``).
+    """
+    stack: list[str] = [""]
     while stack:
-        directory = stack.pop()
-        with os.scandir(directory) as iterator:
-            for entry in iterator:
-                yield Path(entry.path)
+        prefix = stack.pop()
+        base = os.path.join(root, prefix) if prefix else root
+        try:
+            scanner = os.scandir(base)
+        except OSError:  # unreadable directory: skip, never abort the scan
+            continue
+        with scanner:
+            for entry in scanner:
+                rel = f"{prefix}/{entry.name}" if prefix else entry.name
                 if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
+                    if not filter.allows_dir_rel(rel):
+                        continue  # prune the whole subtree
+                    stack.append(rel)
+                    if filter.allows_rel(rel):
+                        yield rel, entry
+                elif filter.allows_rel(rel):
+                    yield rel, entry
 
 
 def _bind_filter(filter: ProjectFilter | None, root: Path) -> ProjectFilter:
@@ -294,17 +329,14 @@ def _bind_filter(filter: ProjectFilter | None, root: Path) -> ProjectFilter:
 def capture_manifest(root: Path | str, *, filter: ProjectFilter | None = None) -> Manifest:
     """Faithful snapshot of ``root``: files (digest/mode/size), dirs (incl.
     empty), and symlinks (target/mode).  No symlink is ever dereferenced."""
-    root = Path(root).resolve()
-    filter = _bind_filter(filter, root)
+    root_path = Path(root).resolve()
+    filt = _bind_filter(filter, root_path)
     entries: dict[str, ManifestEntry] = {}
-    for path in _walk(root):
-        if not filter.allows(path):
-            continue
-        rel = path.relative_to(root).as_posix()
-        st = path.lstat()
+    for rel, entry in _walk_rel(str(root_path), filt):
+        st = entry.stat(follow_symlinks=False)
         mode = stat.S_IMODE(st.st_mode)
         if stat.S_ISLNK(st.st_mode):
-            entries[rel] = ManifestEntry(path=rel, kind="symlink", mode=mode, link_target=os.readlink(path))
+            entries[rel] = ManifestEntry(path=rel, kind="symlink", mode=mode, link_target=os.readlink(entry.path))
         elif stat.S_ISDIR(st.st_mode):
             entries[rel] = ManifestEntry(path=rel, kind="dir", mode=mode)
         elif stat.S_ISREG(st.st_mode):
@@ -312,7 +344,7 @@ def capture_manifest(root: Path | str, *, filter: ProjectFilter | None = None) -
                 path=rel,
                 kind="file",
                 size=st.st_size,
-                digest=_sha256_file(path),
+                digest=_sha256_file(Path(entry.path)),
                 mode=mode,
             )
     return Manifest(entries=entries)
@@ -350,28 +382,25 @@ def materialize_workspace(
     """
     src_root = Path(src_root).resolve()
     dst_root = Path(dst_root)
-    filter = _bind_filter(filter, src_root)
+    filt = _bind_filter(filter, src_root)
     if dst_root.exists():
         if any(dst_root.iterdir()):
             raise ValueError(f"Materialize target is not empty: {dst_root}")
     else:
         dst_root.mkdir(parents=True)
     file_count = 0
-    for path in _walk(src_root):
-        if not filter.allows(path):
-            continue
-        rel = path.relative_to(src_root)
+    for rel, entry in _walk_rel(str(src_root), filt):
         target = dst_root / rel
-        st = path.lstat()
+        st = entry.stat(follow_symlinks=False)
         if stat.S_ISLNK(st.st_mode):
             target.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(os.readlink(path), target)
+            os.symlink(os.readlink(entry.path), target)
         elif stat.S_ISDIR(st.st_mode):
             target.mkdir(parents=True, exist_ok=True)
             os.chmod(target, stat.S_IMODE(st.st_mode))
         elif stat.S_ISREG(st.st_mode):
             target.parent.mkdir(parents=True, exist_ok=True)
-            _copy_file(path, target)
+            _copy_file(Path(entry.path), target)
             os.chmod(target, stat.S_IMODE(st.st_mode))
             file_count += 1
     return file_count
