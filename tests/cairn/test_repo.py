@@ -22,8 +22,9 @@ import os
 from pathlib import Path
 
 import pytest
+from pathspec import GitIgnoreSpec
 
-from cairn.runtime.repo import MaterializeStats, ProjectFilter, _copy_file, capture_manifest, diff_manifests, materialize_workspace
+from cairn.runtime.repo import EXCLUDED_SUFFIXES, MaterializeStats, ProjectFilter, _copy_file, capture_manifest, diff_manifests, materialize_workspace
 
 
 def test_project_filter_honors_gitignore(tmp_path: Path) -> None:
@@ -251,3 +252,70 @@ def test_materialize_is_byte_identical_either_way(tmp_path: Path, monkeypatch: p
         return {rel: entry.digest or "" for rel, entry in manifest.files().items()}
 
     assert digests(copy_dst) == digests(reflink_dst)
+
+
+def _reference_gitignored(project_root: Path, rel: str) -> bool:
+    """Reference (pre-optimization) gitignore matching, pathlib-based."""
+    rel_parts = Path(rel).parts
+    specs: list[tuple[Path, GitIgnoreSpec]] = []
+    for base in sorted(project_root.rglob(".gitignore")):
+        if not base.is_file():
+            continue
+        try:
+            lines = base.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        specs.append((base.parent.relative_to(project_root), GitIgnoreSpec.from_lines(lines)))
+    for rel_base, spec in reversed(specs):
+        if rel_base == Path("."):
+            sub = rel
+        else:
+            if len(rel_parts) <= len(rel_base.parts) or rel_parts[: len(rel_base.parts)] != rel_base.parts:
+                continue
+            sub = "/".join(rel_parts[len(rel_base.parts) :])
+        result = spec.check_file(sub)
+        if result.include is not None:
+            return result.include
+    return False
+
+
+def _reference_allows_rel(f: ProjectFilter, rel: str) -> bool:
+    """Reference (pre-optimization) pathlib-based admission oracle."""
+    if rel == "" or rel.startswith("/") or ".." in rel.split("/"):
+        return False
+    if any(part in f._excluded_dirs for part in Path(rel).parts):
+        return False
+    if Path(rel).suffix in EXCLUDED_SUFFIXES:
+        return False
+    return not _reference_gitignored(f.project_root, rel)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "a.py",
+        ".pyc",
+        "x/.pyc",
+        "foo.pyc",
+        "foo.pyo",
+        "a/b/c.py",
+        "a.tar.gz",
+        "foo.",
+        ".hidden",
+        "a/../b",
+        "/abs",
+        "",
+        "a//b",
+        "node_modules/x.js",
+        ".git/config",
+        "dir.pyc/child.py",
+        "a.tmp",
+        "build/x.txt",
+        "keep.py",
+    ],
+)
+def test_allows_rel_matches_reference_implementation(tmp_path: Path, rel: str) -> None:
+    """String-based admission must exactly match the pathlib semantics it replaces."""
+    (tmp_path / ".gitignore").write_text("*.pyc\n*.tmp\nbuild/\n", encoding="utf-8")
+    f = ProjectFilter(tmp_path)
+    assert f.allows_rel(rel) == _reference_allows_rel(f, rel), rel
