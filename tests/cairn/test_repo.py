@@ -220,6 +220,76 @@ def test_gitignore_negation_under_excluded_dir_matches_git(tmp_path: Path) -> No
     assert "build/important.txt" not in manifest.entries
 
 
+def test_gitignore_discovery_is_pruned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """.gitignore discovery never scans excluded subtrees — the old rglob
+    descended into .git/.venv in full just to discard their gitignores."""
+    (tmp_path / "keep.py").write_text("x = 1", encoding="utf-8")
+    junk = tmp_path / ".git" / "hooks"
+    junk.mkdir(parents=True)
+    for i in range(50):
+        (junk / f"h{i}").write_text("junk", encoding="utf-8")
+    (tmp_path / ".git" / "hooks" / ".gitignore").write_text("*.py\n", encoding="utf-8")
+    (tmp_path / ".venv" / ".gitignore").parent.mkdir()
+    (tmp_path / ".venv" / ".gitignore").write_text("*.py\n", encoding="utf-8")
+
+    scanned: list[str] = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path):
+        scanned.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", counting_scandir)
+    f = ProjectFilter(tmp_path)
+
+    assert f.allows_rel("keep.py") is True
+    assert not any(".git" in s or ".venv" in s for s in scanned), "excluded subtree scanned during discovery"
+
+
+def test_gitignore_under_excluded_dir_is_never_consulted(tmp_path: Path) -> None:
+    """A .gitignore inside a gitignored directory is dead: git (and we) cannot
+    re-include under an excluded directory, so its negation patterns must not
+    resurrect anything — and discovery must not even read it."""
+    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / ".gitignore").write_text("!important.txt\n", encoding="utf-8")
+    (tmp_path / "build" / "important.txt").write_text("keep", encoding="utf-8")
+
+    manifest = capture_manifest(tmp_path)
+
+    assert "build/important.txt" not in manifest.entries
+    assert "build/.gitignore" not in manifest.entries
+
+
+def test_self_ignoring_gitignore_is_still_loaded(tmp_path: Path) -> None:
+    """A .gitignore that ignores itself must still be loaded and applied —
+    discovery must not go through the admission predicate it is building."""
+    (tmp_path / ".gitignore").write_text(".gitignore\nsecret.txt\n", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("S", encoding="utf-8")
+    (tmp_path / "ok.txt").write_text("fine", encoding="utf-8")
+
+    manifest = capture_manifest(tmp_path)
+
+    assert "ok.txt" in manifest.entries
+    assert "secret.txt" not in manifest.entries
+    assert ".gitignore" not in manifest.entries  # it ignores itself, yet still applies
+
+
+def test_gitignore_under_suffix_named_dir_applies_to_children(tmp_path: Path) -> None:
+    """A directory named *.pyc is not recorded, but its contents (and its
+    .gitignore) are part of the tree — discovery must descend it."""
+    (tmp_path / "foo.pyc").mkdir()
+    (tmp_path / "foo.pyc" / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+    (tmp_path / "foo.pyc" / "x.tmp").write_text("drop", encoding="utf-8")
+    (tmp_path / "foo.pyc" / "y.txt").write_text("keep", encoding="utf-8")
+
+    manifest = capture_manifest(tmp_path)
+
+    assert "foo.pyc" not in manifest.entries
+    assert "foo.pyc/x.tmp" not in manifest.entries
+    assert "foo.pyc/y.txt" in manifest.entries
+
+
 def test_reflink_falls_back_cleanly_when_unsupported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An unsupported FICLONE must produce a byte-identical plain copy."""
 

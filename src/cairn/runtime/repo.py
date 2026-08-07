@@ -137,18 +137,46 @@ class ProjectFilter:
         self._load_gitignores()
 
     def _load_gitignores(self) -> None:
-        """Collect every ``.gitignore`` beneath the root (shallowest first)."""
-        for base in sorted(self.project_root.rglob(".gitignore")):
-            if not base.is_file():
-                continue
+        """Collect the ``.gitignore`` files that can affect admission, walking
+        only directories that are themselves admissible (shallowest first).
+
+        A ``.gitignore`` inside an excluded or ignored directory can never
+        influence any admitted path — its patterns apply only beneath it, and
+        every path beneath it is excluded by the same hereditary rule — so it
+        is never read.  This keeps construction proportional to the admitted
+        tree instead of the whole on-disk tree (the old ``rglob`` descended
+        into ``.git``/``.venv``/caches in full just to discard their
+        gitignores).
+
+        The discovery walk deliberately tests directories with
+        :meth:`allows_dir_rel` only — never :meth:`allows_rel` — so a
+        ``.gitignore`` that ignores itself is still loaded (as the old
+        rglob did; dropping it would change admission).
+        """
+        stack: list[str] = [""]
+        while stack:
+            prefix = stack.pop()
+            base_dir = self.project_root if not prefix else self.project_root / prefix
+            gitignore = base_dir / ".gitignore"
+            if gitignore.is_file():
+                try:
+                    lines = gitignore.read_text(encoding="utf-8").splitlines()
+                except OSError:  # unreadable: skip the spec, keep walking
+                    pass
+                else:
+                    rel_base = base_dir.relative_to(self.project_root)
+                    self._specs.append((rel_base.parts, GitIgnoreSpec.from_lines(lines)))
             try:
-                lines = base.read_text(encoding="utf-8").splitlines()
-            except OSError:
+                with os.scandir(base_dir) as scanner:
+                    children = sorted(e.name for e in scanner if e.is_dir(follow_symlinks=False))
+            except OSError:  # unreadable directory: never abort discovery
                 continue
-            rel_base = base.parent.relative_to(self.project_root)
-            # Precompute the base as a parts tuple so the hot matching loop
-            # below does no path parsing at all.
-            self._specs.append((rel_base.parts, GitIgnoreSpec.from_lines(lines)))
+            # LIFO stack, so push in reverse to pop in sorted order — the same
+            # shallowest-first preorder the old sorted(rglob) produced.
+            for name in reversed(children):
+                child = f"{prefix}/{name}" if prefix else name
+                if self.allows_dir_rel(child):
+                    stack.append(child)
 
     def _gitignored(self, rel: str) -> bool:
         """True if the deepest matching ``.gitignore`` pattern excludes ``rel``."""
