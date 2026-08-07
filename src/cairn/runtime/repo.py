@@ -186,6 +186,20 @@ class ProjectFilter:
             return False
         return self.allows_rel(rel.as_posix())
 
+    def rebind(self, root: Path | str) -> ProjectFilter:
+        """Same admission rules, applied beneath a different root.
+
+        Used to capture a disposable workspace under the *host's* rules. The
+        rules must never be rebuilt from workspace content: the sandboxed task
+        can write ``.gitignore`` files, and admission rules it controls let it
+        steer the computed changeset (forge deletions of untouched files).
+        """
+        clone = object.__new__(ProjectFilter)
+        clone.project_root = Path(root).resolve()
+        clone._excluded_dirs = self._excluded_dirs
+        clone._specs = self._specs  # immutable after construction; shared
+        return clone
+
 
 @dataclass(frozen=True)
 class ManifestDiff:
@@ -268,11 +282,20 @@ def _walk(root: Path):
                     stack.append(Path(entry.path))
 
 
+def _bind_filter(filter: ProjectFilter | None, root: Path) -> ProjectFilter:
+    """Return a filter rooted at ``root``, reusing supplied rules if given."""
+    if filter is None:
+        return ProjectFilter(root)
+    if filter.project_root == root:
+        return filter
+    return filter.rebind(root)
+
+
 def capture_manifest(root: Path | str, *, filter: ProjectFilter | None = None) -> Manifest:
     """Faithful snapshot of ``root``: files (digest/mode/size), dirs (incl.
     empty), and symlinks (target/mode).  No symlink is ever dereferenced."""
     root = Path(root).resolve()
-    filter = filter or ProjectFilter(root)
+    filter = _bind_filter(filter, root)
     entries: dict[str, ManifestEntry] = {}
     for path in _walk(root):
         if not filter.allows(path):
@@ -327,7 +350,7 @@ def materialize_workspace(
     """
     src_root = Path(src_root).resolve()
     dst_root = Path(dst_root)
-    filter = filter or ProjectFilter(src_root)
+    filter = _bind_filter(filter, src_root)
     if dst_root.exists():
         if any(dst_root.iterdir()):
             raise ValueError(f"Materialize target is not empty: {dst_root}")

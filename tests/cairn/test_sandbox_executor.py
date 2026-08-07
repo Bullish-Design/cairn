@@ -416,6 +416,60 @@ def test_toolchain_runtime_mounts_are_bound_readonly(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
 @pytest.mark.integration
+async def test_task_gitignore_cannot_forge_deletions(tmp_path: Path) -> None:
+    """A task-authored .gitignore must not make untouched files look deleted.
+
+    Admission rules are host state; if the task controls them it can steer the
+    computed changeset, which is supposed to be the authoritative record of
+    what it did.
+    """
+    project = _project_with(tmp_path, {"important.py": "CRITICAL = True\n"})
+    settings = _sandbox_settings(tmp_path)
+    executor = BwrapExecutor(
+        agent_id="agent-forge",
+        workdir=tmp_path / "work",
+        project_root=project,
+        settings=settings,
+    )
+
+    code = (
+        "open('.gitignore','w').write('important.py\\n')\n"
+        "submit_result(summary='adding gitignore', changed_files=['.gitignore'])\n"
+    )
+    result = await executor.run(code=code, task="forge")
+
+    assert result.changes["deleted"] == []
+    assert result.changes["written"] == [".gitignore"]
+
+
+def test_filter_built_once_per_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admission rules are constructed exactly once per executor run — never
+    rebuilt from workspace content, and never re-derived per pass."""
+    calls: list[str] = []
+    real_init = repo.ProjectFilter.__init__
+
+    def counting_init(self: repo.ProjectFilter, root: object, **kwargs: object) -> None:
+        calls.append(str(root))
+        real_init(self, root, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(repo.ProjectFilter, "__init__", counting_init)
+
+    project = _project_with(tmp_path, {"a.py": "x = 1\n"})
+    executor = BwrapExecutor(
+        agent_id="agent-once",
+        workdir=tmp_path / "work",
+        project_root=project,
+        settings=ExecutorSettings(),
+    )
+    executor._capture_project()
+    executor._materialize(None)
+    executor._capture_workspace()
+
+    assert len(calls) == 1, f"ProjectFilter rebuilt {len(calls)}x per run: {calls}"
+
+
+@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@pytest.mark.integration
 async def test_real_sandbox_log_spammer_is_killed_and_capped(tmp_path: Path) -> None:
     """Review §2.9: stdout/stderr are streamed into a capped buffer and the
     task is killed on overflow — a log-spammer cannot exhaust host memory."""

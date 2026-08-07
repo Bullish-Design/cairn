@@ -98,6 +98,7 @@ class BwrapExecutor:
         self.workdir = Path(workdir)
         self.project_root = Path(project_root).resolve()
         self.settings = settings
+        self._filter: repo.ProjectFilter | None = None
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -230,17 +231,29 @@ class BwrapExecutor:
     # Snapshot + materialization
     # ------------------------------------------------------------------
 
+    def _project_filter(self) -> repo.ProjectFilter:
+        """Admission rules for this run — built once from the project tree.
+
+        Host state, never rebuilt from workspace content (see rebind()).
+        """
+        if self._filter is None:
+            self._filter = repo.ProjectFilter(self.project_root)
+        return self._filter
+
     def _capture_project(self) -> repo.Manifest:
-        return repo.capture_manifest(self.project_root)
+        return repo.capture_manifest(self.project_root, filter=self._project_filter())
 
     def _materialize(self, base_manifest: repo.Manifest) -> None:
         """(Re)create the disposable workspace from the base manifest state."""
         if self.workdir.exists():
             shutil.rmtree(self.workdir)
-        repo.materialize_workspace(self.project_root, self.workdir)
+        repo.materialize_workspace(self.project_root, self.workdir, filter=self._project_filter())
 
     def _capture_workspace(self) -> repo.Manifest:
-        return repo.capture_manifest(self.workdir)
+        # Deliberately the *project's* rules, rebound to the workspace root.
+        # Rebuilding rules here would let task-authored .gitignore files steer
+        # the changeset (forge deletions of untouched files).
+        return repo.capture_manifest(self.workdir, filter=self._project_filter())
 
     # ------------------------------------------------------------------
     # Sandbox invocation
