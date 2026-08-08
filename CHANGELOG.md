@@ -2,6 +2,76 @@
 
 All notable changes to cairn are documented in this file.
 
+## [0.4.0] - 2026-08-07
+
+Execution hot-path refactor.  Overhead on a 200-file project drops from
+133-159 ms to 103 ms, and `capture_manifest` on the cairn repo itself from
+373 ms to 31 ms (12x).  The bwrap boundary, the authority machinery
+(accept/undo/journal/lock), the provider model and the daemon/queue
+architecture are unchanged.
+
+### Fixed
+
+- **A task could forge deletions into its own changeset.**  The post-run
+  workspace capture built its `ProjectFilter` from the *workspace*, whose
+  `.gitignore` files the sandboxed task writes.  A task whose entire body was
+  `open('.gitignore','w').write('important.py\n')` produced
+  `deleted: ['important.py']` for a file it never touched and that still
+  existed in the workspace; on accept that file was removed from the working
+  tree.  Admission rules are now host state, built once per run from the
+  project tree and rebound (never rebuilt) for the workspace capture, so
+  nothing the task writes can steer the computed changeset.  The changeset is
+  the authoritative record of what the agent did, and it is now
+  agent-independent in fact as well as in intent.
+- Real-sandbox test runtime resolution lived in three divergent copies, two
+  carrying the same dead check (`"/nix/store" in Path.parts` is never true).
+  Consolidated into `tests/cairn/sandbox_env.py`; an unresolvable runtime now
+  warns instead of skipping silently, and `CAIRN_REQUIRE_SANDBOX_TESTS=1`
+  (set by the devenv gate) makes it an error.  A bare `pytest` run went from
+  266 passed / 12 skipped to 278 passed / 0 skipped — the previously-dead
+  tests, including the sandbox boundary suite, all pass.
+
+### Performance
+
+- **Manifest walk is pruned at excluded directories** rather than scanning
+  and discarding.  On this repo it visited 6,285 paths to keep 167; it now
+  visits 167.  Pruning uses a *hereditary* predicate (excluded dir names and
+  gitignore, which also exclude descendants) kept separate from the recording
+  predicate, so the non-hereditary suffix rule still behaves correctly for a
+  directory named `*.pyc`.  Manifests are byte-identical to the previous
+  implementation, verified against the real repo and an adversarial fixture.
+- **One `ProjectFilter` per task instead of three.**  Its constructor
+  `rglob`-ed the whole unfiltered tree for `.gitignore` files (18.7 ms a
+  time); that discovery walk is now pruned too.
+- **Admission checks no longer construct `pathlib` objects per path** — the
+  check cost 27.8 us against a 2.8 us `lstat`, i.e. 10x the syscall it
+  guarded.  String-based now, validated against the previous implementation
+  as an oracle.
+- **Materialization uses a true reflink (`FICLONE`)** with a plain-copy
+  fallback, and reports the observed mode per run via `MaterializeStats`.
+  Note this is a modest win, not the large one first assumed:
+  `copy_file_range` was already reflinking on btrfs.  `FICLONE` is ~1.75x
+  faster on large files and, more usefully, *predictable* — it either
+  reflinks or fails with a distinguishable errno, whereas `copy_file_range`
+  degrades silently, which is what makes the reported mode meaningful.
+
+### Added
+
+- `tests/cairn/test_performance_execpath.py` — benchmarks that run the real
+  `BwrapExecutor`.  The existing `test_performance.py` stubs the executor and
+  cannot observe capture, materialize, diff or sandbox cost; that blind spot
+  is why none of the above was caught earlier.  Its `BenchmarkExecutor` now
+  says so explicitly.
+
+### Changed
+
+- A task-authored `.gitignore` affects *subsequent* runs, not its own: the
+  base manifest was captured under the previous rules, and a diff is only
+  meaningful between two manifests taken under the same admission rules.
+- `docs/CONCEPT.md` principle 1 now states where copy-on-write actually
+  applies (reflink-capable filesystems) and that the mode is reported;
+  `docs/SPEC.md` documents admission rules as host state.
+
 ## [0.3.0] - 2026-08-02
 
 ### Dependencies
