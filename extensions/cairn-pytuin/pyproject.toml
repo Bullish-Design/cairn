@@ -1,0 +1,55 @@
+[project]
+name = "cairn-pytuin"
+version = "0.1.0"
+description = "Atuin KV code provider plugin for Cairn"
+requires-python = ">=3.14"          # pytuin uses PEP 758 syntax; see README §Python version
+license = { text = "MIT" }
+authors = [{ name = "Bullish Design" }]
+dependencies = [
+    "cairn",
+    "pytuin>=0.2.0",
+    # Imported directly by the provider (settings); also carried by cairn.
+    "pydantic-settings>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+]
+
+[project.entry-points."cairn.providers"]
+pytuin = "cairn_pytuin.provider:PytuinCodeProvider"
+
+[build-system]
+requires = ["hatchling>=1.24.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cairn_pytuin"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint.isort]
+# cairn and cairn_pytuin are sibling projects, not third-party packages.
+known-first-party = ["cairn", "cairn_pytuin"]
+
+[tool.uv]
+# cairn and pytuin are not published with the APIs this plugin needs (cairn's
+# PyPI release predates the provider plugin system; pytuin is unpublished,
+# blocking on atuout). These dev-only overrides resolve the sibling checkouts;
+# drop them once both are published. atuout itself is never needed — pytuin
+# makes it an optional extra (recordings) that this provider does not use.
+[tool.uv.sources]
+cairn = { path = "../.." }
+pytuin = { path = "../../../pytuin" }

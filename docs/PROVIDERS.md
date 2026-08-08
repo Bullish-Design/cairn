@@ -46,6 +46,33 @@ cairn up --provider registry
 cairn queue "registry://registry.example.com/scripts/format.py"
 ```
 
+### `PytuinCodeProvider` (`cairn-pytuin`)
+- Loads task code from the [Atuin](https://atuin.sh) KV store via [pytuin](https://github.com/BullishDesign/pytuin).
+- `reference` is `namespace/key`, or a bare `key` for the default namespace.
+  Segments starting with `-` are rejected: they would be parsed as flags by
+  the atuin CLI (e.g. `--help` returns atuin's help text as task code).
+- Configuration comes from the environment (the plugin loader passes no
+  plugin-specific flags): `CAIRN_PYTUIN_NAMESPACE` (default `cairn`) and
+  `CAIRN_PYTUIN_EXECUTABLE` (default `atuin`).
+- Requires **Python >= 3.14** — pytuin uses PEP 758 syntax that does not
+  parse on 3.13. Cairn core stays 3.13; install this plugin on a 3.14
+  interpreter.
+- Atuin KV is synced state, so task code may originate on any synced host.
+  Accepted by design: bwrap is the security boundary and task code is
+  treated as untrusted regardless of provenance.
+
+Example (daemon started with `--provider pytuin`):
+```bash
+atuin kv set --namespace tasks --key deploy "write_file('out.txt', 'hi')"
+cairn up --provider pytuin
+cairn queue tasks/deploy
+```
+
+Or inline, no daemon needed:
+```bash
+cairn run tasks/deploy --provider pytuin
+```
+
 ## Writing a Custom Provider
 
 Implement the `CodeProvider` protocol and register an entry point:
