@@ -13,8 +13,8 @@ uv sync --all-extras
 ## Usage
 
 The CLI provides the agent lifecycle commands (`up`, `run`, `spawn`,
-`queue`, `list-agents`, `status`, `accept`, `reject`, `undo`, `logs`) plus
-three command groups:
+`queue`, `list-agents`, `status`, `accept`, `reject`, `undo`, `logs`), the
+`doctor` preflight check, plus three command groups:
 
 - `workspace` - Workspace management commands
 - `files` - File operations in workspaces
@@ -32,6 +32,44 @@ cairn files --help
 cairn --help
 cairn preview --help
 ```
+
+## Diagnostics
+
+`cairn status` answers "is the daemon up?".  `cairn doctor` answers the harder
+question: is the sandbox runtime in a state where execution can be trusted?
+
+These are failures that stay silent because every component reports fine on its
+own — an isolation flag dropped from the bwrap argv while debugging, a sandbox
+interpreter that no longer resolves, an unreadable closure manifest (the
+executor then quietly binds *all* of `/nix/store` instead of the declared
+closure), or materialization degrading from reflink to a full copy because
+`CAIRN_HOME` landed on a different filesystem than the project.
+
+```bash
+$ cairn doctor
+[ok  ] bwrap binary: bubblewrap 0.11.2 (/nix/store/…/bin/bwrap)
+[ok  ] sandbox python: /nix/store/…/bin/python3.13 (configured)
+[ok  ] closure manifest: 29 store paths, all present
+[ok  ] isolation flags: --unshare-all, --die-with-parent, --new-session, --clearenv
+[ok  ] materialization: reflink (same filesystem)
+[ok  ] sandbox launch: sandbox starts and executes code
+[ok  ] isolation effective: verified from inside the sandbox: no host home, no network
+```
+
+The last two checks launch a **real sandbox** and assert confinement from
+inside it, rather than inspecting configuration — a doctor that only greps argv
+would report healthy against a sandbox that confines nothing.  Use `--shallow`
+to skip them (roughly 100 ms each):
+
+```bash
+cairn doctor --shallow      # configuration inspection only
+```
+
+Exit code is `1` if any check **failed**, `0` otherwise.  Warnings (a degraded
+but working runtime, e.g. materialization falling back to a full copy) are
+reported without failing, so `doctor` is safe to run in a pre-flight script.
+
+No daemon is required.
 
 ## Workspace Commands
 

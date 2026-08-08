@@ -525,6 +525,28 @@ async def _run_preview_file(args: argparse.Namespace) -> int:
         return 1
 
 
+def _run_doctor(args: argparse.Namespace) -> int:
+    """Report whether the sandbox runtime is in a trustworthy state.
+
+    Runs without a daemon: every check is answered from the local runtime, and
+    the isolation checks launch a real sandbox rather than inspecting config.
+    """
+    from cairn.runtime.doctor import format_report, run_doctor
+
+    path_settings, _orchestrator_settings, executor_settings = _resolve_settings(args)
+    project_root = (path_settings.project_root or Path(".")).expanduser().resolve()
+    cairn_home = _resolve_cairn_home(args)
+
+    report = run_doctor(
+        project_root=project_root,
+        cairn_home=cairn_home,
+        settings=executor_settings,
+        deep=not args.shallow,
+    )
+    print(format_report(report))
+    return report.exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cairn")
     _add_common_flags(parser)
@@ -533,6 +555,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     up_parser = subparsers.add_parser("up", help="Start orchestrator service")
     up_parser.set_defaults(handler=_run_up, is_async=True)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check that the sandbox runtime is in a state where execution can be trusted",
+    )
+    doctor_parser.add_argument(
+        "--shallow",
+        action="store_true",
+        help="Skip the checks that launch a real sandbox (config inspection only)",
+    )
+    doctor_parser.set_defaults(handler=_run_doctor, is_async=False)
 
     run_parser = subparsers.add_parser("run", help="Run a task inline to completion (no daemon)")
     run_parser.add_argument("task")
