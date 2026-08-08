@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
-import shutil
-import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -16,22 +13,7 @@ from cairn.providers.providers import InlineCodeProvider
 from cairn.runtime.agent import AgentState
 from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError
 from cairn.runtime.settings import ExecutorSettings, OrchestratorSettings
-
-BWRAP = os.environ.get("CAIRN_TEST_BWRAP") or os.environ.get("CAIRN_EXECUTOR_BWRAP_PATH") or shutil.which("bwrap")
-
-
-def _sandbox_python() -> str | None:
-    """Resolve a Nix-store python for real-sandbox tests (NixOS-only runtime)."""
-    configured = os.environ.get("CAIRN_TEST_PYTHON") or os.environ.get("CAIRN_EXECUTOR_PYTHON_PATH")
-    if configured:
-        return str(Path(configured).resolve())
-    resolved = Path(sys.executable).resolve()
-    if "/nix/store" in resolved.parts:
-        return str(resolved)
-    return None
-
-
-SANDBOX_PYTHON = _sandbox_python()
+from tests.cairn.sandbox_env import BWRAP, SANDBOX_PYTHON, requires_sandbox
 
 
 class TimedOutExecutor:
@@ -114,7 +96,7 @@ async def test_execution_timeout_marks_agent_errored(tmp_path: Path) -> None:
         await orch.shutdown()
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="bwrap or a Nix-store python not available")
+@requires_sandbox
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_memory_limit_kills_oversized_task(tmp_path: Path) -> None:

@@ -94,7 +94,11 @@ in
     echo "==> Type checking (ty)"
     ty check
     echo "==> Tests (pytest, incl. real-sandbox via CAIRN_EXECUTOR_*; coverage floor enforced)"
-    pytest -q --cov=cairn --cov-report=term-missing
+    # Turn an unresolvable sandbox runtime into a collection error rather than
+    # a silent skip.  The `test -n` checks above only prove the variables are
+    # set; this proves the runtime actually resolved and the isolation tests
+    # really ran.
+    CAIRN_REQUIRE_SANDBOX_TESTS=1 pytest -q --cov=cairn --cov-report=term-missing
   '';
 
   # https://devenv.sh/pre-commit-hooks/

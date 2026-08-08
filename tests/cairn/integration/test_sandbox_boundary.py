@@ -19,14 +19,12 @@ import pytest
 
 from cairn.runtime.sandbox import BwrapExecutor
 from cairn.runtime.settings import ExecutorSettings
+from tests.cairn.sandbox_env import BWRAP, SANDBOX_PYTHON, requires_sandbox
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not shutil.which("bwrap"), reason="needs bwrap"),
 ]
-
-BWRAP = os.environ.get("CAIRN_TEST_BWRAP") or os.environ.get("CAIRN_EXECUTOR_BWRAP_PATH") or shutil.which("bwrap")
-SANDBOX_PYTHON = os.environ.get("CAIRN_TEST_PYTHON") or os.environ.get("CAIRN_EXECUTOR_PYTHON_PATH")
 
 
 def _executor(tmp_path: Path, **kwargs: object) -> BwrapExecutor:
@@ -158,7 +156,7 @@ def test_argv_passes_resource_limit_env(tmp_path: Path) -> None:
     assert env["CAIRN_MAX_OPEN_FILES"] == "99"
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@requires_sandbox
 @pytest.mark.integration
 async def test_fork_bomb_blocked_by_rlimit_nproc(tmp_path: Path) -> None:
     """P3.2: a task forking many processes fails fast instead of hitting the
@@ -202,7 +200,7 @@ async def test_fork_bomb_blocked_by_rlimit_nproc(tmp_path: Path) -> None:
     assert out.startswith("blocked"), out
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@requires_sandbox
 @pytest.mark.integration
 async def test_workspace_budget_exceeded(tmp_path: Path) -> None:
     """P3.2: total workspace growth beyond the budget fails the run before
@@ -232,7 +230,7 @@ async def test_workspace_budget_exceeded(tmp_path: Path) -> None:
     assert excinfo.value.error_code == "WORKSPACE_BUDGET_EXCEEDED"
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@requires_sandbox
 @pytest.mark.integration
 async def test_sandbox_tty_unopenable_under_pty(tmp_path: Path) -> None:
     """P3.1: under a real pty, the sandbox still sees no tty and /dev/tty is

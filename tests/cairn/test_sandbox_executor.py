@@ -12,10 +12,8 @@ what the agent did — there is no overlay database and no re-import.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -24,9 +22,7 @@ from cairn.core.exceptions import TimeoutError as CairnTimeoutError
 from cairn.runtime import repo
 from cairn.runtime.sandbox import BwrapExecutor, SandboxExecutionError, SandboxResult
 from cairn.runtime.settings import ExecutorSettings
-
-BWRAP = os.environ.get("CAIRN_TEST_BWRAP") or os.environ.get("CAIRN_EXECUTOR_BWRAP_PATH") or shutil.which("bwrap")
-
+from tests.cairn.sandbox_env import BWRAP, SANDBOX_PYTHON, requires_sandbox
 
 # ---------------------------------------------------------------------------
 # Unit tests (no bwrap required)
@@ -170,30 +166,6 @@ def test_runtime_binds_fall_back_when_manifest_missing(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _env_or(*names: str) -> str | None:
-    for name in names:
-        value = os.environ.get(name)
-        if value:
-            return value
-    return None
-
-
-def _sandbox_python() -> str | None:
-    """Resolve a Nix-store python for the real sandbox tests.
-
-    NixOS-only: the sandbox runtime is declared by devenv (CAIRN_EXECUTOR_*
-    env vars) or given explicitly via CAIRN_TEST_PYTHON; failing that, the
-    resolved ``sys.executable`` is used when it lives in the Nix store.
-    """
-    configured = _env_or("CAIRN_TEST_PYTHON", "CAIRN_EXECUTOR_PYTHON_PATH")
-    if configured:
-        return str(Path(configured).resolve())
-    resolved = Path(sys.executable).resolve()
-    if "/nix/store" in resolved.parts:
-        return str(resolved)
-    return None
-
-
 def _closure_manifest(tmp_path: Path, python: str) -> str | None:
     """Write the store closure of ``python`` to a manifest file (writeClosure format)."""
     nix_store = shutil.which("nix-store")
@@ -214,7 +186,9 @@ def _closure_manifest(tmp_path: Path, python: str) -> str | None:
     return str(manifest)
 
 
-SANDBOX_PYTHON = _sandbox_python()
+# Resolved once in tests.cairn.sandbox_env so the rule cannot drift between
+# modules, and so an unavailable sandbox runtime is reported rather than
+# silently skipped.
 
 
 def _sandbox_settings(tmp_path: Path, **kwargs: object) -> ExecutorSettings:
@@ -242,10 +216,7 @@ def _project_with(tmp_path: Path, files: dict[str, str]) -> Path:
     return project
 
 
-@pytest.mark.skipif(
-    not BWRAP or not SANDBOX_PYTHON,
-    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
-)
+@requires_sandbox
 @pytest.mark.integration
 async def test_real_sandbox_materializes_runs_and_computes_changeset(tmp_path: Path) -> None:
     project = _project_with(tmp_path, {"src/main.py": "hello"})
@@ -286,10 +257,7 @@ async def test_real_sandbox_materializes_runs_and_computes_changeset(tmp_path: P
         pass
 
 
-@pytest.mark.skipif(
-    not BWRAP or not SANDBOX_PYTHON,
-    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
-)
+@requires_sandbox
 @pytest.mark.integration
 async def test_real_sandbox_deletions_recorded_in_changeset(tmp_path: Path) -> None:
     project = _project_with(tmp_path, {"keep.txt": "keep", "overlay.txt": "overlay content"})
@@ -313,10 +281,7 @@ async def test_real_sandbox_deletions_recorded_in_changeset(tmp_path: Path) -> N
         pass
 
 
-@pytest.mark.skipif(
-    not BWRAP or not SANDBOX_PYTHON,
-    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
-)
+@requires_sandbox
 @pytest.mark.integration
 async def test_real_sandbox_timeout_kills_process(tmp_path: Path) -> None:
     project = _project_with(tmp_path, {})
@@ -333,10 +298,7 @@ async def test_real_sandbox_timeout_kills_process(tmp_path: Path) -> None:
         await executor.run(code=code, task="sleep")
 
 
-@pytest.mark.skipif(
-    not BWRAP or not SANDBOX_PYTHON,
-    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
-)
+@requires_sandbox
 @pytest.mark.integration
 async def test_real_sandbox_failure_reports_traceback(tmp_path: Path) -> None:
     project = _project_with(tmp_path, {})
@@ -355,10 +317,7 @@ async def test_real_sandbox_failure_reports_traceback(tmp_path: Path) -> None:
     assert exc_info.value.error_code == "SANDBOX_EXECUTION_FAILED"
 
 
-@pytest.mark.skipif(
-    not BWRAP or not SANDBOX_PYTHON,
-    reason="bwrap or a Nix-store python not available (set CAIRN_TEST_BWRAP / CAIRN_TEST_PYTHON)",
-)
+@requires_sandbox
 @pytest.mark.integration
 async def test_real_sandbox_imports_work_stdlib_only(tmp_path: Path) -> None:
     project = _project_with(tmp_path, {})
@@ -414,7 +373,7 @@ def test_toolchain_runtime_mounts_are_bound_readonly(tmp_path: Path) -> None:
     assert "--ro-bind-try" in argv
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@requires_sandbox
 @pytest.mark.integration
 async def test_task_gitignore_cannot_forge_deletions(tmp_path: Path) -> None:
     """A task-authored .gitignore must not make untouched files look deleted.
@@ -468,7 +427,7 @@ def test_filter_built_once_per_run(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert len(calls) == 1, f"ProjectFilter rebuilt {len(calls)}x per run: {calls}"
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@requires_sandbox
 @pytest.mark.integration
 async def test_real_sandbox_log_spammer_is_killed_and_capped(tmp_path: Path) -> None:
     """Review §2.9: stdout/stderr are streamed into a capped buffer and the
@@ -488,7 +447,7 @@ async def test_real_sandbox_log_spammer_is_killed_and_capped(tmp_path: Path) -> 
     assert len(log) < 5000, "captured log exceeded the configured cap"
 
 
-@pytest.mark.skipif(not BWRAP or not SANDBOX_PYTHON, reason="needs bwrap")
+@requires_sandbox
 @pytest.mark.integration
 async def test_real_sandbox_workspace_budget_enforced_during_run(tmp_path: Path) -> None:
     """Review §2.9: the total workspace budget is sampled *during* the run and
