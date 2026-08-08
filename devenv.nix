@@ -99,6 +99,25 @@ in
     # set; this proves the runtime actually resolved and the isolation tests
     # really ran.
     CAIRN_REQUIRE_SANDBOX_TESTS=1 pytest -q --cov=cairn --cov-report=term-missing
+
+    # The cairn-pytuin extension suite cannot run in this gate's pytest: the
+    # plugin needs Python >= 3.14 (pytuin uses PEP 758 syntax) and resolves
+    # cairn/pytuin from sibling checkouts.  Run it in its own uv environment
+    # when the pytuin checkout is present; the extension-tests CI job covers
+    # it otherwise.  Unset UV_PROJECT_ENVIRONMENT/VIRTUAL_ENV or uv would sync
+    # the plugin into the root devenv venv (3.13) and fail; override
+    # UV_PYTHON_PREFERENCE because the devenv env sets it to only-system,
+    # which would hide the plugin's managed 3.14 interpreter.
+    echo "==> cairn-pytuin extension tests (own 3.14 venv; needs the pytuin sibling checkout)"
+    if [ -d extensions/cairn-pytuin ]; then
+        if [ -d "$DEVENV_ROOT/../pytuin" ]; then
+            (cd extensions/cairn-pytuin && env -u UV_PROJECT_ENVIRONMENT -u VIRTUAL_ENV UV_PYTHON_PREFERENCE=managed uv run --frozen --extra dev pytest -q) \
+                || { echo "cairn-pytuin extension tests FAILED"; exit 1; }
+        else
+            echo "WARNING: pytuin sibling checkout not found at $DEVENV_ROOT/../pytuin;"
+            echo "         skipping cairn-pytuin extension tests (CI runs them in the extension-tests job)"
+        fi
+    fi
   '';
 
   # https://devenv.sh/pre-commit-hooks/

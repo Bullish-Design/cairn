@@ -64,6 +64,52 @@ jobs:
       - name: Smoke-test the demo script
         run: uv run python scripts/demo_cairn_library.py
 
+  # Review §2: the cairn-pytuin suite cannot run inside the devenv gate — the
+  # plugin needs Python 3.14 (pytuin uses PEP 758 syntax) and pytuin itself,
+  # which is unpublished and resolved from a sibling checkout. This job
+  # provides both and runs the plugin's tests and lint, so a change that
+  # breaks the plugin fails CI even though the root suite never collects
+  # these tests (root `testpaths` is `tests/` and the 3.14 requirement keeps
+  # them out of the devenv venv).
+  extension-tests:
+    runs-on: ubuntu-latest
+    needs: devenv-gate
+    steps:
+      # Check the repo out at path: cairn so the workspace layout mirrors the
+      # developer machine: cairn/ and pytuin/ as siblings, which is what the
+      # plugin's [tool.uv.sources] expects (cairn at ../../, pytuin at
+      # ../../../pytuin from extensions/cairn-pytuin).
+      - uses: actions/checkout@v4
+        with:
+          path: cairn
+
+      # pytuin is not on PyPI (blocking on atuout); pin the commit so the
+      # dependency is reproducible; bump when cairn-pytuin needs a newer
+      # pytuin. Requires this workflow to have read access to the
+      # Bullish-Design/pytuin repository.
+      - name: Checkout pytuin (sibling, pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: Bullish-Design/pytuin
+          path: pytuin
+          ref: 5dffa6b41f4e6ecb47e45d99ea0286444380ba78
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync the plugin's 3.14 environment and run tests + lint
+        run: |
+          cd cairn/extensions/cairn-pytuin
+          # --frozen: the committed uv.lock is authoritative and fails if it
+          # drifts from pyproject.toml. atuout is not in the resolved graph,
+          # so no atuout checkout is needed here.
+          uv sync --frozen --extra dev
+          .venv/bin/pytest -q
+          .venv/bin/ruff check src tests
+          .venv/bin/ruff format --check src tests
+
   # Review §2.1: the published artifacts must actually contain the library.
   # Builds the sdist + wheel, installs each into a clean venv (with the
   # git-only fsdantic dependency pinned via a constraints file), verifies the
