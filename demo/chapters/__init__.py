@@ -13,7 +13,6 @@ from demo.chapters import act0, act1, act2, act3, act4
 
 if TYPE_CHECKING:
     from demo.narrator import Narrator
-    from demo.runner_ctx import ChapterContext
 
 #: Act numeral -> (act module, title).  Imported eagerly so the module list is
 #: stable regardless of which entry point is used.
@@ -35,7 +34,7 @@ def _chapter_lookup() -> dict[str, str]:
     return lookup
 
 
-def run_selected(narrator: "Narrator", options: object, fixture_root: object) -> None:
+def run_selected(narrator: Narrator, options: object, fixture_root: object) -> None:
     """Sync entry point: dispatch into the (async) act runners."""
     from demo.runner_ctx import ChapterContext
 

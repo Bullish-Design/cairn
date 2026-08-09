@@ -16,7 +16,7 @@ ACT_NUMERAL = "0"
 ACT_TITLE = "Trust the runtime"
 
 
-async def run(narrator: "Narrator", ctx: "ChapterContext", only: str | None = None) -> None:
+async def run(narrator: Narrator, ctx: ChapterContext, only: str | None = None) -> None:
     narrator.act(ACT_NUMERAL, ACT_TITLE)
     for cid, title, fn in CHAPTERS:
         if only and cid != only:
@@ -25,7 +25,7 @@ async def run(narrator: "Narrator", ctx: "ChapterContext", only: str | None = No
         await fn(narrator, ctx)
 
 
-async def _ch00_doctor(narrator: "Narrator", ctx: "ChapterContext") -> None:
+async def _ch00_doctor(narrator: Narrator, ctx: ChapterContext) -> None:
     narrator.say(
         """
         Before any agent runs, the walkthrough verifies the sandbox runtime.
@@ -36,7 +36,9 @@ async def _ch00_doctor(narrator: "Narrator", ctx: "ChapterContext") -> None:
         host home is unreachable and the network is unreachable.
         """
     )
-    output = narrator.shell([*ctx.cli_cmd("doctor", "--cairn-home", str(ctx.home), "--project-root", str(ctx.project_root))])
+    output = narrator.shell(
+        [*ctx.cli_cmd("doctor", "--cairn-home", str(ctx.home), "--project-root", str(ctx.project_root))]
+    )
     narrator.say(
         """
         Two checks launch a real sandbox rather than reading config:

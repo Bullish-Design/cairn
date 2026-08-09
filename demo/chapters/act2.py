@@ -8,16 +8,12 @@ other chapters use.
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cairn.core.exceptions import WorkspaceMergeError
-from cairn.orchestrator.orchestrator import TERMINAL_STATES
 from cairn.orchestrator.queue import TaskPriority, TaskQueue
 from cairn.providers.providers import InlineCodeProvider
 from cairn.runtime.agent import AgentState
@@ -36,7 +32,7 @@ class ActIIState:
     orch: Any = field(default=None)
 
 
-async def run(narrator: "Narrator", ctx: "ChapterContext", only: str | None = None) -> None:
+async def run(narrator: Narrator, ctx: ChapterContext, only: str | None = None) -> None:
     narrator.act(ACT_NUMERAL, ACT_TITLE)
     state = ActIIState()
     state.orch = ctx.make_orchestrator(config=OrchestratorSettings(start_worker_on_init=True, max_concurrent_agents=2))
@@ -55,6 +51,7 @@ async def run(narrator: "Narrator", ctx: "ChapterContext", only: str | None = No
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 async def _run_agent(state: ActIIState, task: str, **kwargs: Any) -> tuple[str, Any]:
     orch = state.orch
     agent_id = await orch.spawn_agent(task, TaskPriority.HIGH)
@@ -62,13 +59,13 @@ async def _run_agent(state: ActIIState, task: str, **kwargs: Any) -> tuple[str, 
     return agent_id, record
 
 
-def _run_log(ctx: "ChapterContext", agent_id: str) -> str:
+def _run_log(ctx: ChapterContext, agent_id: str) -> str:
     """The sandbox run log is a plain file in the workspace — no DB access."""
     path = ctx.home / "workspaces" / agent_id / ".cairn" / "run.log"
     return path.read_text(encoding="utf-8") if path.exists() else "(no run.log)"
 
 
-def _mirror_entry(ctx: "ChapterContext", agent_id: str) -> dict[str, Any]:
+def _mirror_entry(ctx: ChapterContext, agent_id: str) -> dict[str, Any]:
     """The lifecycle mirror is the CLI's public read path."""
     mirror = json.loads((ctx.home / "state" / "lifecycle.json").read_text(encoding="utf-8"))
     return mirror.get(agent_id, {})
@@ -85,7 +82,8 @@ def _short_error(error: str | None) -> str:
 # ch09 — The agent lies
 # ---------------------------------------------------------------------------
 
-async def _ch09_agent_lies(narrator: "Narrator", ctx: "ChapterContext", state: ActIIState) -> None:
+
+async def _ch09_agent_lies(narrator: Narrator, ctx: ChapterContext, state: ActIIState) -> None:
     narrator.say(
         """
         Agents are fallible, and sometimes they lie.  The submission payload
@@ -127,7 +125,8 @@ async def _ch09_agent_lies(narrator: "Narrator", ctx: "ChapterContext", state: A
 # ch10 — Fail-closed accept
 # ---------------------------------------------------------------------------
 
-async def _ch10_fail_closed(narrator: "Narrator", ctx: "ChapterContext", state: ActIIState) -> None:
+
+async def _ch10_fail_closed(narrator: Narrator, ctx: ChapterContext, state: ActIIState) -> None:
     narrator.say(
         """
         Accept revalidates the base every touched path had at run start.  If
@@ -155,7 +154,10 @@ async def _ch10_fail_closed(narrator: "Narrator", ctx: "ChapterContext", state: 
         refused = f"{exc.error_code}  stale_paths={exc.context.get('stale_paths')}"
     narrator.capture("accept without --force", refused)
     narrator.prove("accept refused with ACCEPT_STALE_BASE", refused.startswith("ACCEPT_STALE_BASE"))
-    narrator.prove("the human edit is untouched", "human edit after the agent ran" in (ctx.project_root / "src" / "main.py").read_text())
+    narrator.prove(
+        "the human edit is untouched",
+        "human edit after the agent ran" in (ctx.project_root / "src" / "main.py").read_text(),
+    )
 
     # The agent is still reviewable — the refusal did not consume it.
     record = await state.orch.lifecycle.load(agent_id)
@@ -164,14 +166,17 @@ async def _ch10_fail_closed(narrator: "Narrator", ctx: "ChapterContext", state: 
 
     stats = await state.orch.accept_agent(agent_id, force=True)
     narrator.capture("accept with --force", json.dumps(stats, sort_keys=True))
-    narrator.prove("--force accepts and the agent's version wins", "agent version of main" in (ctx.project_root / "src" / "main.py").read_text())
+    narrator.prove(
+        "--force accepts and the agent's version wins",
+        "agent version of main" in (ctx.project_root / "src" / "main.py").read_text(),
+    )
 
 
 # ---------------------------------------------------------------------------
 # ch11 — The boundary, probed
 # ---------------------------------------------------------------------------
 
-BOUNDARY_TASK = r'''
+BOUNDARY_TASK = r"""
 import json
 import os
 import socket
@@ -212,10 +217,10 @@ probe["uid"] = os.getuid()
 write_file("probe.json", json.dumps(probe, sort_keys=True))
 print(json.dumps(probe, indent=2, sort_keys=True))
 submit_result("probed the boundary", [])
-'''.strip()
+""".strip()
 
 
-async def _ch11_boundary(narrator: "Narrator", ctx: "ChapterContext", state: ActIIState) -> None:
+async def _ch11_boundary(narrator: Narrator, ctx: ChapterContext, state: ActIIState) -> None:
     narrator.say(
         """
         What can task code actually reach?  The answer is measured from
@@ -257,7 +262,10 @@ async def _ch11_boundary(narrator: "Narrator", ctx: "ChapterContext", state: Act
     narrator.prove("the network is blocked", probe["network"] == "blocked (OSError)")
     narrator.prove("/etc/passwd is not writable", probe["write_etc_passwd"].startswith("blocked"))
     narrator.prove("the sandbox runs as uid 65534 (nobody)", probe["uid"] == 65534)
-    narrator.prove("the write_file helper rejects traversal", "traversal" in probe["helper_escape_write"] or "not allowed" in probe["helper_escape_write"])
+    narrator.prove(
+        "the write_file helper rejects traversal",
+        "traversal" in probe["helper_escape_write"] or "not allowed" in probe["helper_escape_write"],
+    )
 
     narrator.say(
         """
@@ -274,7 +282,8 @@ async def _ch11_boundary(narrator: "Narrator", ctx: "ChapterContext", state: Act
 # ch12 — Limits
 # ---------------------------------------------------------------------------
 
-async def _ch12_limits(narrator: "Narrator", ctx: "ChapterContext", state: ActIIState) -> None:
+
+async def _ch12_limits(narrator: Narrator, ctx: ChapterContext, state: ActIIState) -> None:
     narrator.say(
         """
         Limits are enforced by the host and legible afterwards.  A task that
@@ -297,12 +306,15 @@ async def _ch12_limits(narrator: "Narrator", ctx: "ChapterContext", state: ActII
         f"state = {record_loop.state.value}\nerror = {_short_error(record_loop.error)}",
     )
     narrator.capture(f"run.log tail ({agent_loop})", _run_log(ctx, agent_loop)[-400:])
-    narrator.prove("the infinite loop was killed with EXECUTION_TIMEOUT", (record_loop.error or "").startswith("[EXECUTION_TIMEOUT]"))
+    narrator.prove(
+        "the infinite loop was killed with EXECUTION_TIMEOUT",
+        (record_loop.error or "").startswith("[EXECUTION_TIMEOUT]"),
+    )
     narrator.prove("the kill reason is in the log", "killed after 3.0s" in _run_log(ctx, agent_loop))
 
     # Memory: 400MB request against a 100MB cap.
     state.orch.executor_settings = ExecutorSettings(max_execution_time=30.0, max_memory_bytes=100 * 1024 * 1024)
-    mem_task = 'blob = bytearray(400 * 1024 * 1024)'
+    mem_task = "blob = bytearray(400 * 1024 * 1024)"
     agent_mem, record_mem = await _run_agent(state, mem_task)
     narrator.capture(
         f"memory agent {agent_mem}",
@@ -326,7 +338,8 @@ async def _ch12_limits(narrator: "Narrator", ctx: "ChapterContext", state: ActII
 # ch13 — A task cannot steer its changeset
 # ---------------------------------------------------------------------------
 
-async def _ch13_no_steering(narrator: "Narrator", ctx: "ChapterContext", state: ActIIState) -> None:
+
+async def _ch13_no_steering(narrator: Narrator, ctx: ChapterContext, state: ActIIState) -> None:
     narrator.say(
         """
         Admission rules are host state.  A task that rewrites ``.gitignore``
@@ -385,7 +398,8 @@ async def _ch13_no_steering(narrator: "Narrator", ctx: "ChapterContext", state: 
 # ch14 — Concurrency
 # ---------------------------------------------------------------------------
 
-async def _ch14_concurrency(narrator: "Narrator", ctx: "ChapterContext", state: ActIIState) -> None:
+
+async def _ch14_concurrency(narrator: Narrator, ctx: ChapterContext, state: ActIIState) -> None:
     narrator.say(
         """
         Two things about concurrency are worth measuring, and one is worth
@@ -402,7 +416,15 @@ async def _ch14_concurrency(narrator: "Narrator", ctx: "ChapterContext", state: 
         ("low", TaskPriority.LOW),
     ]:
         await queue.enqueue(task, priority)
-    dequeued = [task.task for task in [await queue.dequeue_wait(), await queue.dequeue_wait(), await queue.dequeue_wait(), await queue.dequeue_wait()]]
+    dequeued = [
+        task.task
+        for task in [
+            await queue.dequeue_wait(),
+            await queue.dequeue_wait(),
+            await queue.dequeue_wait(),
+            await queue.dequeue_wait(),
+        ]
+    ]
     narrator.capture("TaskQueue dequeue order", str(dequeued))
     narrator.prove("dequeue order follows priority", dequeued == ["urgent", "high", "normal", "low"])
 

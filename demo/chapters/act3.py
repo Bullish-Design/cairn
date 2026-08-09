@@ -13,13 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel
+
+from cairn.orchestrator.queue import TaskPriority, TaskQueue
 from cairn.runtime.driver import DriverStep, ProjectView, ScriptedDriver, WorkspaceCapability
 from cairn.runtime.inspection import WorkspaceInspector
 from cairn.runtime.state import AgentStateManager
 from cairn.runtime.workspace_manager import open_workspace
-from cairn.orchestrator.queue import TaskPriority, TaskQueue
 from cairn.utils.retry import RetryStrategy
-from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from demo.narrator import Narrator
@@ -39,7 +40,7 @@ class ActIIIState:
     scratch: Path = field(default=None)
 
 
-async def run(narrator: "Narrator", ctx: "ChapterContext", only: str | None = None) -> None:
+async def run(narrator: Narrator, ctx: ChapterContext, only: str | None = None) -> None:
     narrator.act(ACT_NUMERAL, ACT_TITLE)
     narrator.say(
         """
@@ -65,7 +66,8 @@ async def run(narrator: "Narrator", ctx: "ChapterContext", only: str | None = No
 # ch15 — open_workspace + WorkspaceInspector + WorkspaceStats
 # ---------------------------------------------------------------------------
 
-async def _ch15_workspace_inspector(narrator: "Narrator", ctx: "ChapterContext", state: ActIIIState) -> None:
+
+async def _ch15_workspace_inspector(narrator: Narrator, ctx: ChapterContext, state: ActIIIState) -> None:
     narrator.say(
         """
         ``open_workspace`` opens an fsdantic workspace with Cairn's
@@ -118,7 +120,8 @@ async def _ch15_workspace_inspector(narrator: "Narrator", ctx: "ChapterContext",
 # ch16 — AgentStateManager
 # ---------------------------------------------------------------------------
 
-async def _ch16_agent_state(narrator: "Narrator", ctx: "ChapterContext", state: ActIIIState) -> None:
+
+async def _ch16_agent_state(narrator: Narrator, ctx: ChapterContext, state: ActIIIState) -> None:
     narrator.say(
         """
         ``AgentStateManager`` gives one agent a namespaced key-value store
@@ -164,8 +167,13 @@ async def _ch16_agent_state(narrator: "Narrator", ctx: "ChapterContext", state: 
                 ]
             ),
         )
-        narrator.prove("namespacing keeps the agents' keys apart", (await agent_a.get("last_file")) != (await agent_b.get("last_file")))
-        narrator.prove("typed models round-trip", typed is not None and typed.turn == 1 and typed.context == {"phase": "review"})
+        narrator.prove(
+            "namespacing keeps the agents' keys apart",
+            (await agent_a.get("last_file")) != (await agent_b.get("last_file")),
+        )
+        narrator.prove(
+            "typed models round-trip", typed is not None and typed.turn == 1 and typed.context == {"phase": "review"}
+        )
         narrator.prove("50 concurrent increments land exactly 50", counter == 50)
     finally:
         await _safe_close(ws)
@@ -175,7 +183,8 @@ async def _ch16_agent_state(narrator: "Narrator", ctx: "ChapterContext", state: 
 # ch17 — WorkspaceCapability + ScriptedDriver + ProjectView
 # ---------------------------------------------------------------------------
 
-async def _ch17_driver(narrator: "Narrator", ctx: "ChapterContext", state: ActIIIState) -> None:
+
+async def _ch17_driver(narrator: Narrator, ctx: ChapterContext, state: ActIIIState) -> None:
     narrator.say(
         """
         ``WorkspaceCapability`` is the narrow, path-validated capability a
@@ -221,7 +230,10 @@ async def _ch17_driver(narrator: "Narrator", ctx: "ChapterContext", state: ActII
         ),
     )
     narrator.prove("the driver's writes land in the bounded root", await cap.read("src/app.py") == "print('hi')\n")
-    narrator.prove("the step limit is honored (submit never ran)", truncated["summary"] == "build the app" and submission["summary"] == "wrote the app")
+    narrator.prove(
+        "the step limit is honored (submit never ran)",
+        truncated["summary"] == "build the app" and submission["summary"] == "wrote the app",
+    )
     narrator.prove("the capability refuses traversal", not await _cap_accepts_escape(cap))
 
     narrator.say(
@@ -264,7 +276,8 @@ async def _cap_accepts_escape(cap: WorkspaceCapability) -> bool:
 # ch18 — TaskQueue + with_retry
 # ---------------------------------------------------------------------------
 
-async def _ch18_queue_retry(narrator: "Narrator", ctx: "ChapterContext", state: ActIIIState) -> None:
+
+async def _ch18_queue_retry(narrator: Narrator, ctx: ChapterContext, state: ActIIIState) -> None:
     narrator.say(
         """
         ``TaskQueue`` is the bounded priority queue the orchestrator runs on
@@ -313,7 +326,9 @@ async def _ch18_queue_retry(narrator: "Narrator", ctx: "ChapterContext", state: 
             ]
         ),
     )
-    narrator.prove("priority ordering holds", [first.task, second.task, third.task] == ["urgent task", "normal task", "low task"])
+    narrator.prove(
+        "priority ordering holds", [first.task, second.task, third.task] == ["urgent task", "normal task", "low task"]
+    )
     narrator.prove("retry succeeded on attempt 3", result == "ok" and attempts == 3)
 
 

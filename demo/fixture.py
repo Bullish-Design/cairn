@@ -38,29 +38,25 @@ FILES: dict[str, str] = {
         "\n"
         "\n"
         "def main() -> None:\n"
-        "    print(greet(\"world\"))\n"
+        '    print(greet("world"))\n'
         "\n"
         "\n"
-        "if __name__ == \"__main__\":\n"
+        'if __name__ == "__main__":\n'
         "    main()\n"
     ),
     "src/util.py": (
-        '"""Shared helpers for the demo app."""\n'
-        "\n"
-        "\n"
-        "def greet(name: str) -> str:\n"
-        "    return f\"hello, {name}\"\n"
+        '"""Shared helpers for the demo app."""\n\n\ndef greet(name: str) -> str:\n    return f"hello, {name}"\n'
     ),
     "src/doomed.py": (
         '"""This module is deleted by the walkthrough agent."""\n'
         "\n"
         "\n"
         "def legacy() -> str:\n"
-        "    return \"legacy behavior\"\n"
+        '    return "legacy behavior"\n'
     ),
 }
 
-RUN_SH = "#!/bin/sh\nset -eu\necho \"demo app: $(python3 src/main.py)\"\n"
+RUN_SH = '#!/bin/sh\nset -eu\necho "demo app: $(python3 src/main.py)"\n'
 
 
 def build(project_root: Path) -> Path:

@@ -7,7 +7,6 @@ live orchestrators on one CAIRN_HOME conflict — Act IV uses its own home).
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import sys
 from dataclasses import dataclass
@@ -62,7 +61,7 @@ class ChapterContext:
         """
         env = dict(os.environ)
         for name in list(env):
-            if name.startswith("CAIRN_PATHS_") or name.startswith("CAIRN_ORCHESTRATOR_"):
+            if name.startswith(("CAIRN_PATHS_", "CAIRN_ORCHESTRATOR_")):
                 env.pop(name)
         env["PYTHONUNBUFFERED"] = "1"
         return env

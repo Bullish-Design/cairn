@@ -14,10 +14,10 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from cairn.orchestrator.orchestrator import TERMINAL_STATES
 from cairn.orchestrator.queue import TaskPriority
 from cairn.providers.providers import FileCodeProvider, InlineCodeProvider, resolve_code_provider
 from cairn.runtime import repo
-from cairn.orchestrator.orchestrator import TERMINAL_STATES
 from cairn.runtime.agent import AgentState
 from cairn.runtime.settings import OrchestratorSettings
 
@@ -36,7 +36,7 @@ class ActIState:
     review_agent: str | None = None
 
 
-async def run(narrator: "Narrator", ctx: "ChapterContext", only: str | None = None) -> None:
+async def run(narrator: Narrator, ctx: ChapterContext, only: str | None = None) -> None:
     narrator.act(ACT_NUMERAL, ACT_TITLE)
     state = ActIState()
     state.orch = ctx.make_orchestrator(config=OrchestratorSettings(start_worker_on_init=True))
@@ -64,7 +64,7 @@ async def _run_agent(state: ActIState, task: str, **kwargs: Any) -> tuple[str, A
     return agent_id, record
 
 
-def _tree_digest(ctx: "ChapterContext") -> str:
+def _tree_digest(ctx: ChapterContext) -> str:
     from demo.fixture import tree_digest
 
     return tree_digest(ctx.project_root)
@@ -74,7 +74,8 @@ def _tree_digest(ctx: "ChapterContext") -> str:
 # ch01 — The fixture
 # ---------------------------------------------------------------------------
 
-async def _ch01_fixture(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+
+async def _ch01_fixture(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         Every chapter drives agents against the same throwaway project under
@@ -110,14 +111,21 @@ async def _ch01_fixture(narrator: "Narrator", ctx: "ChapterContext", state: ActI
     narrator.capture("tree digest (baseline)", digest)
 
     narrator.prove("gitignore filtering: secrets.env is not in the manifest", "secrets.env" not in manifest.entries)
-    narrator.prove("symlink preserved as a symlink (not dereferenced)", manifest.entry_for("link_to_main") is not None and manifest.entry_for("link_to_main").kind == "symlink")
-    narrator.prove("empty_dir/ survives materialization (present as a dir)", manifest.entry_for("empty_dir") is not None and manifest.entry_for("empty_dir").kind == "dir")
+    narrator.prove(
+        "symlink preserved as a symlink (not dereferenced)",
+        manifest.entry_for("link_to_main") is not None and manifest.entry_for("link_to_main").kind == "symlink",
+    )
+    narrator.prove(
+        "empty_dir/ survives materialization (present as a dir)",
+        manifest.entry_for("empty_dir") is not None and manifest.entry_for("empty_dir").kind == "dir",
+    )
     narrator.prove("run.sh keeps its 0o755 mode in the manifest", (manifest.entry_for("run.sh").mode or 0) & 0o111 != 0)
 
 
 # ---------------------------------------------------------------------------
 # ch02 — Providers
 # ---------------------------------------------------------------------------
+
 
 class SlowProvider:
     """Wraps ``InlineCodeProvider`` with a deliberate delay in ``get_code``.
@@ -141,7 +149,7 @@ class SlowProvider:
         return await self._inner.validate_code(code)
 
 
-async def _ch02_providers(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+async def _ch02_providers(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         Code reaches an agent through a ``CodeProvider``: ``get_code`` returns
@@ -209,7 +217,9 @@ async def _ch02_providers(narrator: "Narrator", ctx: "ChapterContext", state: Ac
         "agent with a missing reference",
         f"agent_id = {bad_agent}\nstate    = {bad_record.state.value}\nerror    = {bad_record.error}",
     )
-    narrator.prove("a provider error lands the agent in ERRORED, not the orchestrator", bad_record.state is AgentState.ERRORED)
+    narrator.prove(
+        "a provider error lands the agent in ERRORED, not the orchestrator", bad_record.state is AgentState.ERRORED
+    )
     narrator.prove("the error code is snake-cased [PROVIDER_ERROR]", "PROVIDER_ERROR" in (bad_record.error or ""))
     narrator.prove("the worker survives a provider error", orch.lifecycle is not None)
     await orch.reject_agent(bad_agent)
@@ -221,6 +231,7 @@ async def _ch02_providers(narrator: "Narrator", ctx: "ChapterContext", state: Ac
 # ---------------------------------------------------------------------------
 # ch03 — Run an agent
 # ---------------------------------------------------------------------------
+
 
 async def _observe_states(orch: Any, agent_id: str, timeout: float = 60.0) -> dict[str, float]:
     """Poll the lifecycle store and record when each state first appears."""
@@ -238,7 +249,7 @@ async def _observe_states(orch: Any, agent_id: str, timeout: float = 60.0) -> di
     return seen
 
 
-async def _ch03_run_agent(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+async def _ch03_run_agent(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         An agent run is a state machine: ``QUEUED → GENERATING → EXECUTING →
@@ -259,8 +270,8 @@ async def _ch03_run_agent(narrator: "Narrator", ctx: "ChapterContext", state: Ac
     slow = SlowProvider()
     state.orch.code_provider = slow
     task = (
-        'import time\n'
-        'time.sleep(2.0)\n'
+        "import time\n"
+        "time.sleep(2.0)\n"
         'write_file("src/main.py", \'print("edited by the agent")\\n\')\n'
         'submit_result("updated the greeting", ["src/main.py"])'
     )
@@ -283,7 +294,8 @@ async def _ch03_run_agent(narrator: "Narrator", ctx: "ChapterContext", state: Ac
 # ch04 — The tree is untouched
 # ---------------------------------------------------------------------------
 
-async def _ch04_tree_untouched(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+
+async def _ch04_tree_untouched(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         Here is the headline.  Agents run against a *disposable copy* of the
@@ -300,7 +312,7 @@ async def _ch04_tree_untouched(narrator: "Narrator", ctx: "ChapterContext", stat
         'write_file("src/main.py", \'print("edited by the agent")\\n\')\n'
         'submit_result("updated the greeting", ["src/main.py"])'
     )
-    agent_id, record = await _run_agent(state, task)
+    agent_id, _record = await _run_agent(state, task)
 
     digest_after_run = _tree_digest(ctx)
     narrator.capture(
@@ -324,7 +336,8 @@ async def _ch04_tree_untouched(narrator: "Narrator", ctx: "ChapterContext", stat
 # ch05 — The review surface
 # ---------------------------------------------------------------------------
 
-async def _ch05_review_surface(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+
+async def _ch05_review_surface(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         Before anything is integrated, the human sees the review surface: the
@@ -356,7 +369,9 @@ async def _ch05_review_surface(narrator: "Narrator", ctx: "ChapterContext", stat
 
     preview = narrator.shell(
         [
-            *ctx.cli_cmd("preview", "changes", agent_id, "--cairn-home", str(ctx.home), "--project-root", str(ctx.project_root)),
+            *ctx.cli_cmd(
+                "preview", "changes", agent_id, "--cairn-home", str(ctx.home), "--project-root", str(ctx.project_root)
+            ),
         ]
     )
     narrator.prove("preview lists the added module", "added      src/new_module.py" in preview)
@@ -369,7 +384,8 @@ async def _ch05_review_surface(narrator: "Narrator", ctx: "ChapterContext", stat
 # ch06 — Accept
 # ---------------------------------------------------------------------------
 
-async def _ch06_accept(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+
+async def _ch06_accept(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         Accept applies the computed changeset to the real working tree —
@@ -403,7 +419,8 @@ async def _ch06_accept(narrator: "Narrator", ctx: "ChapterContext", state: ActIS
 # ch07 — Undo
 # ---------------------------------------------------------------------------
 
-async def _ch07_undo(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+
+async def _ch07_undo(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         Every accept is reversible.  Before applying, cairn snapshots the
@@ -459,14 +476,18 @@ async def _ch07_undo(narrator: "Narrator", ctx: "ChapterContext", state: ActISta
         refusal = f"{exc.error_code}  stale_paths={exc.context.get('stale_paths')}"
     narrator.capture("undo over a human edit", refusal)
     narrator.prove("undo refuses on drift (UNDO_STALE_BASE)", refusal.startswith("UNDO_STALE_BASE"))
-    narrator.prove("the human edit survives", (ctx.project_root / "src" / "human_edit_target.py").read_text() == "human edited after accept\n")
+    narrator.prove(
+        "the human edit survives",
+        (ctx.project_root / "src" / "human_edit_target.py").read_text() == "human edited after accept\n",
+    )
 
 
 # ---------------------------------------------------------------------------
 # ch08 — Reject
 # ---------------------------------------------------------------------------
 
-async def _ch08_reject(narrator: "Narrator", ctx: "ChapterContext", state: ActIState) -> None:
+
+async def _ch08_reject(narrator: Narrator, ctx: ChapterContext, state: ActIState) -> None:
     narrator.say(
         """
         Reject is the other side of review: the disposable workspace is
