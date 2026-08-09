@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from demo import fixture
@@ -152,7 +153,9 @@ def _write_preamble(narrator: Narrator, options: DemoOptions) -> None:
     transcript records closure vs fallback so a degraded sandbox is visible
     in the committed sample)."""
     closure = os.environ.get("CAIRN_EXECUTOR_SANDBOX_CLOSURE_PATH")
-    sandbox_mode = f"declared closure manifest ({closure})" if closure else "fallback runtime mounts (no closure manifest)"
+    sandbox_mode = (
+        f"declared closure manifest ({closure})" if closure else "fallback runtime mounts (no closure manifest)"
+    )
     python = os.environ.get("CAIRN_EXECUTOR_PYTHON_PATH") or sys.executable
     bwrap = os.environ.get("CAIRN_EXECUTOR_BWRAP_PATH") or shutil.which("bwrap") or "(discovered)"
     narrator.say(

@@ -12,6 +12,7 @@ an older checkout (guide §4.3).
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import signal
 import subprocess
@@ -85,6 +86,11 @@ async def run(narrator: Narrator, ctx: ChapterContext, only: str | None = None) 
 
 async def _start_daemon(narrator: Narrator, ctx: ChapterContext, state: ActIVState) -> None:
     """Launch ``cairn up`` in a subprocess and wait for the control socket."""
+    # pyturso (native) keeps an exclusive lock on an opened database until the
+    # handle is garbage collected — a closed connection is not enough.  The
+    # earlier acts opened the project's bin.db in this process, so force a GC
+    # cycle before the daemon subprocess (a *separate* process) needs it.
+    gc.collect()
     cmd = [*ctx.cli_cmd("up", "--project-root", str(ctx.project_root), "--cairn-home", str(ctx.act4_home))]
     if state.daemon_log_handle is not None:
         state.daemon_log_handle.close()
@@ -245,7 +251,8 @@ async def _ch19_daemon(narrator: Narrator, ctx: ChapterContext, state: ActIVStat
     # The queue reply carries no id; the mirror's list is the public read path.
     _, list_out = _run_cli(ctx, "list-agents")
     agent_id = _pick_agent_id(list_out, "act4_task")
-    narrator.capture("cairn list-agents", list_out)
+    act4_line = next(line for line in list_out.splitlines() if "act4_task" in line)
+    narrator.capture("cairn list-agents", f"{act4_line}\n... (the mirror holds every agent from this walkthrough)")
 
     narrator.say("The daemon runs the agent in its own process; we poll the status until it settles:")
     payload = await _wait_for_state(ctx, agent_id, wanted={"reviewing"})

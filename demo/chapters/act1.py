@@ -49,6 +49,7 @@ async def run(narrator: Narrator, ctx: ChapterContext, only: str | None = None) 
             await fn(narrator, ctx, state)
     finally:
         await state.orch.shutdown()
+        state.orch = None
 
 
 # ---------------------------------------------------------------------------

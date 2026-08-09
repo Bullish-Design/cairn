@@ -61,8 +61,9 @@ jobs:
           ls -l /lib64/ld-linux-x86-64.so.2
           devenv ci
 
-      - name: Smoke-test the demo script
-        run: uv run python scripts/demo_cairn_library.py
+      - name: Run the demo walkthrough (--no-daemon for CI stability)
+        run: |
+          devenv shell -- bash -c 'export PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH" && python -m demo --no-daemon --out /tmp/WALKTHROUGH.md'
 
   # Review §2: the cairn-pytuin suite cannot run inside the devenv gate — the
   # plugin needs Python 3.14 (pytuin uses PEP 758 syntax) and pytuin itself,
