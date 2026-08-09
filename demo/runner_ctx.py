@@ -42,7 +42,15 @@ class ChapterContext:
     act4_home: Path
 
     #: Scratch dirs under demo/out/ that a non-``--keep`` run removes.
-    SCRATCH_DIRS = ("project", "home", "act4-home", "doctor-project", "doctor-home")
+    SCRATCH_DIRS = (
+        "project",
+        "home",
+        "act4-home",
+        "doctor-project",
+        "doctor-home",
+        "act3-workspaces",
+        "act4-daemon.log",
+    )
 
     def __post_init__(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)

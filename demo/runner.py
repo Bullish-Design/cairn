@@ -78,7 +78,16 @@ def _clean_scratch() -> None:
     """Remove the previous run's scratch state so the fixture always starts
     from a pristine tree (accepts from a previous run must not leak in)."""
     for name in ChapterContext.SCRATCH_DIRS:
-        shutil.rmtree(DEFAULT_OUT_DIR / name, ignore_errors=True)
+        _remove_scratch(name)
+
+
+def _remove_scratch(name: str) -> None:
+    """Remove one scratch entry, whether it is a directory or a file."""
+    target = DEFAULT_OUT_DIR / name
+    if target.is_dir():
+        shutil.rmtree(target, ignore_errors=True)
+    else:
+        target.unlink(missing_ok=True)
 
 
 def _run_doctor(out_dir: Path) -> None:
@@ -143,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     if not options.keep:
         # Retain the transcript; drop the scratch state (fixture, homes, probes).
         for name in ChapterContext.SCRATCH_DIRS:
-            shutil.rmtree(DEFAULT_OUT_DIR / name, ignore_errors=True)
+            _remove_scratch(name)
         print("demo/out/ scratch removed (pass --keep to retain the fixture and homes for inspection)")
     return 0
 
