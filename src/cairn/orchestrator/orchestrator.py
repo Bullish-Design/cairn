@@ -1380,7 +1380,9 @@ class CairnOrchestrator:
         """Paths whose current tree state differs from the accepted state.
 
         ``applied_digests`` records the post-accept content digests of the
-        written paths; a delete path's accepted state is absence.  Records
+        written paths.  A ``delete_path`` did not exist before the accept, so
+        its accepted state is *presence* — undoing means deleting it — and
+        drift is absence, or a content change since the accept.  Records
         without applied digests (pre-M5) are treated as unvalidated and pass.
         """
         if not undo.applied_digests:
@@ -1395,8 +1397,12 @@ class CairnOrchestrator:
             if entry is None or entry.kind != "file" or entry.digest != expected:
                 drifted.append(rel)
         for rel in undo.delete_paths:
-            if current.entry_for(rel) is not None:
-                drifted.append(rel)
+            entry = current.entry_for(rel)
+            expected = undo.applied_digests.get(rel)
+            if entry is None:
+                drifted.append(rel)  # already removed by someone else
+            elif expected is not None and (entry.kind != "file" or entry.digest != expected):
+                drifted.append(rel)  # changed since the accept
         return sorted(set(drifted))
 
     def _undo_to_tree_sync(

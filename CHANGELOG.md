@@ -2,6 +2,36 @@
 
 All notable changes to cairn are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`cairn undo` refused every accept that had created a file.**  Undo drift
+  detection read presence as drift for `delete_paths` (paths that did not
+  exist before the accept), so undoing a file the agent added raised
+  `UNDO_STALE_BASE` on a completely untouched tree.  The added path's
+  accepted state is *presence* (undo = delete); drift is now absence, or a
+  content change since the accept, validated against the post-apply digests
+  that were already recorded.  Added undo-after-add and undo-after-add-then-
+  edit tests (the existing undo tests only covered pre-existing files, which
+  is why CI was green).
+- **`--project-root` / `--cairn-home` / provider flags given *before* the
+  subcommand were silently discarded.**  The recursive subparser copies used
+  `default=None`, and argparse writes subparser defaults into the same
+  namespace after the parent has parsed, clobbering the parent's value.
+  `cairn --project-root /other/repo accept agent-x` applied the changeset to
+  the *current* directory.  Subparser copies now use
+  `default=argparse.SUPPRESS` so they only write the attribute when actually
+  supplied; both flag positions bind (with a CLI test asserting so).
+- **A second `cairn up` crashed with a raw `turso.Error` traceback.**
+  `initialize()` opens `bin.db` before binding the control socket, so the
+  exclusive-lock failure surfaced as `WorkspaceError` and escaped the
+  `except RuntimeError` handler.  `_run_up` now catches `WorkspaceError` and
+  reports the already-running daemon instead of dumping a traceback.
+- **Provider errors rendered `[PROVIDERERROR]` instead of `[PROVIDER_ERROR]`.**
+  The default error code is the uppercased class name; `ProviderError` now
+  returns the snake-cased code.
+
 ## [0.4.0] - 2026-08-07
 
 Execution hot-path refactor.  Overhead on a 200-file project drops from

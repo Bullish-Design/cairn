@@ -20,7 +20,7 @@ from cairn.cli.commands import (
     CommandType,
     parse_command_payload,
 )
-from cairn.core.exceptions import AgentNotFoundError
+from cairn.core.exceptions import AgentNotFoundError, WorkspaceError
 from cairn.orchestrator.daemon import (
     read_daemon_pid,
     remove_daemon_pid,
@@ -95,8 +95,15 @@ async def _run_up(args: argparse.Namespace) -> int:
     )
     try:
         await orchestrator.initialize()  # binds the control socket (ownership)
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+    except (RuntimeError, WorkspaceError) as exc:
+        if isinstance(exc, WorkspaceError) and daemon_running(cairn_home):
+            print(
+                "A Cairn daemon is already running for this project/cairn-home.\n"
+                "  Stop it first, or use 'cairn queue'/'cairn run' for new tasks.",
+                file=sys.stderr,
+            )
+        else:
+            print(str(exc), file=sys.stderr)
         return 1
     write_daemon_pid(cairn_home)
 
@@ -685,19 +692,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser  # type: ignore[no-any-return]
 
 
-def _add_common_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--project-root", default=None)
-    parser.add_argument("--cairn-home", default=None)
-    parser.add_argument("--max-concurrent-agents", type=int, default=None)
-    parser.add_argument("--max-execution-time", type=float, default=None)
-    parser.add_argument("--max-memory-bytes", type=int, default=None)
-    parser.add_argument("--max-recursion-depth", type=int, default=None)
-    parser.add_argument("--provider", default="file", help="Code provider (file, inline, or plugin)")
-    parser.add_argument("--provider-base-path", default=None, help="Base path for file provider")
+def _add_common_flags(parser: argparse.ArgumentParser, *, suppress_defaults: bool = False) -> None:
+    """Register the flags that must work on every command (SPEC promise).
+
+    ``suppress_defaults`` is used for the subparser copies: argparse writes
+    subparser defaults into the *same* namespace after the parent has parsed,
+    so a ``default=None`` on the subparser silently clobbers a value given
+    before the subcommand.  ``argparse.SUPPRESS`` writes the attribute only
+    when the flag is actually supplied on that parser, so flags bind in both
+    positions.  The top-level parser keeps real defaults so the attributes
+    always exist.
+    """
+    default = argparse.SUPPRESS if suppress_defaults else None
+    parser.add_argument("--project-root", default=default)
+    parser.add_argument("--cairn-home", default=default)
+    parser.add_argument("--max-concurrent-agents", type=int, default=default)
+    parser.add_argument("--max-execution-time", type=float, default=default)
+    parser.add_argument("--max-memory-bytes", type=int, default=default)
+    parser.add_argument("--max-recursion-depth", type=int, default=default)
+    parser.add_argument(
+        "--provider",
+        default="file" if not suppress_defaults else argparse.SUPPRESS,
+        help="Code provider (file, inline, or plugin)",
+    )
+    parser.add_argument("--provider-base-path", default=default, help="Base path for file provider")
 
 
 def _add_common_flags_recursive(parser: argparse.ArgumentParser) -> None:
-    _add_common_flags(parser)
+    _add_common_flags(parser, suppress_defaults=True)
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             for sub in action.choices.values():

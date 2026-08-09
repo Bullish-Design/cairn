@@ -447,6 +447,64 @@ async def test_undo_refused_when_tree_changed_after_accept(tmp_path: Path) -> No
 
 
 @pytest.mark.integration
+async def test_undo_after_add_deletes_added_file(tmp_path: Path) -> None:
+    """P2.3: an accept that *created* a file must be reversible.  The added
+    path's accepted state is presence (undo = delete), so a correct accept is
+    not misread as drift; undo removes the file and the tree is byte-identical
+    to the pre-accept state."""
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"a.txt": "v1\n"},
+        agent_files={"a.txt": "v1\n", "brand_new.txt": "agent created\n"},
+        written=["brand_new.txt"],  # absent at run start: undo = delete
+    )
+    try:
+        stats = await orch.accept_agent(agent_id)
+        assert stats == {"files_written": 1, "files_deleted": 0}
+        assert (project / "brand_new.txt").read_text(encoding="utf-8") == "agent created\n"
+
+        undo_stats = await orch.undo_accept(agent_id)
+        assert undo_stats == {"restored": 0, "deleted": 1}
+        # Byte-identical to the pre-accept tree.
+        assert (project / "brand_new.txt").exists() is False
+        assert (project / "a.txt").read_text(encoding="utf-8") == "v1\n"
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
+async def test_undo_after_add_refused_when_added_file_edited(tmp_path: Path) -> None:
+    """P2.3: undo must not delete a file that was added by the accept but
+    edited afterwards — that is a later human edit, and undoing it would
+    discard work.  The post-accept digest of the added path is validated the
+    same way restore paths are."""
+    orch, agent_id, project, bin_ws = await _setup_reviewing_agent(
+        tmp_path,
+        project_files={"a.txt": "v1\n"},
+        agent_files={"a.txt": "v1\n", "brand_new.txt": "agent created\n"},
+        written=["brand_new.txt"],
+    )
+    try:
+        await orch.accept_agent(agent_id)
+        assert (project / "brand_new.txt").read_text(encoding="utf-8") == "agent created\n"
+
+        # A human edits the added file afterwards.
+        (project / "brand_new.txt").write_text("human edited\n", encoding="utf-8")
+
+        with pytest.raises(WorkspaceMergeError) as excinfo:
+            await orch.undo_accept(agent_id)
+        assert excinfo.value.error_code == "UNDO_STALE_BASE"
+        assert "brand_new.txt" in excinfo.value.context.get("stale_paths", [])
+
+        # The human edit survives and the undo record is kept.
+        assert (project / "brand_new.txt").read_text(encoding="utf-8") == "human edited\n"
+        undo_repo = bin_ws.kv.repository(prefix="", model_type=UndoRecord)
+        assert await undo_repo.load(f"undo:{agent_id}") is not None
+    finally:
+        await _safe_close(bin_ws)
+
+
+@pytest.mark.integration
 async def test_interrupted_accept_rolls_back_on_restart(tmp_path: Path) -> None:
     """Review §3.2: a leftover ACCEPTING journal entry (process died mid-apply)
     rolls the tree back from the undo snapshot and fails the agent on the next

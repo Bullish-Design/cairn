@@ -109,6 +109,9 @@ class VersionConflictError(LifecycleError, RecoverableError):
 class ProviderError(CairnError):
     """Base class for code provider errors."""
 
+    def _default_error_code(self) -> str:
+        return "PROVIDER_ERROR"
+
 
 class CodeProviderError(ProviderError):
     """Legacy exception - kept for backward compatibility."""

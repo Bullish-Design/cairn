@@ -122,6 +122,41 @@ def test_cli_invalid_command() -> None:
         cli.main(["unknown-command"])
 
 
+def test_common_flags_bind_before_and_after_subcommand() -> None:
+    """SPEC: the --project-root/--cairn-home/provider flags work on every
+    command.  Both positions must bind — a flag given *before* the subcommand
+    must not be silently discarded when the subparser's own defaults are
+    written into the shared namespace."""
+    parser = cli.build_parser()
+
+    before = parser.parse_args(["--cairn-home", "/tmp/BEFORE", "--project-root", "/tmp/PBEFORE", "list-agents"])
+    assert before.project_root == "/tmp/PBEFORE"
+    assert before.cairn_home == "/tmp/BEFORE"
+
+    after = parser.parse_args(["list-agents", "--cairn-home", "/tmp/AFTER", "--project-root", "/tmp/PAFTER"])
+    assert after.project_root == "/tmp/PAFTER"
+    assert after.cairn_home == "/tmp/AFTER"
+
+    # Both positions: the later (subcommand-side) value wins, as with any
+    # repeated option.
+    both = parser.parse_args(
+        ["--cairn-home", "/tmp/BEFORE", "--project-root", "/tmp/PBEFORE", "list-agents"]
+        + ["--cairn-home", "/tmp/AFTER", "--project-root", "/tmp/PAFTER"]
+    )
+    assert both.project_root == "/tmp/PAFTER"
+    assert both.cairn_home == "/tmp/AFTER"
+
+    none = parser.parse_args(["list-agents"])
+    assert none.project_root is None
+    assert none.cairn_home is None
+
+    # Provider flags bind in both positions too.
+    provider_before = parser.parse_args(["--provider", "inline", "list-agents"])
+    assert provider_before.provider == "inline"
+    provider_after = parser.parse_args(["list-agents", "--provider", "inline"])
+    assert provider_after.provider == "inline"
+
+
 def _seed_cli_workspaces(project_root: Any) -> None:
     """Create stable.db + agent-1.db + my.db with content under project_root/.agentfs."""
 
