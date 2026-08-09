@@ -53,7 +53,7 @@ class Narrator:
     def say(self, markdown: str) -> None:
         """Dedented prose paragraph(s); blank lines become paragraph breaks."""
         body = textwrap.dedent(markdown).strip()
-        self._write(body + "\n")
+        self._write("\n" + body + "\n")
 
     def code(self, source: str, lang: str = "python") -> None:
         """Show source the reader will type (code fences, not captures)."""
