@@ -233,3 +233,6 @@ __marimo__/
 
 # Vendored upstream source (fsdantic/agentfs) — keep local copy, not tracked
 .context/
+
+# Demo walkthrough scratch state (fixture, homes, generated transcript)
+/demo/out/
