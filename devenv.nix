@@ -68,10 +68,26 @@ in
   '';
 
   # https://devenv.sh/tasks/
-  # tasks = {
-  #   "myproj:setup".exec = "mytool build";
-  #   "devenv:enterShell".after = [ "myproj:setup" ];
-  # };
+  #
+  # The two task names the `base` group calls (groups/base/README.md). devenv
+  # owns each implementation; Dagu owns the composition (§6).
+  #
+  # `base:test` mirrors `enterTest`'s own gate: sandbox-forced, with the
+  # coverage floor enforced. The venv is not on PATH, hence `uv run --extra dev`
+  # (STAGE_7_LOG.md, wave 2b); the sandbox paths come from the shell env.
+  devman = {
+    enable = true;
+    project = "cairn";
+    groups = [ "base" ];
+  };
+
+  tasks = {
+    "cairn:lint".exec = "uv run --extra dev ruff check src tests";
+    "cairn:test".exec = "CAIRN_REQUIRE_SANDBOX_TESTS=1 uv run --extra dev pytest -q --cov=cairn --cov-report=term-missing";
+
+    "base:check".after = [ "cairn:lint" ];
+    "base:test".after = [ "cairn:test" ];
+  };
 
   # https://devenv.sh/tests/
   enterTest = ''
